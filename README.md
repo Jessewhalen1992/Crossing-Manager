@@ -1,2 +1,0 @@
-# Crossing-Manager
-manages xings
