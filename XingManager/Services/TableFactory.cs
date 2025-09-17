@@ -19,6 +19,16 @@ namespace XingManager.Services
         {
         }
 
+        private static void SetCellText(Table t, int row, int col, string text, double height, ObjectId textStyleId, CellAlignment align = CellAlignment.MiddleLeft)
+        {
+            var cell = t.Cells[row, col];
+            cell.Contents.Clear();
+            cell.TextString = text ?? string.Empty;
+            cell.TextHeight = height;
+            cell.TextStyleId = textStyleId;
+            cell.Alignment = align;
+        }
+
         public ObjectId EnsureTableStyle(Database db, Transaction tr)
         {
             if (db == null)
@@ -73,11 +83,12 @@ namespace XingManager.Services
             table.Columns[3].Width = 200.0;
             table.Columns[4].Width = 120.0;
 
+            var textStyleId = db.Textstyle;
+            const double textHeight = 10.0;
             var headers = new[] { "XING", "OWNER", "DESCRIPTION", "LOCATION", "DWG_REF" };
             for (var col = 0; col < headers.Length; col++)
             {
-                table.Cells[0, col].TextHeight = 10.0;
-                table.Cells[0, col].TextString = headers[col];
+                SetCellText(table, 0, col, headers[col], textHeight, textStyleId);
             }
 
             for (var row = 0; row < recordList.Count; row++)
@@ -85,15 +96,11 @@ namespace XingManager.Services
                 var record = recordList[row];
                 var rowIndex = row + 1;
 
-                table.Cells[rowIndex, 0].TextString = record.Crossing ?? string.Empty;
-                table.Cells[rowIndex, 1].TextString = record.Owner ?? string.Empty;
-                table.Cells[rowIndex, 2].TextString = record.Description ?? string.Empty;
-                table.Cells[rowIndex, 3].TextString = record.Location ?? string.Empty;
-                table.Cells[rowIndex, 4].TextString = record.DwgRef ?? string.Empty;
-                for (var col = 0; col < table.NumColumns; col++)
-                {
-                    table.Cells[rowIndex, col].TextHeight = 10.0;
-                }
+                SetCellText(table, rowIndex, 0, record.Crossing, textHeight, textStyleId);
+                SetCellText(table, rowIndex, 1, record.Owner, textHeight, textStyleId);
+                SetCellText(table, rowIndex, 2, record.Description, textHeight, textStyleId);
+                SetCellText(table, rowIndex, 3, record.Location, textHeight, textStyleId);
+                SetCellText(table, rowIndex, 4, record.DwgRef, textHeight, textStyleId);
             }
 
             table.GenerateLayout();
@@ -120,24 +127,19 @@ namespace XingManager.Services
             table.Columns[1].Width = 144.5;
             table.Columns[2].Width = 393.5;
 
-            table.Cells[0, 0].TextHeight = 10.0;
-            table.Cells[0, 0].TextString = "XING";
-            table.Cells[0, 1].TextHeight = 10.0;
-            table.Cells[0, 1].TextString = "OWNER";
-            table.Cells[0, 2].TextHeight = 10.0;
-            table.Cells[0, 2].TextString = "DESCRIPTION";
+            var textStyleId = db.Textstyle;
+            const double textHeight = 10.0;
+            SetCellText(table, 0, 0, "XING", textHeight, textStyleId);
+            SetCellText(table, 0, 1, "OWNER", textHeight, textStyleId);
+            SetCellText(table, 0, 2, "DESCRIPTION", textHeight, textStyleId);
 
             for (var row = 0; row < filtered.Count; row++)
             {
                 var record = filtered[row];
                 var rowIndex = row + 1;
-                table.Cells[rowIndex, 0].TextString = record.Crossing ?? string.Empty;
-                table.Cells[rowIndex, 1].TextString = record.Owner ?? string.Empty;
-                table.Cells[rowIndex, 2].TextString = record.Description ?? string.Empty;
-                for (var col = 0; col < table.NumColumns; col++)
-                {
-                    table.Cells[rowIndex, col].TextHeight = 10.0;
-                }
+                SetCellText(table, rowIndex, 0, record.Crossing, textHeight, textStyleId);
+                SetCellText(table, rowIndex, 1, record.Owner, textHeight, textStyleId);
+                SetCellText(table, rowIndex, 2, record.Description, textHeight, textStyleId);
             }
 
             table.GenerateLayout();
@@ -165,21 +167,18 @@ namespace XingManager.Services
             table.Columns[2].Width = 90.0;
             table.Columns[3].Width = 90.0;
 
+            var textStyleId = db.Textstyle;
+            const double textHeight = 10.0;
             var headers = new[] { "XING", "DESCRIPTION", "LAT", "LONG" };
             for (var col = 0; col < headers.Length; col++)
             {
-                table.Cells[0, col].TextString = headers[col];
-                table.Cells[0, col].TextHeight = 10.0;
+                SetCellText(table, 0, col, headers[col], textHeight, textStyleId);
             }
 
-            table.Cells[1, 0].TextString = record.Crossing ?? string.Empty;
-            table.Cells[1, 1].TextString = record.Description ?? string.Empty;
-            table.Cells[1, 2].TextString = record.Lat ?? string.Empty;
-            table.Cells[1, 3].TextString = record.Long ?? string.Empty;
-            for (var col = 0; col < table.NumColumns; col++)
-            {
-                table.Cells[1, col].TextHeight = 10.0;
-            }
+            SetCellText(table, 1, 0, record.Crossing, textHeight, textStyleId);
+            SetCellText(table, 1, 1, record.Description, textHeight, textStyleId);
+            SetCellText(table, 1, 2, record.Lat, textHeight, textStyleId);
+            SetCellText(table, 1, 3, record.Long, textHeight, textStyleId);
 
             table.GenerateLayout();
             return table;

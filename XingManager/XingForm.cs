@@ -11,6 +11,7 @@ using Autodesk.AutoCAD.EditorInput;
 using Autodesk.AutoCAD.Geometry;
 using XingManager.Models;
 using XingManager.Services;
+using WinFormsFlowDirection = System.Windows.Forms.FlowDirection;
 
 namespace XingManager
 {
@@ -599,7 +600,7 @@ namespace XingManager
                 var panel = new FlowLayoutPanel
                 {
                     Dock = DockStyle.Bottom,
-                    FlowDirection = FlowDirection.RightToLeft,
+                    FlowDirection = WinFormsFlowDirection.RightToLeft,
                     Height = 40
                 };
 
@@ -630,18 +631,17 @@ namespace XingManager
             using (var tr = _doc.Database.TransactionManager.StartTransaction())
             {
                 var blockTable = (BlockTable)tr.GetObject(_doc.Database.BlockTableId, OpenMode.ForRead);
-                var tableClass = RXClass.GetClass(typeof(Table));
                 foreach (ObjectId btrId in blockTable)
                 {
                     var btr = (BlockTableRecord)tr.GetObject(btrId, OpenMode.ForRead);
                     foreach (ObjectId entId in btr)
                     {
-                        if (!entId.ObjectClass.IsDerivedFrom(tableClass))
+                        var ent = tr.GetObject(entId, OpenMode.ForRead) as Entity;
+                        if (ent is not Table table)
                         {
                             continue;
                         }
 
-                        var table = (Table)tr.GetObject(entId, OpenMode.ForRead);
                         if (_tableSync.IdentifyTable(table, tr) != TableSync.XingTableType.LatLong)
                         {
                             continue;

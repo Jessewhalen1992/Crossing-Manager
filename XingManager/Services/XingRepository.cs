@@ -161,44 +161,35 @@ namespace XingManager.Services
 
             using (_doc.LockDocument())
             {
-                _doc.StartUndoMark();
-                try
+                using (var tr = db.TransactionManager.StartTransaction())
                 {
-                    using (var tr = db.TransactionManager.StartTransaction())
+                    foreach (var record in records)
                     {
-                        foreach (var record in records)
+                        foreach (var instanceId in record.AllInstances.Distinct())
                         {
-                            foreach (var instanceId in record.AllInstances.Distinct())
+                            if (!instanceId.IsValid)
                             {
-                                if (!instanceId.IsValid)
-                                {
-                                    continue;
-                                }
-
-                                var br = tr.GetObject(instanceId, OpenMode.ForWrite) as BlockReference;
-                                if (br == null)
-                                {
-                                    continue;
-                                }
-
-                                WriteAttribute(tr, br, "CROSSING", record.Crossing);
-                                WriteAttribute(tr, br, "OWNER", record.Owner);
-                                WriteAttribute(tr, br, "DESCRIPTION", record.Description);
-                                WriteAttribute(tr, br, "LOCATION", record.Location);
-                                WriteAttribute(tr, br, "DWG_REF", record.DwgRef);
-                                SetLatLong(br, tr, record.Lat, record.Long);
+                                continue;
                             }
+
+                            var br = tr.GetObject(instanceId, OpenMode.ForWrite) as BlockReference;
+                            if (br == null)
+                            {
+                                continue;
+                            }
+
+                            WriteAttribute(tr, br, "CROSSING", record.Crossing);
+                            WriteAttribute(tr, br, "OWNER", record.Owner);
+                            WriteAttribute(tr, br, "DESCRIPTION", record.Description);
+                            WriteAttribute(tr, br, "LOCATION", record.Location);
+                            WriteAttribute(tr, br, "DWG_REF", record.DwgRef);
+                            SetLatLong(br, tr, record.Lat, record.Long);
                         }
-
-                        tr.Commit();
                     }
+                    tr.Commit();
+                }
 
-                    tableSync.UpdateAllTables(_doc, records);
-                }
-                finally
-                {
-                    _doc.EndUndoMark();
-                }
+                tableSync.UpdateAllTables(_doc, records);
             }
         }
 

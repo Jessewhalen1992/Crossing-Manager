@@ -49,19 +49,18 @@ namespace XingManager.Services
             using (var tr = db.TransactionManager.StartTransaction())
             {
                 var blockTable = (BlockTable)tr.GetObject(db.BlockTableId, OpenMode.ForRead);
-                var tableClass = RXClass.GetClass(typeof(Table));
 
                 foreach (ObjectId btrId in blockTable)
                 {
                     var btr = (BlockTableRecord)tr.GetObject(btrId, OpenMode.ForRead);
                     foreach (ObjectId entId in btr)
                     {
-                        if (!entId.ObjectClass.IsDerivedFrom(tableClass))
+                        var ent = tr.GetObject(entId, OpenMode.ForRead) as Entity;
+                        if (ent is not Table table)
                         {
                             continue;
                         }
 
-                        var table = (Table)tr.GetObject(entId, OpenMode.ForRead);
                         var type = IdentifyTable(table, tr);
                         if (type == XingTableType.Unknown)
                         {
@@ -260,6 +259,33 @@ namespace XingManager.Services
             return text;
         }
 
+        private static void SetCellCrossingValue(Table t, int row, int col, string crossingText)
+        {
+            var mi = typeof(Table).GetMethod(
+                "SetBlockAttributeValue",
+                new[] { typeof(int), typeof(int), typeof(string), typeof(string) });
+
+            if (mi != null)
+            {
+                try
+                {
+                    mi.Invoke(t, new object[] { row, col, "CROSSING", crossingText ?? string.Empty });
+                    return;
+                }
+                catch
+                {
+                    // fall back to text
+                }
+            }
+
+            if (t.Cells[row, col].ContentType != ContentType.Text)
+            {
+                t.SetCellType(row, col, CellType.TextCell);
+            }
+
+            t.Cells[row, col].TextString = crossingText ?? string.Empty;
+        }
+
         private static void SetCellValue(Cell cell, string value)
         {
             if (cell == null)
@@ -268,14 +294,6 @@ namespace XingManager.Services
             }
 
             cell.TextString = value ?? string.Empty;
-            try
-            {
-                cell.BlockAttributeValue = value ?? string.Empty;
-            }
-            catch
-            {
-                // Some cells may not be block-based; ignore failures.
-            }
         }
 
         private void UpdateMainTable(Table table, IDictionary<string, CrossingRecord> byKey)
@@ -303,7 +321,7 @@ namespace XingManager.Services
                     continue;
                 }
 
-                SetCellValue(table.Cells[row, 0], record.Crossing);
+                SetCellCrossingValue(table, row, 0, record.Crossing);
                 SetCellValue(table.Cells[row, 1], record.Owner);
                 SetCellValue(table.Cells[row, 2], record.Description);
                 SetCellValue(table.Cells[row, 3], record.Location);
@@ -333,7 +351,7 @@ namespace XingManager.Services
                     continue;
                 }
 
-                SetCellValue(table.Cells[row, 0], record.Crossing);
+                SetCellCrossingValue(table, row, 0, record.Crossing);
                 SetCellValue(table.Cells[row, 1], record.Owner);
                 SetCellValue(table.Cells[row, 2], record.Description);
             }
@@ -362,7 +380,7 @@ namespace XingManager.Services
                     continue;
                 }
 
-                SetCellValue(table.Cells[row, 0], record.Crossing);
+                SetCellCrossingValue(table, row, 0, record.Crossing);
                 SetCellValue(table.Cells[row, 1], record.Description);
                 SetCellValue(table.Cells[row, 2], record.Lat);
                 SetCellValue(table.Cells[row, 3], record.Long);
