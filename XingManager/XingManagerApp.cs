@@ -40,6 +40,7 @@ namespace XingManager
                     _palette.Remove(0);
                 }
 
+                _form?.Dispose();
                 _palette.Dispose();
                 _palette = null;
             }
@@ -103,14 +104,16 @@ namespace XingManager
             EnsurePalette();
             if (_palette.Count > 0)
             {
-                var existing = _palette[0] as System.Windows.Forms.Control;
                 _palette.Remove(0);
-                existing?.Dispose();
+                _form?.Dispose();
             }
 
             _palette.Add("Crossings", form);
             _palette.Visible = true;
-            _palette.Activate();
+            if (_palette.Count > 0)
+            {
+                _palette.Activate(0);
+            }
         }
 
         private void EnsurePalette()
@@ -135,7 +138,10 @@ namespace XingManager
             }
 
             _palette.Visible = true;
-            _palette.Activate();
+            if (_palette.Count > 0)
+            {
+                _palette.Activate(0);
+            }
         }
     }
 }

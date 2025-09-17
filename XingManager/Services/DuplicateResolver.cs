@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Windows.Forms;
 using Autodesk.AutoCAD.DatabaseServices;
+using WinFormsFlowDirection = System.Windows.Forms.FlowDirection;
 using XingManager.Models;
 
 namespace XingManager.Services
@@ -190,7 +191,7 @@ namespace XingManager.Services
                 var buttonPanel = new FlowLayoutPanel
                 {
                     Dock = DockStyle.Bottom,
-                    FlowDirection = FlowDirection.RightToLeft,
+                    FlowDirection = WinFormsFlowDirection.RightToLeft,
                     Padding = new Padding(10),
                     Height = 50
                 };
