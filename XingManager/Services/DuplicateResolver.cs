@@ -107,15 +107,8 @@ namespace XingManager.Services
                 // Build UI candidates
                 foreach (var objectId in record.AllInstances)
                 {
-                    var ctx = GetContext(contexts, objectId); // always non-null
-
-                    // Prefer per-instance values when present; fall back to record values
-                    var owner = string.IsNullOrEmpty(ctx.Owner) ? record.Owner : ctx.Owner;
-                    var description = string.IsNullOrEmpty(ctx.Description) ? record.Description : ctx.Description;
-                    var location = string.IsNullOrEmpty(ctx.Location) ? record.Location : ctx.Location;
-                    var dwgRef = string.IsNullOrEmpty(ctx.DwgRef) ? record.DwgRef : ctx.DwgRef;
-                    var lat = string.IsNullOrEmpty(ctx.Lat) ? record.Lat : ctx.Lat;
-                    var lng = string.IsNullOrEmpty(ctx.Long) ? record.Long : ctx.Long;
+                    // Always use per-instance values so differences are visible in the UI
+                    var ctx = GetContext(contexts, objectId);
 
                     list.Add(new DuplicateCandidate
                     {
@@ -123,12 +116,12 @@ namespace XingManager.Services
                         CrossingKey = record.CrossingKey,
                         ObjectId = objectId,
                         Layout = ctx.SpaceName,
-                        Owner = owner ?? string.Empty,
-                        Description = description ?? string.Empty,
-                        Location = location ?? string.Empty,
-                        DwgRef = dwgRef ?? string.Empty,
-                        Lat = lat ?? string.Empty,
-                        Long = lng ?? string.Empty,
+                        Owner = ctx.Owner ?? string.Empty,
+                        Description = ctx.Description ?? string.Empty,
+                        Location = ctx.Location ?? string.Empty,
+                        DwgRef = ctx.DwgRef ?? string.Empty,
+                        Lat = ctx.Lat ?? string.Empty,
+                        Long = ctx.Long ?? string.Empty,
                         Canonical = objectId == record.CanonicalInstance
                     });
                 }
@@ -146,7 +139,7 @@ namespace XingManager.Services
                     return ctx;
             }
 
-            // Fallback context
+            // Fallback context (empty values)
             return new InstanceContext
             {
                 ObjectId = id,
@@ -317,8 +310,8 @@ namespace XingManager.Services
                 {
                     var candidate = (DuplicateCandidate)_binding[e.RowIndex];
 
-                    // Make the clicked row the canonical one within its crossing group,
-                    // and propagate its values to all other candidates of the same group for preview.
+                    // Make the clicked row canonical within its crossing group and
+                    // propagate its values to others in the preview list.
                     foreach (var item in _candidates.Where(c => c.CrossingKey == candidate.CrossingKey))
                     {
                         item.Canonical = false;

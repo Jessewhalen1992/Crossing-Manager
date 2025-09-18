@@ -34,40 +34,13 @@ namespace XingManager
 
         public XingForm(Document doc, XingRepository repository, TableSync tableSync, LayoutUtils layoutUtils, TableFactory tableFactory, Serde serde, DuplicateResolver duplicateResolver)
         {
-            if (doc == null)
-            {
-                throw new ArgumentNullException("doc");
-            }
-
-            if (repository == null)
-            {
-                throw new ArgumentNullException("repository");
-            }
-
-            if (tableSync == null)
-            {
-                throw new ArgumentNullException("tableSync");
-            }
-
-            if (layoutUtils == null)
-            {
-                throw new ArgumentNullException("layoutUtils");
-            }
-
-            if (tableFactory == null)
-            {
-                throw new ArgumentNullException("tableFactory");
-            }
-
-            if (serde == null)
-            {
-                throw new ArgumentNullException("serde");
-            }
-
-            if (duplicateResolver == null)
-            {
-                throw new ArgumentNullException("duplicateResolver");
-            }
+            if (doc == null) throw new ArgumentNullException("doc");
+            if (repository == null) throw new ArgumentNullException("repository");
+            if (tableSync == null) throw new ArgumentNullException("tableSync");
+            if (layoutUtils == null) throw new ArgumentNullException("layoutUtils");
+            if (tableFactory == null) throw new ArgumentNullException("tableFactory");
+            if (serde == null) throw new ArgumentNullException("serde");
+            if (duplicateResolver == null) throw new ArgumentNullException("duplicateResolver");
 
             InitializeComponent();
             _doc = doc;
@@ -151,11 +124,7 @@ namespace XingManager
 
         private void GridCrossingsOnCellValueChanged(object sender, DataGridViewCellEventArgs e)
         {
-            if (_isScanning)
-            {
-                return;
-            }
-
+            if (_isScanning) return;
             _isDirty = true;
         }
 
@@ -164,6 +133,7 @@ namespace XingManager
             RescanRecords();
         }
 
+        // ===== Updated to auto-apply after duplicate resolution =====
         private void RescanRecords()
         {
             _isScanning = true;
@@ -174,9 +144,27 @@ namespace XingManager
                 _contexts = result.InstanceContexts ?? new Dictionary<ObjectId, DuplicateResolver.InstanceContext>();
                 gridCrossings.DataSource = _records;
 
-                _duplicateResolver.ResolveDuplicates(_records, _contexts);
+                // Let the user choose canonicals if duplicates exist
+                var ok = _duplicateResolver.ResolveDuplicates(_records, _contexts);
+                if (!ok)
+                {
+                    gridCrossings.Refresh();
+                    _isDirty = false;
+                    return;
+                }
+
+                // Immediately push chosen canonical values to ALL instances & tables
+                try
+                {
+                    _repository.ApplyChanges(_records.ToList(), _tableSync);
+                    _isDirty = false; // synced
+                }
+                catch (Exception applyEx)
+                {
+                    MessageBox.Show(applyEx.Message, "Crossing Manager", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                }
+
                 gridCrossings.Refresh();
-                _isDirty = false;
             }
             catch (Exception ex)
             {
@@ -195,10 +183,7 @@ namespace XingManager
 
         private void ApplyChangesToDrawing()
         {
-            if (!ValidateRecords())
-            {
-                return;
-            }
+            if (!ValidateRecords()) return;
 
             try
             {
@@ -242,10 +227,7 @@ namespace XingManager
 
         private static bool ValidateLatLongValue(string value)
         {
-            if (string.IsNullOrWhiteSpace(value))
-            {
-                return true;
-            }
+            if (string.IsNullOrWhiteSpace(value)) return true;
 
             double parsed;
             return double.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out parsed);
@@ -253,11 +235,7 @@ namespace XingManager
 
         private void btnAdd_Click(object sender, EventArgs e)
         {
-            var record = new CrossingRecord
-            {
-                Crossing = GenerateNextCrossingName()
-            };
-
+            var record = new CrossingRecord { Crossing = GenerateNextCrossingName() };
             _records.Add(record);
             PromptPlacement(record);
             _isDirty = true;
@@ -275,19 +253,12 @@ namespace XingManager
             };
 
             var res = _doc.Editor.GetInteger(opts);
-            if (res.Status != PromptStatus.OK)
-            {
-                return;
-            }
+            if (res.Status != PromptStatus.OK) return;
 
             var index = Math.Min(Math.Max(res.Value - 1, 0), _records.Count);
             ShiftCrossings(index, 1);
 
-            var record = new CrossingRecord
-            {
-                Crossing = GenerateCrossingName(index)
-            };
-
+            var record = new CrossingRecord { Crossing = GenerateCrossingName(index) };
             _records.Insert(index, record);
             PromptPlacement(record);
             _isDirty = true;
@@ -303,10 +274,7 @@ namespace XingManager
             }
 
             var confirm = MessageBox.Show(string.Format(CultureInfo.InvariantCulture, "Delete crossing {0}?", record.Crossing), "Crossing Manager", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
-            if (confirm != DialogResult.Yes)
-            {
-                return;
-            }
+            if (confirm != DialogResult.Yes) return;
 
             try
             {
@@ -385,7 +353,8 @@ namespace XingManager
             var map = _records.ToDictionary(r => r.CrossingKey, r => r, StringComparer.OrdinalIgnoreCase);
             foreach (var record in imported)
             {
-                if (map.TryGetValue(record.CrossingKey, out var existing))
+                CrossingRecord existing;
+                if (map.TryGetValue(record.CrossingKey, out existing))
                 {
                     existing.Owner = record.Owner;
                     existing.Description = record.Description;
@@ -435,11 +404,7 @@ namespace XingManager
 
         private CrossingRecord GetSelectedRecord()
         {
-            if (gridCrossings.CurrentRow == null)
-            {
-                return null;
-            }
-
+            if (gridCrossings.CurrentRow == null) return null;
             return gridCrossings.CurrentRow.DataBoundItem as CrossingRecord;
         }
 
@@ -449,12 +414,8 @@ namespace XingManager
             foreach (var record in _records)
             {
                 var token = CrossingRecord.ParseCrossingNumber(record.Crossing);
-                if (token.Number > max)
-                {
-                    max = token.Number;
-                }
+                if (token.Number > max) max = token.Number;
             }
-
             return string.Format(CultureInfo.InvariantCulture, "X{0}", max + 1);
         }
 
@@ -465,10 +426,7 @@ namespace XingManager
 
         private void ShiftCrossings(int startIndex, int delta)
         {
-            if (delta == 0)
-            {
-                return;
-            }
+            if (delta == 0) return;
 
             for (var i = startIndex; i < _records.Count; i++)
             {
@@ -482,18 +440,11 @@ namespace XingManager
 
         private static string ExtractPrefix(string crossing)
         {
-            if (string.IsNullOrEmpty(crossing))
-            {
-                return "X";
-            }
+            if (string.IsNullOrEmpty(crossing)) return "X";
 
             var chars = crossing.TakeWhile(c => !char.IsDigit(c)).ToArray();
             var prefix = new string(chars);
-            if (string.IsNullOrEmpty(prefix))
-            {
-                prefix = "X";
-            }
-
+            if (string.IsNullOrEmpty(prefix)) prefix = "X";
             return prefix;
         }
 
@@ -523,10 +474,7 @@ namespace XingManager
             }
 
             var selected = PromptForChoice("Select DWG_REF", choices);
-            if (string.IsNullOrEmpty(selected))
-            {
-                return;
-            }
+            if (string.IsNullOrEmpty(selected)) return;
 
             try
             {
@@ -541,10 +489,7 @@ namespace XingManager
                 }
 
                 var pointRes = _doc.Editor.GetPoint("\nSpecify insertion point for Crossing Page Table:");
-                if (pointRes.Status != PromptStatus.OK)
-                {
-                    return;
-                }
+                if (pointRes.Status != PromptStatus.OK) return;
 
                 using (_doc.LockDocument())
                 using (var tr = _doc.Database.TransactionManager.StartTransaction())
@@ -568,15 +513,11 @@ namespace XingManager
         private string BuildLocationText(string dwgRef)
         {
             var record = _records.FirstOrDefault(r => string.Equals(r.DwgRef, dwgRef, StringComparison.OrdinalIgnoreCase) && !string.IsNullOrWhiteSpace(r.Location));
-            if (record == null)
-            {
-                return string.Empty;
-            }
+            if (record == null) return string.Empty;
 
-            if (_layoutUtils.TryFormatMeridianLocation(record.Location, out var formatted))
-            {
+            string formatted;
+            if (_layoutUtils.TryFormatMeridianLocation(record.Location, out formatted))
                 return formatted;
-            }
 
             return record.Location;
         }
@@ -599,10 +540,7 @@ namespace XingManager
                     DropDownStyle = ComboBoxStyle.DropDownList
                 };
                 combo.Items.AddRange(choices.Cast<object>().ToArray());
-                if (choices.Count > 0)
-                {
-                    combo.SelectedIndex = 0;
-                }
+                if (choices.Count > 0) combo.SelectedIndex = 0;
 
                 var panel = new FlowLayoutPanel
                 {
@@ -645,15 +583,10 @@ namespace XingManager
                     {
                         var ent = tr.GetObject(entId, OpenMode.ForRead) as Entity;
                         var table = ent as Table;
-                        if (table == null)
-                        {
-                            continue;
-                        }
+                        if (table == null) continue;
 
                         if (_tableSync.IdentifyTable(table, tr) != TableSync.XingTableType.LatLong)
-                        {
                             continue;
-                        }
 
                         for (var row = 1; row < table.Rows.Count; row++)
                         {
@@ -665,16 +598,10 @@ namespace XingManager
                             }
                         }
 
-                        if (existing != null)
-                        {
-                            break;
-                        }
+                        if (existing != null) break;
                     }
 
-                    if (existing != null)
-                    {
-                        break;
-                    }
+                    if (existing != null) break;
                 }
 
                 tr.Commit();
@@ -687,10 +614,7 @@ namespace XingManager
             }
 
             var pointRes = _doc.Editor.GetPoint("\nSpecify insertion point for LAT/LONG table:");
-            if (pointRes.Status != PromptStatus.OK)
-            {
-                return;
-            }
+            if (pointRes.Status != PromptStatus.OK) return;
 
             using (_doc.LockDocument())
             using (var tr = _doc.Database.TransactionManager.StartTransaction())

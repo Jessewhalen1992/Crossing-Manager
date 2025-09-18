@@ -89,7 +89,8 @@ namespace XingManager.Services
                         TryGetLatLong(br, tr, out lat, out lng);
 
                         var crossingKey = crossing.Trim().ToUpperInvariant();
-                        if (!records.TryGetValue(crossingKey, out var record))
+                        CrossingRecord record;
+                        if (!records.TryGetValue(crossingKey, out record))
                         {
                             record = new CrossingRecord
                             {
@@ -107,6 +108,8 @@ namespace XingManager.Services
                         }
 
                         record.AllInstances.Add(entId);
+
+                        // Capture per-instance values so the duplicate dialog shows true differences
                         contexts[entId] = new DuplicateResolver.InstanceContext
                         {
                             ObjectId = entId,
@@ -159,15 +162,8 @@ namespace XingManager.Services
 
         public void ApplyChanges(IList<CrossingRecord> records, TableSync tableSync)
         {
-            if (records == null)
-            {
-                throw new ArgumentNullException("records");
-            }
-
-            if (tableSync == null)
-            {
-                throw new ArgumentNullException("tableSync");
-            }
+            if (records == null) throw new ArgumentNullException("records");
+            if (tableSync == null) throw new ArgumentNullException("tableSync");
 
             var db = _doc.Database;
 
@@ -180,15 +176,11 @@ namespace XingManager.Services
                         foreach (var instanceId in record.AllInstances.Distinct())
                         {
                             if (!instanceId.IsValid)
-                            {
                                 continue;
-                            }
 
                             var br = tr.GetObject(instanceId, OpenMode.ForWrite) as BlockReference;
                             if (br == null)
-                            {
                                 continue;
-                            }
 
                             WriteAttribute(tr, br, "CROSSING", record.Crossing);
                             WriteAttribute(tr, br, "OWNER", record.Owner);
@@ -208,9 +200,7 @@ namespace XingManager.Services
         public ObjectId InsertCrossing(CrossingRecord record, Point3d position)
         {
             if (record == null)
-            {
                 throw new ArgumentNullException("record");
-            }
 
             var db = _doc.Database;
 
@@ -220,9 +210,7 @@ namespace XingManager.Services
                 {
                     var blockTable = (BlockTable)tr.GetObject(db.BlockTableId, OpenMode.ForRead);
                     if (!blockTable.Has(BlockName))
-                    {
                         throw new InvalidOperationException("Block 'xing2' definition not found in this drawing—insert one or use INSERT to bring it in, then retry.");
-                    }
 
                     var blockId = blockTable[BlockName];
                     var modelSpace = (BlockTableRecord)tr.GetObject(blockTable[BlockTableRecord.ModelSpace], OpenMode.ForWrite);
@@ -238,9 +226,7 @@ namespace XingManager.Services
                         {
                             var attDef = tr.GetObject(attDefId, OpenMode.ForRead) as AttributeDefinition;
                             if (attDef == null || attDef.Constant)
-                            {
                                 continue;
-                            }
 
                             var attRef = new AttributeReference();
                             attRef.SetAttributeFromBlock(attDef, br.BlockTransform);
@@ -265,26 +251,18 @@ namespace XingManager.Services
 
         public void DeleteInstances(IEnumerable<ObjectId> instanceIds)
         {
-            if (instanceIds == null)
-            {
-                return;
-            }
+            if (instanceIds == null) return;
 
             using (_doc.LockDocument())
             using (var tr = _doc.Database.TransactionManager.StartTransaction())
             {
                 foreach (var id in instanceIds.Distinct())
                 {
-                    if (!id.IsValid)
-                    {
-                        continue;
-                    }
+                    if (!id.IsValid) continue;
 
                     var dbObject = tr.GetObject(id, OpenMode.ForWrite, false, true);
                     if (dbObject != null && !dbObject.IsErased)
-                    {
                         dbObject.Erase(true);
-                    }
                 }
 
                 tr.Commit();
@@ -295,65 +273,41 @@ namespace XingManager.Services
         {
             lat = string.Empty;
             lng = string.Empty;
-            if (br == null)
-            {
-                return false;
-            }
+            if (br == null) return false;
 
             if (br.ExtensionDictionary.IsNull)
-            {
                 return false;
-            }
 
             var dict = tr.GetObject(br.ExtensionDictionary, OpenMode.ForRead) as DBDictionary;
             if (dict == null || !dict.Contains(LatLongDictionaryKey))
-            {
                 return false;
-            }
 
             var xrec = tr.GetObject(dict.GetAt(LatLongDictionaryKey), OpenMode.ForRead) as Xrecord;
             if (xrec == null || xrec.Data == null)
-            {
                 return false;
-            }
 
             var values = xrec.Data.AsArray();
             if (values.Length >= 1)
-            {
                 lat = Convert.ToString(values[0].Value, CultureInfo.InvariantCulture);
-            }
 
             if (values.Length >= 2)
-            {
                 lng = Convert.ToString(values[1].Value, CultureInfo.InvariantCulture);
-            }
 
             return true;
         }
 
         public void SetLatLong(BlockReference br, Transaction tr, string lat, string lng)
         {
-            if (br == null)
-            {
-                throw new ArgumentNullException("br");
-            }
-
-            if (tr == null)
-            {
-                throw new ArgumentNullException("tr");
-            }
+            if (br == null) throw new ArgumentNullException("br");
+            if (tr == null) throw new ArgumentNullException("tr");
 
             if (br.ExtensionDictionary.IsNull)
-            {
                 br.CreateExtensionDictionary();
-            }
 
             var dict = (DBDictionary)tr.GetObject(br.ExtensionDictionary, OpenMode.ForWrite);
             Xrecord xrec;
             if (dict.Contains(LatLongDictionaryKey))
-            {
                 xrec = (Xrecord)tr.GetObject(dict.GetAt(LatLongDictionaryKey), OpenMode.ForWrite);
-            }
             else
             {
                 xrec = new Xrecord();
@@ -368,11 +322,7 @@ namespace XingManager.Services
 
         private static string GetBlockName(BlockReference br, Transaction tr)
         {
-            if (br == null)
-            {
-                return string.Empty;
-            }
-
+            if (br == null) return string.Empty;
             var btr = (BlockTableRecord)tr.GetObject(br.DynamicBlockTableRecord, OpenMode.ForRead);
             return btr.Name;
         }
@@ -380,24 +330,13 @@ namespace XingManager.Services
         private static Dictionary<string, string> ReadAttributes(BlockReference br, Transaction tr)
         {
             var values = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-            if (br.AttributeCollection == null)
-            {
-                return values;
-            }
+            if (br.AttributeCollection == null) return values;
 
             foreach (ObjectId attId in br.AttributeCollection)
             {
-                if (!attId.IsValid)
-                {
-                    continue;
-                }
-
+                if (!attId.IsValid) continue;
                 var attRef = tr.GetObject(attId, OpenMode.ForRead) as AttributeReference;
-                if (attRef == null)
-                {
-                    continue;
-                }
-
+                if (attRef == null) continue;
                 values[attRef.Tag] = attRef.TextString;
             }
 
@@ -406,33 +345,23 @@ namespace XingManager.Services
 
         private static string GetValue(IDictionary<string, string> dict, string key)
         {
-            if (dict != null && dict.TryGetValue(key, out var value))
-            {
+            string value;
+            if (dict != null && dict.TryGetValue(key, out value))
                 return value;
-            }
-
             return string.Empty;
         }
 
         private static void WriteAttribute(Transaction tr, BlockReference br, string tag, string value)
         {
-            if (br.AttributeCollection == null)
-            {
-                return;
-            }
+            if (br.AttributeCollection == null) return;
 
             foreach (ObjectId attId in br.AttributeCollection)
             {
                 var attRef = tr.GetObject(attId, OpenMode.ForWrite) as AttributeReference;
-                if (attRef == null)
-                {
-                    continue;
-                }
+                if (attRef == null) continue;
 
                 if (string.Equals(attRef.Tag, tag, StringComparison.OrdinalIgnoreCase))
-                {
                     attRef.TextString = value ?? string.Empty;
-                }
             }
         }
 
