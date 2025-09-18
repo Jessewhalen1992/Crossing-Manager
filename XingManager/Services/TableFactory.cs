@@ -31,21 +31,12 @@ namespace XingManager.Services
 
         public ObjectId EnsureTableStyle(Database db, Transaction tr)
         {
-            if (db == null)
-            {
-                throw new ArgumentNullException("db");
-            }
-
-            if (tr == null)
-            {
-                throw new ArgumentNullException("tr");
-            }
+            if (db == null) throw new ArgumentNullException("db");
+            if (tr == null) throw new ArgumentNullException("tr");
 
             var styleDict = (DBDictionary)tr.GetObject(db.TableStyleDictionaryId, OpenMode.ForRead);
             if (styleDict.Contains(TableStyleName))
-            {
                 return styleDict.GetAt(TableStyleName);
-            }
 
             styleDict.UpgradeOpen();
             var tableStyle = new TableStyle
@@ -53,10 +44,7 @@ namespace XingManager.Services
                 Name = TableStyleName
             };
 
-            // Configure to rely on document defaults for compatibility.
-            tableStyle.SetTextHeight(0, 0, 10.0);
-            tableStyle.SetTextStyle(0, 0, db.Textstyle);
-
+            // No SetTextHeight/SetTextStyle calls here; we format per-cell for 2014+ compatibility.
             var id = styleDict.SetAt(TableStyleName, tableStyle);
             tr.AddNewlyCreatedDBObject(tableStyle, true);
             return id;

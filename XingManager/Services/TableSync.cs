@@ -56,7 +56,8 @@ namespace XingManager.Services
                     foreach (ObjectId entId in btr)
                     {
                         var ent = tr.GetObject(entId, OpenMode.ForRead) as Entity;
-                        if (ent is not Table table)
+                        var table = ent as Table;
+                        if (table == null)
                         {
                             continue;
                         }
@@ -237,52 +238,14 @@ namespace XingManager.Services
         private static string ResolveCrossingKey(Cell cell)
         {
             if (cell == null)
-            {
                 return string.Empty;
-            }
 
-            var text = (cell.TextString ?? string.Empty).Trim();
-            if (!string.IsNullOrEmpty(text))
-            {
-                return text;
-            }
-
-            try
-            {
-                text = (cell.BlockAttributeValue ?? string.Empty).Trim();
-            }
-            catch
-            {
-                text = string.Empty;
-            }
-
-            return text;
+            return (cell.TextString ?? string.Empty).Trim();
         }
 
         private static void SetCellCrossingValue(Table t, int row, int col, string crossingText)
         {
-            var mi = typeof(Table).GetMethod(
-                "SetBlockAttributeValue",
-                new[] { typeof(int), typeof(int), typeof(string), typeof(string) });
-
-            if (mi != null)
-            {
-                try
-                {
-                    mi.Invoke(t, new object[] { row, col, "CROSSING", crossingText ?? string.Empty });
-                    return;
-                }
-                catch
-                {
-                    // fall back to text
-                }
-            }
-
-            if (t.Cells[row, col].ContentType != ContentType.Text)
-            {
-                t.SetCellType(row, col, CellType.TextCell);
-            }
-
+            // For widest compatibility across 2014+, just set the text.
             t.Cells[row, col].TextString = crossingText ?? string.Empty;
         }
 

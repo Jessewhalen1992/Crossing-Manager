@@ -80,16 +80,26 @@ namespace XingManager.Services
                             continue;
                         }
 
+                        var owner = GetValue(attributes, "OWNER");
+                        var description = GetValue(attributes, "DESCRIPTION");
+                        var location = GetValue(attributes, "LOCATION");
+                        var dwgRef = GetValue(attributes, "DWG_REF");
+                        string lat;
+                        string lng;
+                        TryGetLatLong(br, tr, out lat, out lng);
+
                         var crossingKey = crossing.Trim().ToUpperInvariant();
                         if (!records.TryGetValue(crossingKey, out var record))
                         {
                             record = new CrossingRecord
                             {
                                 Crossing = crossing,
-                                Owner = GetValue(attributes, "OWNER"),
-                                Description = GetValue(attributes, "DESCRIPTION"),
-                                Location = GetValue(attributes, "LOCATION"),
-                                DwgRef = GetValue(attributes, "DWG_REF"),
+                                Owner = owner,
+                                Description = description,
+                                Location = location,
+                                DwgRef = dwgRef,
+                                Lat = lat,
+                                Long = lng,
                                 CanonicalInstance = ObjectId.Null
                             };
 
@@ -100,33 +110,35 @@ namespace XingManager.Services
                         contexts[entId] = new DuplicateResolver.InstanceContext
                         {
                             ObjectId = entId,
-                            SpaceName = spaceName
+                            SpaceName = spaceName,
+                            Owner = owner,
+                            Description = description,
+                            Location = location,
+                            DwgRef = dwgRef,
+                            Lat = lat,
+                            Long = lng
                         };
 
                         if (record.CanonicalInstance.IsNull && string.Equals(spaceName, "Model", StringComparison.OrdinalIgnoreCase))
                         {
                             record.CanonicalInstance = entId;
                             record.Crossing = crossing;
-                            record.Owner = GetValue(attributes, "OWNER");
-                            record.Description = GetValue(attributes, "DESCRIPTION");
-                            record.Location = GetValue(attributes, "LOCATION");
-                            record.DwgRef = GetValue(attributes, "DWG_REF");
-                            string lat, lng;
-                            if (TryGetLatLong(br, tr, out lat, out lng))
-                            {
-                                record.Lat = lat;
-                                record.Long = lng;
-                            }
+                            record.Owner = owner;
+                            record.Description = description;
+                            record.Location = location;
+                            record.DwgRef = dwgRef;
+                            record.Lat = lat;
+                            record.Long = lng;
                         }
                         else if (record.CanonicalInstance.IsNull)
                         {
                             record.CanonicalInstance = entId;
-                            string lat, lng;
-                            if (TryGetLatLong(br, tr, out lat, out lng))
-                            {
-                                record.Lat = lat;
-                                record.Long = lng;
-                            }
+                            record.Owner = owner;
+                            record.Description = description;
+                            record.Location = location;
+                            record.DwgRef = dwgRef;
+                            record.Lat = lat;
+                            record.Long = lng;
                         }
                     }
                 }
