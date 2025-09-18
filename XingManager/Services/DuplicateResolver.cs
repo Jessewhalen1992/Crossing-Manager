@@ -109,13 +109,24 @@ namespace XingManager.Services
 
                 foreach (var objectId in record.AllInstances)
                 {
-                    var context = GetContext(contexts, objectId);
-                    var owner = !string.IsNullOrEmpty(context.Owner) ? context.Owner : record.Owner;
-                    var description = !string.IsNullOrEmpty(context.Description) ? context.Description : record.Description;
-                    var location = !string.IsNullOrEmpty(context.Location) ? context.Location : record.Location;
-                    var dwgRef = !string.IsNullOrEmpty(context.DwgRef) ? context.DwgRef : record.DwgRef;
-                    var lat = !string.IsNullOrEmpty(context.Lat) ? context.Lat : record.Lat;
-                    var lng = !string.IsNullOrEmpty(context.Long) ? context.Long : record.Long;
+                    InstanceContext context;
+                    var hasContext = contexts != null && contexts.TryGetValue(objectId, out context);
+                    if (!hasContext)
+                    {
+                        context = GetContext(contexts, objectId);
+                    }
+                    var owner = hasContext ? context.Owner : record.Owner;
+                    var description = hasContext ? context.Description : record.Description;
+                    var location = hasContext ? context.Location : record.Location;
+                    var dwgRef = hasContext ? context.DwgRef : record.DwgRef;
+                    var lat = hasContext ? context.Lat : record.Lat;
+                    var lng = hasContext ? context.Long : record.Long;
+                    owner = owner ?? string.Empty;
+                    description = description ?? string.Empty;
+                    location = location ?? string.Empty;
+                    dwgRef = dwgRef ?? string.Empty;
+                    lat = lat ?? string.Empty;
+                    lng = lng ?? string.Empty;
                     list.Add(new DuplicateCandidate
                     {
                         Crossing = record.Crossing ?? string.Empty,
