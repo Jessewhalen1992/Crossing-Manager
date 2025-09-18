@@ -17,6 +17,12 @@ namespace XingManager.Services
         {
             public ObjectId ObjectId { get; set; }
             public string SpaceName { get; set; }
+            public string Owner { get; set; }
+            public string Description { get; set; }
+            public string Location { get; set; }
+            public string DwgRef { get; set; }
+            public string Lat { get; set; }
+            public string Long { get; set; }
         }
 
         public bool ResolveDuplicates(IList<CrossingRecord> records, IDictionary<ObjectId, InstanceContext> contexts)
@@ -46,6 +52,26 @@ namespace XingManager.Services
                     if (selected != null)
                     {
                         record.CanonicalInstance = selected.ObjectId;
+                        record.Crossing = selected.Crossing;
+                        record.Owner = selected.Owner;
+                        record.Description = selected.Description;
+                        record.Location = selected.Location;
+                        record.DwgRef = selected.DwgRef;
+                        record.Lat = selected.Lat;
+                        record.Long = selected.Long;
+
+                        foreach (var candidate in group)
+                        {
+                            if (contexts != null && contexts.TryGetValue(candidate.ObjectId, out var context))
+                            {
+                                context.Owner = selected.Owner;
+                                context.Description = selected.Description;
+                                context.Location = selected.Location;
+                                context.DwgRef = selected.DwgRef;
+                                context.Lat = selected.Lat;
+                                context.Long = selected.Long;
+                            }
+                        }
                     }
                 }
             }
@@ -84,13 +110,24 @@ namespace XingManager.Services
                 foreach (var objectId in record.AllInstances)
                 {
                     var context = GetContext(contexts, objectId);
+                    var owner = !string.IsNullOrEmpty(context.Owner) ? context.Owner : record.Owner;
+                    var description = !string.IsNullOrEmpty(context.Description) ? context.Description : record.Description;
+                    var location = !string.IsNullOrEmpty(context.Location) ? context.Location : record.Location;
+                    var dwgRef = !string.IsNullOrEmpty(context.DwgRef) ? context.DwgRef : record.DwgRef;
+                    var lat = !string.IsNullOrEmpty(context.Lat) ? context.Lat : record.Lat;
+                    var lng = !string.IsNullOrEmpty(context.Long) ? context.Long : record.Long;
                     list.Add(new DuplicateCandidate
                     {
                         Crossing = record.Crossing ?? string.Empty,
                         CrossingKey = record.CrossingKey,
                         ObjectId = objectId,
-                        Handle = objectId.Handle.ToString(),
-                        Space = context.SpaceName,
+                        Layout = context.SpaceName,
+                        Owner = owner,
+                        Description = description,
+                        Location = location,
+                        DwgRef = dwgRef,
+                        Lat = lat,
+                        Long = lng,
                         Canonical = objectId == record.CanonicalInstance
                     });
                 }
@@ -109,7 +146,13 @@ namespace XingManager.Services
             return new InstanceContext
             {
                 ObjectId = id,
-                SpaceName = "Unknown"
+                SpaceName = "Unknown",
+                Owner = string.Empty,
+                Description = string.Empty,
+                Location = string.Empty,
+                DwgRef = string.Empty,
+                Lat = string.Empty,
+                Long = string.Empty
             };
         }
 
@@ -117,8 +160,13 @@ namespace XingManager.Services
         {
             public string Crossing { get; set; }
             public string CrossingKey { get; set; }
-            public string Space { get; set; }
-            public string Handle { get; set; }
+            public string Layout { get; set; }
+            public string Owner { get; set; }
+            public string Description { get; set; }
+            public string Location { get; set; }
+            public string DwgRef { get; set; }
+            public string Lat { get; set; }
+            public string Long { get; set; }
             public ObjectId ObjectId { get; set; }
             public bool Canonical { get; set; }
         }
@@ -133,7 +181,7 @@ namespace XingManager.Services
             {
                 _candidates = candidates;
                 Text = "Resolve Duplicate Crossings";
-                Width = 600;
+                Width = 1000;
                 Height = 400;
                 StartPosition = FormStartPosition.CenterParent;
                 MinimizeBox = false;
@@ -162,20 +210,60 @@ namespace XingManager.Services
                     Width = 80
                 };
 
-                var colSpace = new DataGridViewTextBoxColumn
+                var colLayout = new DataGridViewTextBoxColumn
                 {
-                    DataPropertyName = nameof(DuplicateCandidate.Space),
-                    HeaderText = "Space",
+                    DataPropertyName = nameof(DuplicateCandidate.Layout),
+                    HeaderText = "Layout",
                     ReadOnly = true,
                     Width = 120
                 };
 
-                var colHandle = new DataGridViewTextBoxColumn
+                var colOwner = new DataGridViewTextBoxColumn
                 {
-                    DataPropertyName = nameof(DuplicateCandidate.Handle),
-                    HeaderText = "Handle",
+                    DataPropertyName = nameof(DuplicateCandidate.Owner),
+                    HeaderText = "Owner",
                     ReadOnly = true,
                     Width = 120
+                };
+
+                var colDescription = new DataGridViewTextBoxColumn
+                {
+                    DataPropertyName = nameof(DuplicateCandidate.Description),
+                    HeaderText = "Description",
+                    ReadOnly = true,
+                    Width = 200
+                };
+
+                var colLocation = new DataGridViewTextBoxColumn
+                {
+                    DataPropertyName = nameof(DuplicateCandidate.Location),
+                    HeaderText = "Location",
+                    ReadOnly = true,
+                    Width = 200
+                };
+
+                var colDwgRef = new DataGridViewTextBoxColumn
+                {
+                    DataPropertyName = nameof(DuplicateCandidate.DwgRef),
+                    HeaderText = "DWG_REF",
+                    ReadOnly = true,
+                    Width = 120
+                };
+
+                var colLat = new DataGridViewTextBoxColumn
+                {
+                    DataPropertyName = nameof(DuplicateCandidate.Lat),
+                    HeaderText = "Lat",
+                    ReadOnly = true,
+                    Width = 80
+                };
+
+                var colLong = new DataGridViewTextBoxColumn
+                {
+                    DataPropertyName = nameof(DuplicateCandidate.Long),
+                    HeaderText = "Long",
+                    ReadOnly = true,
+                    Width = 80
                 };
 
                 var colCanonical = new DataGridViewCheckBoxColumn
@@ -185,7 +273,16 @@ namespace XingManager.Services
                     Width = 80
                 };
 
-                _grid.Columns.AddRange(colCrossing, colSpace, colHandle, colCanonical);
+                _grid.Columns.AddRange(
+                    colCrossing,
+                    colLayout,
+                    colOwner,
+                    colDescription,
+                    colLocation,
+                    colDwgRef,
+                    colLat,
+                    colLong,
+                    colCanonical);
                 _grid.CellContentClick += GridOnCellContentClick;
 
                 var buttonPanel = new FlowLayoutPanel
@@ -218,6 +315,15 @@ namespace XingManager.Services
                     foreach (var item in _candidates.Where(c => c.CrossingKey == candidate.CrossingKey))
                     {
                         item.Canonical = false;
+                        if (!ReferenceEquals(item, candidate))
+                        {
+                            item.Owner = candidate.Owner;
+                            item.Description = candidate.Description;
+                            item.Location = candidate.Location;
+                            item.DwgRef = candidate.DwgRef;
+                            item.Lat = candidate.Lat;
+                            item.Long = candidate.Long;
+                        }
                     }
 
                     candidate.Canonical = true;

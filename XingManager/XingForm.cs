@@ -175,6 +175,7 @@ namespace XingManager
                 gridCrossings.DataSource = _records;
 
                 _duplicateResolver.ResolveDuplicates(_records, _contexts);
+                gridCrossings.Refresh();
                 _isDirty = false;
             }
             catch (Exception ex)
@@ -417,7 +418,13 @@ namespace XingManager
                 _contexts[id] = new DuplicateResolver.InstanceContext
                 {
                     ObjectId = id,
-                    SpaceName = "Model"
+                    SpaceName = "Model",
+                    Owner = record.Owner,
+                    Description = record.Description,
+                    Location = record.Location,
+                    DwgRef = record.DwgRef,
+                    Lat = record.Lat,
+                    Long = record.Long
                 };
             }
             catch (Exception ex)
