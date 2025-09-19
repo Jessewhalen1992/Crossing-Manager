@@ -111,6 +111,19 @@ namespace XingManager.Services
                             continue;
                         }
 
+                        if (type == XingTableType.Main || type == XingTableType.Page)
+                        {
+                            var keyCount = CountXKeys(table, 0);
+                            var hasHeader = type == XingTableType.Main
+                                ? HasHeaderRow(table, 5, IsMainHeader)
+                                : HasHeaderRow(table, 3, IsPageHeader);
+                            if (keyCount < 3 && !hasHeader)
+                            {
+                                Log(string.Format(CultureInfo.InvariantCulture, "Table {0}: {1} ignored (insufficient X-keys)", entId.Handle, typeLabel));
+                                continue;
+                            }
+                        }
+
                         table.UpgradeOpen();
                         var matched = 0;
                         var updated = 0;
@@ -205,17 +218,17 @@ namespace XingManager.Services
                 }
             }
 
-            if (table.Columns.Count == 5 && table.Rows.Count >= 1)
+            if (table.Columns.Count == 5)
             {
-                if (HasHeaderRow(table, 5, IsMainHeader))
+                if (CountXKeys(table, 0) >= 3 || HasHeaderRow(table, 5, IsMainHeader))
                 {
                     return XingTableType.Main;
                 }
             }
 
-            if (table.Columns.Count == 3 && table.Rows.Count >= 1)
+            if (table.Columns.Count == 3)
             {
-                if (HasHeaderRow(table, 3, IsPageHeader))
+                if (CountXKeys(table, 0) >= 3 || HasHeaderRow(table, 3, IsPageHeader))
                 {
                     return XingTableType.Page;
                 }
@@ -230,6 +243,22 @@ namespace XingManager.Services
             }
 
             return XingTableType.Unknown;
+        }
+
+        private static int CountXKeys(Table t, int keyCol)
+        {
+            var rows = t?.Rows.Count ?? 0;
+            var count = 0;
+            for (var r = 0; r < rows; r++)
+            {
+                var key = NormalizeKeyForLookup(ResolveCrossingKey(t, r, keyCol));
+                if (!string.IsNullOrEmpty(key) && key[0] == 'X' && key.Length > 1 && key.Skip(1).All(char.IsDigit))
+                {
+                    count++;
+                }
+            }
+
+            return count;
         }
 
         private void Log(string msg)
@@ -464,6 +493,22 @@ namespace XingManager.Services
                 cell = null;
             }
 
+            string directText = null;
+            try
+            {
+                directText = cell?.TextString;
+            }
+            catch
+            {
+                directText = null;
+            }
+
+            var cleanedDirect = CleanCellText(directText);
+            if (!string.IsNullOrWhiteSpace(cleanedDirect))
+            {
+                return cleanedDirect;
+            }
+
             foreach (var tag in CrossingAttributeTags)
             {
                 var blockValue = TryGetBlockAttributeValue(table, row, col, tag);
@@ -489,13 +534,6 @@ namespace XingManager.Services
                 catch
                 {
                 }
-            }
-
-            var text = ReadCellText(cell);
-            var cleanedText = CleanCellText(text);
-            if (!string.IsNullOrWhiteSpace(cleanedText))
-            {
-                return cleanedText;
             }
 
             foreach (var content in EnumerateCellContents(cell))
@@ -537,13 +575,20 @@ namespace XingManager.Services
                 }
             }
 
-            var m = System.Text.RegularExpressions.Regex.Match(sb.ToString(), @"^([A-Z]+)0*([0-9]+)$");
-            if (m.Success)
+            var collapsed = sb.ToString();
+            var match = System.Text.RegularExpressions.Regex.Match(collapsed, @"^X0*(\d+)$");
+            if (!match.Success)
             {
-                return m.Groups[1].Value + m.Groups[2].Value;
+                return string.Empty;
             }
 
-            return sb.ToString();
+            var digits = match.Groups[1].Value.TrimStart('0');
+            if (digits.Length == 0)
+            {
+                digits = "0";
+            }
+
+            return "X" + digits;
         }
 
         private static void SetCellCrossingValue(Table t, int row, int col, string crossingText)
@@ -553,12 +598,9 @@ namespace XingManager.Services
                 return;
             }
 
-            foreach (var tag in CrossingAttributeTags)
+            if (TrySetBlockAttributeValue(t, row, col, "CROSSING", crossingText))
             {
-                if (TrySetBlockAttributeValue(t, row, col, tag, crossingText))
-                {
-                    return;
-                }
+                return;
             }
 
             try
@@ -585,8 +627,14 @@ namespace XingManager.Services
         {
             matched = 0;
             updated = 0;
-            var startRow = GetDataStartRow(table, 5, IsMainHeader);
-            for (var row = startRow; row < table.Rows.Count; row++)
+            if (table == null)
+            {
+                return;
+            }
+
+            var columnCount = table.Columns.Count;
+
+            for (var row = 0; row < table.Rows.Count; row++)
             {
                 var crossingKey = ResolveCrossingKey(table, row, 0);
                 var logKey = crossingKey ?? string.Empty;
@@ -608,68 +656,96 @@ namespace XingManager.Services
 
                 var rowUpdated = false;
 
-                if (ValueDiffers(crossingKey, desiredCrossing))
+                if (columnCount > 0 && ValueDiffers(crossingKey, desiredCrossing))
                 {
                     rowUpdated = true;
                 }
 
-                var ownerCell = table.Cells[row, 1];
-                if (ValueDiffers(ReadCellText(ownerCell), desiredOwner))
+                if (columnCount > 1 && ValueDiffers(ReadCellText(table, row, 1), desiredOwner))
                 {
                     rowUpdated = true;
                 }
 
-                var descriptionCell = table.Cells[row, 2];
-                if (ValueDiffers(ReadCellText(descriptionCell), desiredDescription))
+                if (columnCount > 2 && ValueDiffers(ReadCellText(table, row, 2), desiredDescription))
                 {
                     rowUpdated = true;
                 }
 
-                var locationCell = table.Cells[row, 3];
-                if (ValueDiffers(ReadCellText(locationCell), desiredLocation))
+                if (columnCount > 3 && ValueDiffers(ReadCellText(table, row, 3), desiredLocation))
                 {
                     rowUpdated = true;
                 }
 
-                var dwgRefCell = table.Cells[row, 4];
-                if (ValueDiffers(ReadCellText(dwgRefCell), desiredDwgRef))
+                if (columnCount > 4 && ValueDiffers(ReadCellText(table, row, 4), desiredDwgRef))
                 {
                     rowUpdated = true;
                 }
 
-                SetCellCrossingValue(table, row, 0, desiredCrossing);
-                SetCellValue(ownerCell, desiredOwner);
-                SetCellValue(descriptionCell, desiredDescription);
-                SetCellValue(locationCell, desiredLocation);
-                SetCellValue(dwgRefCell, desiredDwgRef);
+                if (columnCount > 0)
+                {
+                    SetCellCrossingValue(table, row, 0, desiredCrossing);
+                }
+
+                Cell ownerCell = null;
+                if (columnCount > 1)
+                {
+                    try
+                    {
+                        ownerCell = table.Cells[row, 1];
+                    }
+                    catch
+                    {
+                        ownerCell = null;
+                    }
+                    SetCellValue(ownerCell, desiredOwner);
+                }
+
+                Cell descriptionCell = null;
+                if (columnCount > 2)
+                {
+                    try
+                    {
+                        descriptionCell = table.Cells[row, 2];
+                    }
+                    catch
+                    {
+                        descriptionCell = null;
+                    }
+                    SetCellValue(descriptionCell, desiredDescription);
+                }
+
+                Cell locationCell = null;
+                if (columnCount > 3)
+                {
+                    try
+                    {
+                        locationCell = table.Cells[row, 3];
+                    }
+                    catch
+                    {
+                        locationCell = null;
+                    }
+                    SetCellValue(locationCell, desiredLocation);
+                }
+
+                Cell dwgRefCell = null;
+                if (columnCount > 4)
+                {
+                    try
+                    {
+                        dwgRefCell = table.Cells[row, 4];
+                    }
+                    catch
+                    {
+                        dwgRefCell = null;
+                    }
+                    SetCellValue(dwgRefCell, desiredDwgRef);
+                }
 
                 if (rowUpdated)
                 {
                     updated++;
                     Log(string.Format(CultureInfo.InvariantCulture, "Row {0} key='{1}' -> UPDATED", row, logKey));
-                }
-            }
-
-            if (matched == 0)
-            {
-                Log("MAIN fallback: matched=0 -> rebuilding");
-                var recordsForRebuild = byKey != null ? byKey.Values.ToList() : new List<CrossingRecord>();
-                RebuildMainTable(table, recordsForRebuild);
-                updated = Math.Max(updated, 1);
-                return;
-            }
-
-            if (updated == 0 && byKey != null && byKey.Count > 0)
-            {
-                var orderedRecords = byKey.Values
-                    .OrderBy(r => r, Comparer<CrossingRecord>.Create(CrossingRecord.CompareByCrossing))
-                    .ToList();
-                if (orderedRecords.Count > 0 && MainTableDiffersFromRecords(table, startRow, orderedRecords))
-                {
-                    Log("MAIN fallback: updated=0 but mismatch -> rebuilding");
-                    RebuildMainTable(table, orderedRecords);
-                    updated = Math.Max(updated, 1);
-                    return;
                 }
             }
 
@@ -680,8 +756,14 @@ namespace XingManager.Services
         {
             matched = 0;
             updated = 0;
-            var startRow = GetDataStartRow(table, 3, IsPageHeader);
-            for (var row = startRow; row < table.Rows.Count; row++)
+            if (table == null)
+            {
+                return;
+            }
+
+            var columnCount = table.Columns.Count;
+
+            for (var row = 0; row < table.Rows.Count; row++)
             {
                 var crossingKey = ResolveCrossingKey(table, row, 0);
                 var logKey = crossingKey ?? string.Empty;
@@ -701,26 +783,53 @@ namespace XingManager.Services
 
                 var rowUpdated = false;
 
-                if (ValueDiffers(crossingKey, desiredCrossing))
+                if (columnCount > 0 && ValueDiffers(crossingKey, desiredCrossing))
                 {
                     rowUpdated = true;
                 }
 
-                var ownerCell = table.Cells[row, 1];
-                if (ValueDiffers(ReadCellText(ownerCell), desiredOwner))
+                if (columnCount > 1 && ValueDiffers(ReadCellText(table, row, 1), desiredOwner))
                 {
                     rowUpdated = true;
                 }
 
-                var descriptionCell = table.Cells[row, 2];
-                if (ValueDiffers(ReadCellText(descriptionCell), desiredDescription))
+                if (columnCount > 2 && ValueDiffers(ReadCellText(table, row, 2), desiredDescription))
                 {
                     rowUpdated = true;
                 }
 
-                SetCellCrossingValue(table, row, 0, desiredCrossing);
-                SetCellValue(ownerCell, desiredOwner);
-                SetCellValue(descriptionCell, desiredDescription);
+                if (columnCount > 0)
+                {
+                    SetCellCrossingValue(table, row, 0, desiredCrossing);
+                }
+
+                Cell ownerCell = null;
+                if (columnCount > 1)
+                {
+                    try
+                    {
+                        ownerCell = table.Cells[row, 1];
+                    }
+                    catch
+                    {
+                        ownerCell = null;
+                    }
+                    SetCellValue(ownerCell, desiredOwner);
+                }
+
+                Cell descriptionCell = null;
+                if (columnCount > 2)
+                {
+                    try
+                    {
+                        descriptionCell = table.Cells[row, 2];
+                    }
+                    catch
+                    {
+                        descriptionCell = null;
+                    }
+                    SetCellValue(descriptionCell, desiredDescription);
+                }
 
                 if (rowUpdated)
                 {
@@ -736,9 +845,14 @@ namespace XingManager.Services
         {
             matched = 0;
             updated = 0;
-            // Only expect a single data row but iterate defensively.
-            var startRow = GetDataStartRow(table, 4, IsLatLongHeader);
-            for (var row = startRow; row < table.Rows.Count; row++)
+            if (table == null)
+            {
+                return;
+            }
+
+            var columnCount = table.Columns.Count;
+
+            for (var row = 0; row < table.Rows.Count; row++)
             {
                 var crossingKey = ResolveCrossingKey(table, row, 0);
                 var logKey = crossingKey ?? string.Empty;
@@ -759,33 +873,72 @@ namespace XingManager.Services
 
                 var rowUpdated = false;
 
-                if (ValueDiffers(crossingKey, desiredCrossing))
+                if (columnCount > 0 && ValueDiffers(crossingKey, desiredCrossing))
                 {
                     rowUpdated = true;
                 }
 
-                var descriptionCell = table.Cells[row, 1];
-                if (ValueDiffers(ReadCellText(descriptionCell), desiredDescription))
+                if (columnCount > 1 && ValueDiffers(ReadCellText(table, row, 1), desiredDescription))
                 {
                     rowUpdated = true;
                 }
 
-                var latCell = table.Cells[row, 2];
-                if (ValueDiffers(ReadCellText(latCell), desiredLat))
+                if (columnCount > 2 && ValueDiffers(ReadCellText(table, row, 2), desiredLat))
                 {
                     rowUpdated = true;
                 }
 
-                var longCell = table.Cells[row, 3];
-                if (ValueDiffers(ReadCellText(longCell), desiredLong))
+                if (columnCount > 3 && ValueDiffers(ReadCellText(table, row, 3), desiredLong))
                 {
                     rowUpdated = true;
                 }
 
-                SetCellCrossingValue(table, row, 0, desiredCrossing);
-                SetCellValue(descriptionCell, desiredDescription);
-                SetCellValue(latCell, desiredLat);
-                SetCellValue(longCell, desiredLong);
+                if (columnCount > 0)
+                {
+                    SetCellCrossingValue(table, row, 0, desiredCrossing);
+                }
+
+                Cell descriptionCell = null;
+                if (columnCount > 1)
+                {
+                    try
+                    {
+                        descriptionCell = table.Cells[row, 1];
+                    }
+                    catch
+                    {
+                        descriptionCell = null;
+                    }
+                    SetCellValue(descriptionCell, desiredDescription);
+                }
+
+                Cell latCell = null;
+                if (columnCount > 2)
+                {
+                    try
+                    {
+                        latCell = table.Cells[row, 2];
+                    }
+                    catch
+                    {
+                        latCell = null;
+                    }
+                    SetCellValue(latCell, desiredLat);
+                }
+
+                Cell longCell = null;
+                if (columnCount > 3)
+                {
+                    try
+                    {
+                        longCell = table.Cells[row, 3];
+                    }
+                    catch
+                    {
+                        longCell = null;
+                    }
+                    SetCellValue(longCell, desiredLong);
+                }
 
                 if (rowUpdated)
                 {
@@ -795,192 +948,6 @@ namespace XingManager.Services
             }
 
             RefreshTable(table);
-        }
-
-        private void RebuildMainTable(Table table, IList<CrossingRecord> orderedRecords)
-        {
-            if (table == null)
-            {
-                return;
-            }
-
-            int headerRowIndex;
-            if (!TryFindHeaderRow(table, 5, IsMainHeader, out headerRowIndex))
-            {
-                headerRowIndex = 0;
-            }
-
-            double rowHeight = 0.0;
-            try
-            {
-                var heightIndex = Math.Min(table.Rows.Count - 1, Math.Max(headerRowIndex + 1, 0));
-                if (heightIndex >= 0 && heightIndex < table.Rows.Count)
-                {
-                    rowHeight = table.Rows[heightIndex].Height;
-                }
-            }
-            catch
-            {
-                rowHeight = 0.0;
-            }
-
-            if (rowHeight <= 0.0 && table.Rows.Count > 0)
-            {
-                try
-                {
-                    rowHeight = table.Rows[Math.Min(headerRowIndex, table.Rows.Count - 1)].Height;
-                }
-                catch
-                {
-                    rowHeight = 0.0;
-                }
-            }
-
-            if (rowHeight <= 0.0)
-            {
-                rowHeight = 1.0;
-            }
-
-            for (int r = table.Rows.Count - 1; r > headerRowIndex; r--)
-            {
-                try
-                {
-                    table.DeleteRows(r, 1);
-                }
-                catch
-                {
-                }
-            }
-
-            var list = (orderedRecords ?? new List<CrossingRecord>())
-                .OrderBy(r => r, Comparer<CrossingRecord>.Create(CrossingRecord.CompareByCrossing))
-                .ToList();
-
-            var requiredRows = headerRowIndex + 1 + list.Count;
-            var toAdd = requiredRows - table.Rows.Count;
-            if (toAdd > 0)
-            {
-                var insertHeight = rowHeight;
-                if (insertHeight <= 0.0 && table.Rows.Count > 0)
-                {
-                    try
-                    {
-                        insertHeight = table.Rows[Math.Min(headerRowIndex, table.Rows.Count - 1)].Height;
-                    }
-                    catch
-                    {
-                        insertHeight = 0.0;
-                    }
-                }
-
-                if (insertHeight <= 0.0)
-                {
-                    insertHeight = rowHeight > 0.0 ? rowHeight : 1.0;
-                }
-
-                try
-                {
-                    table.InsertRows(headerRowIndex + 1, insertHeight, toAdd);
-                }
-                catch
-                {
-                }
-            }
-
-            var columns = table?.Columns.Count ?? 0;
-            for (int i = 0; i < list.Count; i++)
-            {
-                var row = headerRowIndex + 1 + i;
-                if (row >= table.Rows.Count)
-                {
-                    break;
-                }
-
-                var rec = list[i] ?? new CrossingRecord();
-                if (columns > 0)
-                {
-                    SetCellCrossingValue(table, row, 0, rec.Crossing ?? string.Empty);
-                }
-
-                if (columns > 1)
-                {
-                    SetCellValue(table.Cells[row, 1], rec.Owner ?? string.Empty);
-                }
-
-                if (columns > 2)
-                {
-                    SetCellValue(table.Cells[row, 2], rec.Description ?? string.Empty);
-                }
-
-                if (columns > 3)
-                {
-                    SetCellValue(table.Cells[row, 3], rec.Location ?? string.Empty);
-                }
-
-                if (columns > 4)
-                {
-                    SetCellValue(table.Cells[row, 4], rec.DwgRef ?? string.Empty);
-                }
-            }
-
-            RefreshTable(table);
-            Log(string.Format(CultureInfo.InvariantCulture, "Rebuilt MAIN table with {0} rows", list.Count));
-        }
-
-        private bool MainTableDiffersFromRecords(Table table, int dataStartRow, IList<CrossingRecord> orderedRecords)
-        {
-            if (table == null || orderedRecords == null || orderedRecords.Count == 0)
-            {
-                return false;
-            }
-
-            if (dataStartRow >= table.Rows.Count)
-            {
-                return true;
-            }
-
-            return !RowMatchesRecord(table, dataStartRow, orderedRecords[0]);
-        }
-
-        private bool RowMatchesRecord(Table table, int row, CrossingRecord record)
-        {
-            if (table == null || record == null)
-            {
-                return false;
-            }
-
-            if (row < 0 || row >= table.Rows.Count)
-            {
-                return false;
-            }
-
-            var existingKey = ResolveCrossingKey(table, row, 0);
-            if (!string.Equals(NormalizeKeyForLookup(existingKey), NormalizeKeyForLookup(record.Crossing), StringComparison.Ordinal))
-            {
-                return false;
-            }
-
-            if (ValueDiffers(ReadCellText(table, row, 1), record.Owner))
-            {
-                return false;
-            }
-
-            if (ValueDiffers(ReadCellText(table, row, 2), record.Description))
-            {
-                return false;
-            }
-
-            if (ValueDiffers(ReadCellText(table, row, 3), record.Location))
-            {
-                return false;
-            }
-
-            if (ValueDiffers(ReadCellText(table, row, 4), record.DwgRef))
-            {
-                return false;
-            }
-
-            return true;
         }
 
         private static CrossingRecord FindRecordForKey(IDictionary<string, CrossingRecord> byKey, string crossingKey)
