@@ -461,21 +461,16 @@ namespace XingManager.Services
             }
             catch
             {
-                return string.Empty;
-            }
-
-            var text = cell?.TextString;
-            if (!string.IsNullOrWhiteSpace(text))
-            {
-                return text.Trim();
+                cell = null;
             }
 
             foreach (var tag in CrossingAttributeTags)
             {
                 var blockValue = TryGetBlockAttributeValue(table, row, col, tag);
-                if (!string.IsNullOrWhiteSpace(blockValue))
+                var cleanedBlockValue = CleanCellText(blockValue);
+                if (!string.IsNullOrWhiteSpace(cleanedBlockValue))
                 {
-                    return blockValue.Trim();
+                    return cleanedBlockValue;
                 }
             }
 
@@ -485,9 +480,10 @@ namespace XingManager.Services
                 try
                 {
                     var attrValue = attrProperty.GetValue(cell, null) as string;
-                    if (!string.IsNullOrWhiteSpace(attrValue))
+                    var cleanedAttrValue = CleanCellText(attrValue);
+                    if (!string.IsNullOrWhiteSpace(cleanedAttrValue))
                     {
-                        return attrValue.Trim();
+                        return cleanedAttrValue;
                     }
                 }
                 catch
@@ -495,23 +491,57 @@ namespace XingManager.Services
                 }
             }
 
+            var text = ReadCellText(cell);
+            var cleanedText = CleanCellText(text);
+            if (!string.IsNullOrWhiteSpace(cleanedText))
+            {
+                return cleanedText;
+            }
+
             foreach (var content in EnumerateCellContents(cell))
             {
-                if (!string.IsNullOrWhiteSpace(content))
+                var cleanedContent = CleanCellText(content);
+                if (!string.IsNullOrWhiteSpace(cleanedContent))
                 {
-                    return content.Trim();
+                    return cleanedContent;
                 }
             }
 
             return string.Empty;
         }
 
+        private static string CleanCellText(string text)
+        {
+            if (string.IsNullOrWhiteSpace(text))
+            {
+                return string.Empty;
+            }
+
+            return StripMTextFormatting(text).Trim();
+        }
+
         private static void SetCellCrossingValue(Table t, int row, int col, string crossingText)
         {
-            if (!TrySetBlockAttributeValue(t, row, col, "CROSSING", crossingText))
+            if (t == null)
+            {
+                return;
+            }
+
+            foreach (var tag in CrossingAttributeTags)
+            {
+                if (TrySetBlockAttributeValue(t, row, col, tag, crossingText))
+                {
+                    return;
+                }
+            }
+
+            try
             {
                 var cell = t.Cells[row, col];
                 cell.TextString = crossingText ?? string.Empty;
+            }
+            catch
+            {
             }
         }
 
