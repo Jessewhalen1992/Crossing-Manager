@@ -5,6 +5,7 @@ using System.Globalization;
 using System.Linq;
 using System.Reflection;
 using System.Text;
+using System.Text.RegularExpressions;
 using Autodesk.AutoCAD.ApplicationServices;
 using Autodesk.AutoCAD.DatabaseServices;
 using Autodesk.AutoCAD.EditorInput;
@@ -48,6 +49,10 @@ namespace XingManager.Services
             "NO",
             "LABEL"
         };
+
+        private static readonly Regex MTextFormattingCommandRegex = new Regex("\\\\[^;\\\\{}]*;", RegexOptions.Compiled);
+        private static readonly Regex MTextResidualCommandRegex = new Regex("\\\\[^{}]", RegexOptions.Compiled);
+        private static readonly Regex MTextSpecialCodeRegex = new Regex("%%[^\\s]+", RegexOptions.Compiled);
 
         private readonly TableFactory _factory;
         private Editor _ed;
@@ -294,10 +299,12 @@ namespace XingManager.Services
                 return string.Empty;
             }
 
+            header = StripMTextFormatting(header);
+
             var builder = new StringBuilder(header.Length);
             foreach (var ch in header)
             {
-                if (char.IsWhiteSpace(ch) || ch == '.' || ch == ',' || ch == '#' || ch == '_' || ch == '-' || ch == '/' || ch == '(' || ch == ')')
+                if (char.IsWhiteSpace(ch) || ch == '.' || ch == ',' || ch == '#' || ch == '_' || ch == '-' || ch == '/' || ch == '(' || ch == ')' || ch == '%' || ch == '|')
                 {
                     continue;
                 }
@@ -315,6 +322,19 @@ namespace XingManager.Services
             }
 
             return normalized;
+        }
+
+        private static string StripMTextFormatting(string value)
+        {
+            if (string.IsNullOrEmpty(value))
+            {
+                return string.Empty;
+            }
+
+            var withoutCommands = MTextFormattingCommandRegex.Replace(value, string.Empty);
+            var withoutResidual = MTextResidualCommandRegex.Replace(withoutCommands, string.Empty);
+            var withoutSpecial = MTextSpecialCodeRegex.Replace(withoutResidual, string.Empty);
+            return withoutSpecial.Replace("{", string.Empty).Replace("}", string.Empty);
         }
 
         private static string ResolveCrossingKey(Table table, int row, int col)
