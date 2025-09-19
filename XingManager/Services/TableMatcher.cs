@@ -87,8 +87,7 @@ namespace XingManager.Services
                         return;
                     }
 
-                    var tableSync = new TableSync(new TableFactory());
-                    var tableType = tableSync.IdentifyTable(table, tr);
+                    var tableType = DetectTableType(table);
                     if (tableType == TableSync.XingTableType.Unknown)
                     {
                         Log(ed, "Selected table type could not be determined. Command aborted.");
@@ -124,6 +123,8 @@ namespace XingManager.Services
                     foreach (ObjectId btrId in blockTable)
                     {
                         var btr = (BlockTableRecord)tr.GetObject(btrId, OpenMode.ForRead);
+                        // Only process modelspace/paperspace, skip block definition records
+                        if (!btr.IsLayout) continue;
                         foreach (ObjectId entId in btr)
                         {
                             var br = tr.GetObject(entId, OpenMode.ForRead) as BlockReference;
@@ -301,10 +302,20 @@ namespace XingManager.Services
             AttributeReference attribute;
             if (TryGetAttribute(br, tr, tags, out attribute))
             {
-                return attribute.TextString ?? string.Empty;
+                return (attribute.TextString ?? string.Empty).Trim();
             }
 
             return string.Empty;
+        }
+
+        // Minimal detector for this command; we only support Main (5 cols) and Page (3 cols).
+        private static TableSync.XingTableType DetectTableType(Table table)
+        {
+            if (table == null) return TableSync.XingTableType.Unknown;
+            if (table.Columns.Count == 5) return TableSync.XingTableType.Main;
+            if (table.Columns.Count == 3) return TableSync.XingTableType.Page;
+            if (table.Columns.Count == 4) return TableSync.XingTableType.LatLong; // we will reject it explicitly
+            return TableSync.XingTableType.Unknown;
         }
 
         private static bool SetAttributeIfExists(BlockReference br, Transaction tr, IEnumerable<string> tags, string value, Action<string> log)
