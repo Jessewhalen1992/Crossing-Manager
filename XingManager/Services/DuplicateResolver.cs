@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Drawing;
 using System.Linq;                    // <-- needed for Where/Select/GroupBy
 using System.Windows.Forms;
 using Autodesk.AutoCAD.DatabaseServices;
@@ -189,6 +190,7 @@ namespace XingManager.Services
         // ---------------------------- Inner dialog (WINFORMS) ----------------------------
         private class DuplicateResolverDialog : Form
         {
+            private static Point? _lastDialogLocation;
             private readonly DataGridView _grid;
             private readonly BindingSource _binding;
             private readonly List<DuplicateCandidate> _candidates;
@@ -205,7 +207,11 @@ namespace XingManager.Services
                 Text = BuildDialogTitle(groupIndex, groupCount);
                 Width = 1000;
                 Height = 400;
-                StartPosition = FormStartPosition.CenterParent;
+                StartPosition = _lastDialogLocation.HasValue
+                    ? FormStartPosition.Manual
+                    : FormStartPosition.CenterParent;
+                if (_lastDialogLocation.HasValue)
+                    Location = _lastDialogLocation.Value;
                 MinimizeBox = false;
                 MaximizeBox = false;
                 FormBorderStyle = FormBorderStyle.FixedDialog;
@@ -324,6 +330,12 @@ namespace XingManager.Services
 
                 AcceptButton = okButton;
                 CancelButton = cancelButton;
+            }
+
+            protected override void OnFormClosed(FormClosedEventArgs e)
+            {
+                _lastDialogLocation = Location;
+                base.OnFormClosed(e);
             }
 
             private void GridOnCellContentClick(object sender, DataGridViewCellEventArgs e)
