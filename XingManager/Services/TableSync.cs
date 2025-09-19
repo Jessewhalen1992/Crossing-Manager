@@ -2,6 +2,8 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
+using System.Reflection;
+using System.Text;
 using Autodesk.AutoCAD.ApplicationServices;
 using Autodesk.AutoCAD.DatabaseServices;
 using Autodesk.AutoCAD.EditorInput;
@@ -215,7 +217,8 @@ namespace XingManager.Services
 
             for (var i = 0; i < expected.Length; i++)
             {
-                if (!string.Equals(headers[i], expected[i], StringComparison.OrdinalIgnoreCase))
+                var expectedValue = NormalizeHeader(expected[i], i);
+                if (!string.Equals(headers[i], expectedValue, StringComparison.Ordinal))
                 {
                     return false;
                 }
@@ -229,24 +232,81 @@ namespace XingManager.Services
             var list = new List<string>();
             for (var col = 0; col < columns; col++)
             {
-                list.Add((table.Cells[0, col].TextString ?? string.Empty).Trim());
+                list.Add(NormalizeHeader(table.Cells[0, col].TextString, col));
             }
 
             return list;
         }
 
-        private static string ResolveCrossingKey(Cell cell)
+        private static string NormalizeHeader(string header, int columnIndex)
         {
-            if (cell == null)
+            if (header == null)
+            {
                 return string.Empty;
+            }
 
-            return (cell.TextString ?? string.Empty).Trim();
+            var builder = new StringBuilder(header.Length);
+            foreach (var ch in header)
+            {
+                if (ch == ' ' || ch == '.' || ch == ',' || ch == '#' || ch == '_')
+                {
+                    continue;
+                }
+
+                builder.Append(char.ToUpperInvariant(ch));
+            }
+
+            var normalized = builder.ToString();
+            if (columnIndex == 4)
+            {
+                if (normalized == "DWGREF" || normalized == "XINGDWGREF" || normalized == "XINGDWGREFNO" || normalized == "XINGDWGREFNUMBER")
+                {
+                    return "DWGREF";
+                }
+            }
+
+            return normalized;
+        }
+
+        private static string ResolveCrossingKey(Table table, int row, int col)
+        {
+            if (table == null)
+            {
+                return string.Empty;
+            }
+
+            Cell cell;
+            try
+            {
+                cell = table.Cells[row, col];
+            }
+            catch
+            {
+                return string.Empty;
+            }
+
+            var text = cell?.TextString;
+            if (!string.IsNullOrWhiteSpace(text))
+            {
+                return text.Trim();
+            }
+
+            var blockValue = TryGetBlockAttributeValue(table, row, col, "CROSSING");
+            if (!string.IsNullOrWhiteSpace(blockValue))
+            {
+                return blockValue.Trim();
+            }
+
+            return string.Empty;
         }
 
         private static void SetCellCrossingValue(Table t, int row, int col, string crossingText)
         {
-            // For widest compatibility across 2014+, just set the text.
-            t.Cells[row, col].TextString = crossingText ?? string.Empty;
+            if (!TrySetBlockAttributeValue(t, row, col, "CROSSING", crossingText))
+            {
+                var cell = t.Cells[row, col];
+                cell.TextString = crossingText ?? string.Empty;
+            }
         }
 
         private static void SetCellValue(Cell cell, string value)
@@ -263,22 +323,8 @@ namespace XingManager.Services
         {
             for (var row = 1; row < table.Rows.Count; row++)
             {
-                var cell = table.Cells[row, 0];
-                var crossingKey = ResolveCrossingKey(cell);
-                if (string.IsNullOrEmpty(crossingKey))
-                {
-                    continue;
-                }
-
-                var canonicalKey = crossingKey.Trim().ToUpperInvariant();
-
-                CrossingRecord record;
-                if (!byKey.TryGetValue(canonicalKey, out record))
-                {
-                    // Try numeric-only match for flexibility.
-                    record = byKey.Values.FirstOrDefault(r => CrossingRecord.CompareCrossingKeys(r.Crossing, crossingKey) == 0);
-                }
-
+                var crossingKey = ResolveCrossingKey(table, row, 0);
+                var record = FindRecordForKey(byKey, crossingKey);
                 if (record == null)
                 {
                     continue;
@@ -290,25 +336,16 @@ namespace XingManager.Services
                 SetCellValue(table.Cells[row, 3], record.Location);
                 SetCellValue(table.Cells[row, 4], record.DwgRef);
             }
+
+            RefreshTable(table);
         }
 
         private void UpdatePageTable(Table table, IDictionary<string, CrossingRecord> byKey)
         {
             for (var row = 1; row < table.Rows.Count; row++)
             {
-                var cell = table.Cells[row, 0];
-                var crossingKey = ResolveCrossingKey(cell);
-                if (string.IsNullOrEmpty(crossingKey))
-                {
-                    continue;
-                }
-
-                CrossingRecord record;
-                if (!byKey.TryGetValue(crossingKey.Trim().ToUpperInvariant(), out record))
-                {
-                    record = byKey.Values.FirstOrDefault(r => CrossingRecord.CompareCrossingKeys(r.Crossing, crossingKey) == 0);
-                }
-
+                var crossingKey = ResolveCrossingKey(table, row, 0);
+                var record = FindRecordForKey(byKey, crossingKey);
                 if (record == null)
                 {
                     continue;
@@ -318,6 +355,8 @@ namespace XingManager.Services
                 SetCellValue(table.Cells[row, 1], record.Owner);
                 SetCellValue(table.Cells[row, 2], record.Description);
             }
+
+            RefreshTable(table);
         }
 
         private void UpdateLatLongTable(Table table, IDictionary<string, CrossingRecord> byKey)
@@ -325,19 +364,8 @@ namespace XingManager.Services
             // Only expect a single data row but iterate defensively.
             for (var row = 1; row < table.Rows.Count; row++)
             {
-                var cell = table.Cells[row, 0];
-                var crossingKey = ResolveCrossingKey(cell);
-                if (string.IsNullOrEmpty(crossingKey))
-                {
-                    continue;
-                }
-
-                CrossingRecord record;
-                if (!byKey.TryGetValue(crossingKey.Trim().ToUpperInvariant(), out record))
-                {
-                    record = byKey.Values.FirstOrDefault(r => CrossingRecord.CompareCrossingKeys(r.Crossing, crossingKey) == 0);
-                }
-
+                var crossingKey = ResolveCrossingKey(table, row, 0);
+                var record = FindRecordForKey(byKey, crossingKey);
                 if (record == null)
                 {
                     continue;
@@ -347,6 +375,226 @@ namespace XingManager.Services
                 SetCellValue(table.Cells[row, 1], record.Description);
                 SetCellValue(table.Cells[row, 2], record.Lat);
                 SetCellValue(table.Cells[row, 3], record.Long);
+            }
+
+            RefreshTable(table);
+        }
+
+        private static CrossingRecord FindRecordForKey(IDictionary<string, CrossingRecord> byKey, string crossingKey)
+        {
+            if (byKey == null || string.IsNullOrWhiteSpace(crossingKey))
+            {
+                return null;
+            }
+
+            var trimmedKey = crossingKey.Trim();
+
+            CrossingRecord record;
+            if (byKey.TryGetValue(trimmedKey, out record))
+            {
+                return record;
+            }
+
+            record = byKey.Values.FirstOrDefault(r => CrossingRecord.CompareCrossingKeys(r.Crossing, trimmedKey) == 0);
+            return record;
+        }
+
+        private static string TryGetBlockAttributeValue(Table table, int row, int col, string tag)
+        {
+            if (table == null || string.IsNullOrEmpty(tag))
+            {
+                return string.Empty;
+            }
+
+            const string methodName = "GetBlockAttributeValue";
+            var type = table.GetType();
+            var methods = type.GetMethods().Where(m => string.Equals(m.Name, methodName, StringComparison.Ordinal));
+
+            foreach (var method in methods)
+            {
+                var parameters = method.GetParameters();
+                if (parameters.Length < 3)
+                {
+                    continue;
+                }
+
+                if (!parameters[2].ParameterType.IsAssignableFrom(typeof(string)))
+                {
+                    continue;
+                }
+
+                var args = new object[parameters.Length];
+                if (!TryConvertParameter(row, parameters[0], out args[0]) ||
+                    !TryConvertParameter(col, parameters[1], out args[1]) ||
+                    !TryConvertParameter(tag, parameters[2], out args[2]))
+                {
+                    continue;
+                }
+
+                var skip = false;
+                for (var i = 3; i < parameters.Length; i++)
+                {
+                    var parameter = parameters[i];
+                    if (!parameter.IsOptional)
+                    {
+                        skip = true;
+                        break;
+                    }
+                    args[i] = Type.Missing;
+                }
+
+                if (skip)
+                {
+                    continue;
+                }
+
+                try
+                {
+                    var result = method.Invoke(table, args);
+                    if (result == null)
+                    {
+                        continue;
+                    }
+
+                    var text = Convert.ToString(result, CultureInfo.InvariantCulture);
+                    if (!string.IsNullOrWhiteSpace(text))
+                    {
+                        return text;
+                    }
+                }
+                catch
+                {
+                }
+            }
+
+            return string.Empty;
+        }
+
+        private static bool TrySetBlockAttributeValue(Table table, int row, int col, string tag, string value)
+        {
+            if (table == null || string.IsNullOrEmpty(tag))
+            {
+                return false;
+            }
+
+            const string methodName = "SetBlockAttributeValue";
+            var type = table.GetType();
+            var methods = type.GetMethods().Where(m => string.Equals(m.Name, methodName, StringComparison.Ordinal));
+
+            foreach (var method in methods)
+            {
+                var parameters = method.GetParameters();
+                if (parameters.Length < 4)
+                {
+                    continue;
+                }
+
+                if (!parameters[2].ParameterType.IsAssignableFrom(typeof(string)) ||
+                    !parameters[3].ParameterType.IsAssignableFrom(typeof(string)))
+                {
+                    continue;
+                }
+
+                var args = new object[parameters.Length];
+                if (!TryConvertParameter(row, parameters[0], out args[0]) ||
+                    !TryConvertParameter(col, parameters[1], out args[1]) ||
+                    !TryConvertParameter(tag, parameters[2], out args[2]) ||
+                    !TryConvertParameter(value ?? string.Empty, parameters[3], out args[3]))
+                {
+                    continue;
+                }
+
+                var skip = false;
+                for (var i = 4; i < parameters.Length; i++)
+                {
+                    var parameter = parameters[i];
+                    if (!parameter.IsOptional)
+                    {
+                        skip = true;
+                        break;
+                    }
+                    args[i] = Type.Missing;
+                }
+
+                if (skip)
+                {
+                    continue;
+                }
+
+                try
+                {
+                    method.Invoke(table, args);
+                    return true;
+                }
+                catch
+                {
+                }
+            }
+
+            return false;
+        }
+
+        private static bool TryConvertParameter(object value, ParameterInfo parameter, out object converted)
+        {
+            var targetType = parameter.ParameterType;
+            var underlying = Nullable.GetUnderlyingType(targetType) ?? targetType;
+
+            try
+            {
+                if (value == null)
+                {
+                    if (!underlying.IsValueType || underlying == typeof(string))
+                    {
+                        converted = null;
+                        return true;
+                    }
+
+                    converted = Activator.CreateInstance(underlying);
+                    return true;
+                }
+
+                if (underlying.IsInstanceOfType(value))
+                {
+                    converted = value;
+                    return true;
+                }
+
+                converted = Convert.ChangeType(value, underlying, CultureInfo.InvariantCulture);
+                return true;
+            }
+            catch
+            {
+                converted = null;
+                return false;
+            }
+        }
+
+        private static void RefreshTable(Table table)
+        {
+            if (table == null)
+            {
+                return;
+            }
+
+            var recompute = table.GetType().GetMethod("RecomputeTableBlock", new[] { typeof(bool) });
+            if (recompute != null)
+            {
+                try
+                {
+                    recompute.Invoke(table, new object[] { true });
+                    return;
+                }
+                catch
+                {
+                }
+            }
+
+            try
+            {
+                table.GenerateLayout();
+            }
+            catch
+            {
             }
         }
     }
