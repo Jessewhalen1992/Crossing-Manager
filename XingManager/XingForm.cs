@@ -5,7 +5,7 @@ using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Windows.Forms;
-using Autodesk.AutoCAD.ApplicationServices;
+using Autodesk.AutoCAD.ApplicationServices;  // for Document, CommandEventArgs
 using Autodesk.AutoCAD.DatabaseServices;
 using Autodesk.AutoCAD.EditorInput;
 using Autodesk.AutoCAD.Geometry;
@@ -82,12 +82,54 @@ namespace XingManager
         public void MatchTableFromCommand()
         {
             var doc = AcadApp.DocumentManager.MdiActiveDocument;
-            if (doc == null)
+            if (doc == null) return;
+
+            // Subscribe once; will auto-unsubscribe inside the handler
+            doc.CommandEnded += OnCommandMatchTableDone;
+            doc.CommandCancelled += OnCommandMatchTableDone;
+            try
             {
-                return;
+                // In some versions you also have CommandFailed; subscribe if present in your SDK
+                doc.CommandFailed += OnCommandMatchTableDone;
+            }
+            catch
+            {
+                // ignore if not available
             }
 
+            // Run the command (space to execute)
             doc.SendStringToExecute("XING_MATCH_TABLE ", true, false, true);
+        }
+
+        private void OnCommandMatchTableDone(object sender, CommandEventArgs e)
+        {
+            try
+            {
+                if (!string.Equals(e.GlobalCommandName, "XING_MATCH_TABLE", StringComparison.OrdinalIgnoreCase))
+                    return;
+
+                var doc = sender as Document;
+                if (doc != null)
+                {
+                    // Unhook to avoid duplicate subscriptions
+                    doc.CommandEnded -= OnCommandMatchTableDone;
+                    doc.CommandCancelled -= OnCommandMatchTableDone;
+                    try
+                    {
+                        doc.CommandFailed -= OnCommandMatchTableDone;
+                    }
+                    catch
+                    {
+                    }
+                }
+
+                // Now that blocks are updated, refresh the grid from the DWG
+                RescanRecords();
+            }
+            catch
+            {
+                // Best-effort; avoid surfacing handler errors
+            }
         }
 
         public void RenumberSequentiallyFromCommand()
