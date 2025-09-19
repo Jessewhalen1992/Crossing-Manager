@@ -846,12 +846,10 @@ namespace XingManager.Services
                 if (textProp != null)
                 {
                     string text = null;
-                    try { text = textProp.GetValue(item, null) as string; } catch { text = null; }
-                    if (!string.IsNullOrWhiteSpace(text)) { yield return text; continue; }
+                    try { text = textProp.GetValue(item, null) as string; } catch { }
+                    if (!string.IsNullOrWhiteSpace(text))
+                        yield return StripMTextFormatting(text).Trim();
                 }
-
-                var textValue = item.ToString();
-                if (!string.IsNullOrWhiteSpace(textValue)) yield return textValue;
             }
         }
         private static bool CellHasBlockContent(Cell cell)
