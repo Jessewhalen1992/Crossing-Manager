@@ -28,6 +28,7 @@ namespace XingManager
         private IDictionary<ObjectId, DuplicateResolver.InstanceContext> _contexts = new Dictionary<ObjectId, DuplicateResolver.InstanceContext>();
         private bool _isDirty;
         private bool _isScanning;
+        private bool _skipApplyOnceAfterRescan;
 
         private const string TemplatePath = @"M:\\Drafting\\_CURRENT TEMPLATES\\Compass_Main.dwt";
         private const string TemplateLayoutName = "X";
@@ -123,8 +124,9 @@ namespace XingManager
                     }
                 }
 
-                // Now that blocks are updated, refresh the grid from the DWG
-                RescanRecords();
+                // Refresh the grid from the DWG **without** writing back to tables
+                _skipApplyOnceAfterRescan = true;
+                RescanRecords(applyToTables: false);
             }
             catch
             {
@@ -187,8 +189,14 @@ namespace XingManager
         }
 
         // ===== Updated to auto-apply after duplicate resolution =====
-        private void RescanRecords()
+        private void RescanRecords(bool applyToTables = true)
         {
+            if (_skipApplyOnceAfterRescan)
+            {
+                applyToTables = false;
+                _skipApplyOnceAfterRescan = false;
+            }
+
             _isScanning = true;
             try
             {
@@ -206,15 +214,18 @@ namespace XingManager
                     return;
                 }
 
-                // Immediately push chosen canonical values to ALL instances & tables
-                try
+                // Immediately push chosen canonical values to ALL instances & tables when requested
+                if (applyToTables)
                 {
-                    _repository.ApplyChanges(_records.ToList(), _tableSync);
-                    _isDirty = false; // synced
-                }
-                catch (Exception applyEx)
-                {
-                    MessageBox.Show(applyEx.Message, "Crossing Manager", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    try
+                    {
+                        _repository.ApplyChanges(_records.ToList(), _tableSync);
+                        _isDirty = false; // synced
+                    }
+                    catch (Exception applyEx)
+                    {
+                        MessageBox.Show(applyEx.Message, "Crossing Manager", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    }
                 }
 
                 gridCrossings.Refresh();
