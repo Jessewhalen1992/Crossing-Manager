@@ -1,4 +1,5 @@
 using System;
+using System.Collections;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
@@ -25,7 +26,31 @@ namespace XingManager.Services
             LatLong
         }
 
+        private static readonly HashSet<string> MainDwgColumnSynonyms = new HashSet<string>(StringComparer.Ordinal)
+        {
+            "DWGREF",
+            "DWGREFNO",
+            "DWGREFNUMBER",
+            "XINGDWGREF",
+            "XINGDWGREFNO",
+            "XINGDWGREFNUMBER"
+        };
+
+        private static readonly string[] CrossingAttributeTags =
+        {
+            "CROSSING",
+            "XING",
+            "X_NO",
+            "XNUM",
+            "XNUMBER",
+            "NUMBER",
+            "INDEX",
+            "NO",
+            "LABEL"
+        };
+
         private readonly TableFactory _factory;
+        private Editor _ed;
 
         public TableSync(TableFactory factory)
         {
@@ -45,7 +70,7 @@ namespace XingManager.Services
             }
 
             var db = doc.Database;
-            var editor = doc.Editor;
+            _ed = doc.Editor;
             var byKey = records.ToDictionary(r => r.CrossingKey, r => r, StringComparer.OrdinalIgnoreCase);
 
             using (var tr = db.TransactionManager.StartTransaction())
@@ -65,32 +90,45 @@ namespace XingManager.Services
                         }
 
                         var type = IdentifyTable(table, tr);
+                        var typeLabel = type.ToString().ToUpperInvariant();
+
                         if (type == XingTableType.Unknown)
                         {
+                            Log(string.Format(CultureInfo.InvariantCulture, "Table {0}: {1} matched=0 updated=0", entId.Handle, typeLabel));
+                            var headerLog = BuildHeaderLog(table);
+                            if (!string.IsNullOrEmpty(headerLog))
+                            {
+                                Log(string.Format(CultureInfo.InvariantCulture, "Table {0}: {1} {2}", entId.Handle, typeLabel, headerLog));
+                            }
+
                             continue;
                         }
 
                         table.UpgradeOpen();
+                        var matched = 0;
+                        var updated = 0;
+
                         try
                         {
                             switch (type)
                             {
                                 case XingTableType.Main:
-                                    UpdateMainTable(table, byKey);
+                                    UpdateMainTable(table, byKey, out matched, out updated);
                                     break;
                                 case XingTableType.Page:
-                                    UpdatePageTable(table, byKey);
+                                    UpdatePageTable(table, byKey, out matched, out updated);
                                     break;
                                 case XingTableType.LatLong:
-                                    UpdateLatLongTable(table, byKey);
+                                    UpdateLatLongTable(table, byKey, out matched, out updated);
                                     break;
                             }
 
-                            _factory.TagTable(tr, table, type.ToString().ToUpperInvariant());
+                            _factory.TagTable(tr, table, typeLabel);
+                            Log(string.Format(CultureInfo.InvariantCulture, "Table {0}: {1} matched={2} updated={3}", entId.Handle, typeLabel, matched, updated));
                         }
                         catch (System.Exception ex)
                         {
-                            editor.WriteMessage("\n[CrossingManager] Failed to update table {0}: {1}", entId.Handle, ex.Message);
+                            Log(string.Format(CultureInfo.InvariantCulture, "Failed to update table {0}: {1}", entId.Handle, ex.Message));
                         }
                     }
                 }
@@ -190,6 +228,17 @@ namespace XingManager.Services
             return XingTableType.Unknown;
         }
 
+        private void Log(string msg)
+        {
+            try
+            {
+                _ed?.WriteMessage("\n[CrossingManager] " + msg);
+            }
+            catch
+            {
+            }
+        }
+
         private static bool IsMainHeader(List<string> headers)
         {
             var expected = new[] { "XING", "OWNER", "DESCRIPTION", "LOCATION", "DWG_REF" };
@@ -248,7 +297,7 @@ namespace XingManager.Services
             var builder = new StringBuilder(header.Length);
             foreach (var ch in header)
             {
-                if (ch == ' ' || ch == '.' || ch == ',' || ch == '#' || ch == '_')
+                if (char.IsWhiteSpace(ch) || ch == '.' || ch == ',' || ch == '#' || ch == '_' || ch == '-' || ch == '/' || ch == '(' || ch == ')')
                 {
                     continue;
                 }
@@ -259,7 +308,7 @@ namespace XingManager.Services
             var normalized = builder.ToString();
             if (columnIndex == 4)
             {
-                if (normalized == "DWGREF" || normalized == "XINGDWGREF" || normalized == "XINGDWGREFNO" || normalized == "XINGDWGREFNUMBER")
+                if (MainDwgColumnSynonyms.Contains(normalized))
                 {
                     return "DWGREF";
                 }
@@ -291,10 +340,37 @@ namespace XingManager.Services
                 return text.Trim();
             }
 
-            var blockValue = TryGetBlockAttributeValue(table, row, col, "CROSSING");
-            if (!string.IsNullOrWhiteSpace(blockValue))
+            foreach (var tag in CrossingAttributeTags)
             {
-                return blockValue.Trim();
+                var blockValue = TryGetBlockAttributeValue(table, row, col, tag);
+                if (!string.IsNullOrWhiteSpace(blockValue))
+                {
+                    return blockValue.Trim();
+                }
+            }
+
+            var attrProperty = cell?.GetType().GetProperty("BlockAttributeValue", BindingFlags.Public | BindingFlags.Instance);
+            if (attrProperty != null)
+            {
+                try
+                {
+                    var attrValue = attrProperty.GetValue(cell, null) as string;
+                    if (!string.IsNullOrWhiteSpace(attrValue))
+                    {
+                        return attrValue.Trim();
+                    }
+                }
+                catch
+                {
+                }
+            }
+
+            foreach (var content in EnumerateCellContents(cell))
+            {
+                if (!string.IsNullOrWhiteSpace(content))
+                {
+                    return content.Trim();
+                }
             }
 
             return string.Empty;
@@ -319,8 +395,10 @@ namespace XingManager.Services
             cell.TextString = value ?? string.Empty;
         }
 
-        private void UpdateMainTable(Table table, IDictionary<string, CrossingRecord> byKey)
+        private void UpdateMainTable(Table table, IDictionary<string, CrossingRecord> byKey, out int matched, out int updated)
         {
+            matched = 0;
+            updated = 0;
             for (var row = 1; row < table.Rows.Count; row++)
             {
                 var crossingKey = ResolveCrossingKey(table, row, 0);
@@ -330,18 +408,64 @@ namespace XingManager.Services
                     continue;
                 }
 
-                SetCellCrossingValue(table, row, 0, record.Crossing);
-                SetCellValue(table.Cells[row, 1], record.Owner);
-                SetCellValue(table.Cells[row, 2], record.Description);
-                SetCellValue(table.Cells[row, 3], record.Location);
-                SetCellValue(table.Cells[row, 4], record.DwgRef);
+                matched++;
+
+                var desiredCrossing = (record.Crossing ?? string.Empty).Trim();
+                var desiredOwner = record.Owner ?? string.Empty;
+                var desiredDescription = record.Description ?? string.Empty;
+                var desiredLocation = record.Location ?? string.Empty;
+                var desiredDwgRef = record.DwgRef ?? string.Empty;
+
+                var rowUpdated = false;
+
+                if (ValueDiffers(crossingKey, desiredCrossing))
+                {
+                    rowUpdated = true;
+                }
+
+                var ownerCell = table.Cells[row, 1];
+                if (ValueDiffers(ReadCellText(ownerCell), desiredOwner))
+                {
+                    rowUpdated = true;
+                }
+
+                var descriptionCell = table.Cells[row, 2];
+                if (ValueDiffers(ReadCellText(descriptionCell), desiredDescription))
+                {
+                    rowUpdated = true;
+                }
+
+                var locationCell = table.Cells[row, 3];
+                if (ValueDiffers(ReadCellText(locationCell), desiredLocation))
+                {
+                    rowUpdated = true;
+                }
+
+                var dwgRefCell = table.Cells[row, 4];
+                if (ValueDiffers(ReadCellText(dwgRefCell), desiredDwgRef))
+                {
+                    rowUpdated = true;
+                }
+
+                SetCellCrossingValue(table, row, 0, desiredCrossing);
+                SetCellValue(ownerCell, desiredOwner);
+                SetCellValue(descriptionCell, desiredDescription);
+                SetCellValue(locationCell, desiredLocation);
+                SetCellValue(dwgRefCell, desiredDwgRef);
+
+                if (rowUpdated)
+                {
+                    updated++;
+                }
             }
 
             RefreshTable(table);
         }
 
-        private void UpdatePageTable(Table table, IDictionary<string, CrossingRecord> byKey)
+        private void UpdatePageTable(Table table, IDictionary<string, CrossingRecord> byKey, out int matched, out int updated)
         {
+            matched = 0;
+            updated = 0;
             for (var row = 1; row < table.Rows.Count; row++)
             {
                 var crossingKey = ResolveCrossingKey(table, row, 0);
@@ -351,16 +475,48 @@ namespace XingManager.Services
                     continue;
                 }
 
-                SetCellCrossingValue(table, row, 0, record.Crossing);
-                SetCellValue(table.Cells[row, 1], record.Owner);
-                SetCellValue(table.Cells[row, 2], record.Description);
+                matched++;
+
+                var desiredCrossing = (record.Crossing ?? string.Empty).Trim();
+                var desiredOwner = record.Owner ?? string.Empty;
+                var desiredDescription = record.Description ?? string.Empty;
+
+                var rowUpdated = false;
+
+                if (ValueDiffers(crossingKey, desiredCrossing))
+                {
+                    rowUpdated = true;
+                }
+
+                var ownerCell = table.Cells[row, 1];
+                if (ValueDiffers(ReadCellText(ownerCell), desiredOwner))
+                {
+                    rowUpdated = true;
+                }
+
+                var descriptionCell = table.Cells[row, 2];
+                if (ValueDiffers(ReadCellText(descriptionCell), desiredDescription))
+                {
+                    rowUpdated = true;
+                }
+
+                SetCellCrossingValue(table, row, 0, desiredCrossing);
+                SetCellValue(ownerCell, desiredOwner);
+                SetCellValue(descriptionCell, desiredDescription);
+
+                if (rowUpdated)
+                {
+                    updated++;
+                }
             }
 
             RefreshTable(table);
         }
 
-        private void UpdateLatLongTable(Table table, IDictionary<string, CrossingRecord> byKey)
+        private void UpdateLatLongTable(Table table, IDictionary<string, CrossingRecord> byKey, out int matched, out int updated)
         {
+            matched = 0;
+            updated = 0;
             // Only expect a single data row but iterate defensively.
             for (var row = 1; row < table.Rows.Count; row++)
             {
@@ -371,10 +527,47 @@ namespace XingManager.Services
                     continue;
                 }
 
-                SetCellCrossingValue(table, row, 0, record.Crossing);
-                SetCellValue(table.Cells[row, 1], record.Description);
-                SetCellValue(table.Cells[row, 2], record.Lat);
-                SetCellValue(table.Cells[row, 3], record.Long);
+                matched++;
+
+                var desiredCrossing = (record.Crossing ?? string.Empty).Trim();
+                var desiredDescription = record.Description ?? string.Empty;
+                var desiredLat = record.Lat ?? string.Empty;
+                var desiredLong = record.Long ?? string.Empty;
+
+                var rowUpdated = false;
+
+                if (ValueDiffers(crossingKey, desiredCrossing))
+                {
+                    rowUpdated = true;
+                }
+
+                var descriptionCell = table.Cells[row, 1];
+                if (ValueDiffers(ReadCellText(descriptionCell), desiredDescription))
+                {
+                    rowUpdated = true;
+                }
+
+                var latCell = table.Cells[row, 2];
+                if (ValueDiffers(ReadCellText(latCell), desiredLat))
+                {
+                    rowUpdated = true;
+                }
+
+                var longCell = table.Cells[row, 3];
+                if (ValueDiffers(ReadCellText(longCell), desiredLong))
+                {
+                    rowUpdated = true;
+                }
+
+                SetCellCrossingValue(table, row, 0, desiredCrossing);
+                SetCellValue(descriptionCell, desiredDescription);
+                SetCellValue(latCell, desiredLat);
+                SetCellValue(longCell, desiredLong);
+
+                if (rowUpdated)
+                {
+                    updated++;
+                }
             }
 
             RefreshTable(table);
@@ -395,8 +588,197 @@ namespace XingManager.Services
                 return record;
             }
 
-            record = byKey.Values.FirstOrDefault(r => CrossingRecord.CompareCrossingKeys(r.Crossing, trimmedKey) == 0);
+            var normalizedKey = NormalizeCrossingLookupKey(trimmedKey);
+            if (!string.IsNullOrEmpty(normalizedKey) && !string.Equals(normalizedKey, trimmedKey, StringComparison.Ordinal))
+            {
+                if (byKey.TryGetValue(normalizedKey, out record))
+                {
+                    return record;
+                }
+            }
+
+            record = byKey.Values.FirstOrDefault(r => string.Equals(NormalizeCrossingLookupKey(r.Crossing), normalizedKey, StringComparison.Ordinal) || CrossingRecord.CompareCrossingKeys(r.Crossing, trimmedKey) == 0);
             return record;
+        }
+
+        private static string NormalizeCrossingLookupKey(string key)
+        {
+            if (string.IsNullOrWhiteSpace(key))
+            {
+                return string.Empty;
+            }
+
+            var trimmed = key.Trim().ToUpperInvariant();
+            var builder = new StringBuilder(trimmed.Length);
+            var inDigits = false;
+            var appendedDigitInRun = false;
+            var hasAnyDigits = trimmed.Any(char.IsDigit);
+
+            foreach (var ch in trimmed)
+            {
+                if (char.IsDigit(ch))
+                {
+                    if (!inDigits)
+                    {
+                        inDigits = true;
+                        appendedDigitInRun = false;
+                    }
+
+                    if (ch == '0' && !appendedDigitInRun)
+                    {
+                        continue;
+                    }
+
+                    builder.Append(ch);
+                    appendedDigitInRun = true;
+                    continue;
+                }
+
+                if (inDigits)
+                {
+                    if (!appendedDigitInRun && hasAnyDigits)
+                    {
+                        builder.Append('0');
+                    }
+
+                    inDigits = false;
+                    appendedDigitInRun = false;
+                }
+
+                if (char.IsLetter(ch))
+                {
+                    builder.Append(ch);
+                }
+            }
+
+            if (inDigits && !appendedDigitInRun)
+            {
+                builder.Append('0');
+            }
+
+            return builder.ToString();
+        }
+
+        private static bool ValueDiffers(string existing, string desired)
+        {
+            var left = (existing ?? string.Empty).Trim();
+            var right = (desired ?? string.Empty).Trim();
+            return !string.Equals(left, right, StringComparison.Ordinal);
+        }
+
+        private static string ReadCellText(Cell cell)
+        {
+            if (cell == null)
+            {
+                return string.Empty;
+            }
+
+            try
+            {
+                return cell.TextString ?? string.Empty;
+            }
+            catch
+            {
+                return string.Empty;
+            }
+        }
+
+        private static IEnumerable<string> EnumerateCellContents(Cell cell)
+        {
+            if (cell == null)
+            {
+                yield break;
+            }
+
+            var contentsProperty = cell.GetType().GetProperty("Contents", BindingFlags.Public | BindingFlags.Instance);
+            if (contentsProperty == null)
+            {
+                yield break;
+            }
+
+            object contents;
+            try
+            {
+                contents = contentsProperty.GetValue(cell, null);
+            }
+            catch
+            {
+                yield break;
+            }
+
+            var enumerable = contents as IEnumerable;
+            if (enumerable == null)
+            {
+                yield break;
+            }
+
+            foreach (var item in enumerable)
+            {
+                if (item == null)
+                {
+                    continue;
+                }
+
+                var textProp = item.GetType().GetProperty("TextString", BindingFlags.Public | BindingFlags.Instance);
+                if (textProp != null)
+                {
+                    string text = null;
+                    try
+                    {
+                        text = textProp.GetValue(item, null) as string;
+                    }
+                    catch
+                    {
+                        text = null;
+                    }
+
+                    if (!string.IsNullOrWhiteSpace(text))
+                    {
+                        yield return text;
+                        continue;
+                    }
+                }
+
+                var textValue = item.ToString();
+                if (!string.IsNullOrWhiteSpace(textValue))
+                {
+                    yield return textValue;
+                }
+            }
+        }
+
+        private static string BuildHeaderLog(Table table)
+        {
+            if (table == null)
+            {
+                return "headers=[]";
+            }
+
+            var rowCount = table.Rows.Count;
+            var columnCount = table.Columns.Count;
+
+            if (rowCount == 0 || columnCount <= 0)
+            {
+                return "headers=[]";
+            }
+
+            var headers = new List<string>(columnCount);
+            for (var col = 0; col < columnCount; col++)
+            {
+                string text;
+                try
+                {
+                    text = table.Cells[0, col].TextString ?? string.Empty;
+                }
+                catch
+                {
+                    text = string.Empty;
+                }
+
+                headers.Add(text.Trim());
+            }
+
+            return "headers=[" + string.Join("|", headers) + "]";
         }
 
         private static string TryGetBlockAttributeValue(Table table, int row, int col, string tag)
