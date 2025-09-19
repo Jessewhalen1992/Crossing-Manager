@@ -12,7 +12,7 @@ using Autodesk.AutoCAD.Geometry;
 using XingManager.Models;
 using XingManager.Services;
 using WinFormsFlowDirection = System.Windows.Forms.FlowDirection;
-
+using AcadApp = Autodesk.AutoCAD.ApplicationServices.Application;
 namespace XingManager
 {
     public partial class XingForm : UserControl
@@ -81,7 +81,7 @@ namespace XingManager
 
         public void MatchTableFromCommand()
         {
-            var doc = Application.DocumentManager.MdiActiveDocument;
+            var doc = AcadApp.DocumentManager.MdiActiveDocument;
             if (doc == null)
             {
                 return;
