@@ -240,6 +240,7 @@ namespace XingManager.Services
             private readonly DataGridView _grid;
             private readonly BindingSource _binding;
             private readonly List<DuplicateCandidate> _candidates;
+            private readonly List<DisplayCandidate> _displayCandidates;
             private readonly string _crossingLabel;
 
             public DuplicateResolverDialog(List<DuplicateCandidate> candidates, string crossingLabel, int groupIndex, int groupCount)
@@ -248,6 +249,7 @@ namespace XingManager.Services
                     throw new ArgumentNullException("candidates");
 
                 _candidates = candidates;
+                _displayCandidates = BuildDisplayCandidates(_candidates);
                 _crossingLabel = string.IsNullOrWhiteSpace(crossingLabel) ? "Crossing" : crossingLabel;
 
                 Text = BuildDialogTitle(groupIndex, groupCount);
@@ -263,7 +265,7 @@ namespace XingManager.Services
                 FormBorderStyle = FormBorderStyle.FixedDialog;
 
                 _binding = new BindingSource();
-                _binding.DataSource = _candidates;
+                _binding.DataSource = _displayCandidates;
 
                 _grid = new DataGridView
                 {
@@ -394,12 +396,12 @@ namespace XingManager.Services
                     _grid.CommitEdit(DataGridViewDataErrorContexts.Commit);
                     _grid.EndEdit();
 
-                    var candidate = (DuplicateCandidate)_binding[e.RowIndex];
+                    var candidate = (DisplayCandidate)_binding[e.RowIndex];
 
                     // Toggle only within this CrossingKey group
-                    foreach (var item in _candidates.Where(c => string.Equals(c.CrossingKey, candidate.CrossingKey, StringComparison.OrdinalIgnoreCase)))
+                    foreach (var item in _displayCandidates.Where(c => string.Equals(c.CrossingKey, candidate.CrossingKey, StringComparison.OrdinalIgnoreCase)))
                     {
-                        item.Canonical = ReferenceEquals(item, candidate);
+                        item.SetCanonical(ReferenceEquals(item, candidate));
                     }
 
                     _binding.ResetBindings(false);
@@ -432,6 +434,95 @@ namespace XingManager.Services
                 groupIndex = Math.Max(1, groupIndex);
 
                 return string.Format("Resolve Duplicate Crossings ({0} of {1})", groupIndex, groupCount);
+            }
+
+            private static List<DisplayCandidate> BuildDisplayCandidates(IEnumerable<DuplicateCandidate> candidates)
+            {
+                if (candidates == null)
+                    return new List<DisplayCandidate>();
+
+                return candidates
+                    .GroupBy(c => BuildCandidateSignature(c), StringComparer.OrdinalIgnoreCase)
+                    .Select(g => new DisplayCandidate(g.ToList()))
+                    .ToList();
+            }
+
+            private class DisplayCandidate
+            {
+                private readonly List<DuplicateCandidate> _members;
+
+                public DisplayCandidate(List<DuplicateCandidate> members)
+                {
+                    if (members == null || members.Count == 0)
+                        throw new ArgumentException("members");
+
+                    _members = members;
+                }
+
+                private DuplicateCandidate Representative
+                {
+                    get { return _members[0]; }
+                }
+
+                public string Crossing
+                {
+                    get { return Representative.Crossing; }
+                }
+
+                public string CrossingKey
+                {
+                    get { return Representative.CrossingKey; }
+                }
+
+                public string Layout
+                {
+                    get { return Representative.Layout; }
+                }
+
+                public string Owner
+                {
+                    get { return Representative.Owner; }
+                }
+
+                public string Description
+                {
+                    get { return Representative.Description; }
+                }
+
+                public string Location
+                {
+                    get { return Representative.Location; }
+                }
+
+                public string DwgRef
+                {
+                    get { return Representative.DwgRef; }
+                }
+
+                public string Lat
+                {
+                    get { return Representative.Lat; }
+                }
+
+                public string Long
+                {
+                    get { return Representative.Long; }
+                }
+
+                public bool Canonical
+                {
+                    get { return _members.Any(m => m.Canonical); }
+                    set { SetCanonical(value); }
+                }
+
+                public void SetCanonical(bool isCanonical)
+                {
+                    foreach (var member in _members)
+                        member.Canonical = false;
+
+                    if (isCanonical)
+                        Representative.Canonical = true;
+                }
             }
         }
     }
