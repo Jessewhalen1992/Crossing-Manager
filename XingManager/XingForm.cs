@@ -79,6 +79,17 @@ namespace XingManager
             CreateOrUpdateLatLongTable();
         }
 
+        public void MatchTableFromCommand()
+        {
+            var doc = Application.DocumentManager.MdiActiveDocument;
+            if (doc == null)
+            {
+                return;
+            }
+
+            doc.SendStringToExecute("XING_MATCH_TABLE ", true, false, true);
+        }
+
         public void RenumberSequentiallyFromCommand()
         {
             RenumberSequential();
@@ -294,6 +305,11 @@ namespace XingManager
         {
             RenumberSequential();
             _isDirty = true;
+        }
+
+        private void btnMatchTable_Click(object sender, EventArgs e)
+        {
+            MatchTableFromCommand();
         }
 
         private void btnGeneratePage_Click(object sender, EventArgs e)
