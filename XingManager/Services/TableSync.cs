@@ -558,6 +558,125 @@ namespace XingManager.Services
             return StripMTextFormatting(text).Trim();
         }
 
+        private static string Norm(string s)
+        {
+            if (string.IsNullOrWhiteSpace(s))
+            {
+                return string.Empty;
+            }
+
+            return StripMTextFormatting(s).Trim();
+        }
+
+        private static string ReadNorm(Table t, int row, int col)
+        {
+            return Norm(ReadCellText(t, row, col));
+        }
+
+        private static CrossingRecord FindRecordByMainColumns(Table t, int row, IEnumerable<CrossingRecord> records)
+        {
+            if (t == null || records == null)
+            {
+                return null;
+            }
+
+            var owner = ReadNorm(t, row, 1);
+            var desc = ReadNorm(t, row, 2);
+            var loc = ReadNorm(t, row, 3);
+            var dwg = ReadNorm(t, row, 4);
+
+            var candidates = records.Where(r =>
+                string.Equals(Norm(r?.Owner), owner, StringComparison.Ordinal) &&
+                string.Equals(Norm(r?.Description), desc, StringComparison.Ordinal) &&
+                string.Equals(Norm(r?.Location), loc, StringComparison.Ordinal) &&
+                string.Equals(Norm(r?.DwgRef), dwg, StringComparison.Ordinal)
+            ).ToList();
+
+            if (candidates.Count == 1)
+            {
+                return candidates[0];
+            }
+
+            candidates = records.Where(r =>
+                string.Equals(Norm(r?.Description), desc, StringComparison.Ordinal) &&
+                string.Equals(Norm(r?.Location), loc, StringComparison.Ordinal) &&
+                string.Equals(Norm(r?.DwgRef), dwg, StringComparison.Ordinal)
+            ).ToList();
+            if (candidates.Count == 1)
+            {
+                return candidates[0];
+            }
+
+            candidates = records.Where(r =>
+                string.Equals(Norm(r?.Description), desc, StringComparison.Ordinal) &&
+                string.Equals(Norm(r?.Location), loc, StringComparison.Ordinal)
+            ).ToList();
+            if (candidates.Count == 1)
+            {
+                return candidates[0];
+            }
+
+            candidates = records.Where(r =>
+                string.Equals(Norm(r?.Description), desc, StringComparison.Ordinal)
+            ).ToList();
+
+            return candidates.Count == 1 ? candidates[0] : null;
+        }
+
+        private static CrossingRecord FindRecordByPageColumns(Table t, int row, IEnumerable<CrossingRecord> records)
+        {
+            if (t == null || records == null)
+            {
+                return null;
+            }
+
+            var owner = ReadNorm(t, row, 1);
+            var desc = ReadNorm(t, row, 2);
+
+            var candidates = records.Where(r =>
+                string.Equals(Norm(r?.Owner), owner, StringComparison.Ordinal) &&
+                string.Equals(Norm(r?.Description), desc, StringComparison.Ordinal)
+            ).ToList();
+            if (candidates.Count == 1)
+            {
+                return candidates[0];
+            }
+
+            candidates = records.Where(r =>
+                string.Equals(Norm(r?.Description), desc, StringComparison.Ordinal)
+            ).ToList();
+
+            return candidates.Count == 1 ? candidates[0] : null;
+        }
+
+        private static CrossingRecord FindRecordByLatLongColumns(Table t, int row, IEnumerable<CrossingRecord> records)
+        {
+            if (t == null || records == null)
+            {
+                return null;
+            }
+
+            var desc = ReadNorm(t, row, 1);
+            var lat = ReadNorm(t, row, 2);
+            var lng = ReadNorm(t, row, 3);
+
+            var candidates = records.Where(r =>
+                string.Equals(Norm(r?.Description), desc, StringComparison.Ordinal) &&
+                string.Equals(Norm(r?.Lat), lat, StringComparison.Ordinal) &&
+                string.Equals(Norm(r?.Long), lng, StringComparison.Ordinal)
+            ).ToList();
+            if (candidates.Count == 1)
+            {
+                return candidates[0];
+            }
+
+            candidates = records.Where(r =>
+                string.Equals(Norm(r?.Description), desc, StringComparison.Ordinal)
+            ).ToList();
+
+            return candidates.Count == 1 ? candidates[0] : null;
+        }
+
         private static string NormalizeKeyForLookup(string s)
         {
             if (string.IsNullOrWhiteSpace(s))
@@ -589,6 +708,51 @@ namespace XingManager.Services
             }
 
             return "X" + digits;
+        }
+
+        private static CrossingRecord FindRecordByKey(IDictionary<string, CrossingRecord> byKey, string normalizedKey, string rawKey)
+        {
+            if (byKey == null)
+            {
+                return null;
+            }
+
+            CrossingRecord record = null;
+
+            if (!string.IsNullOrEmpty(normalizedKey))
+            {
+                if (byKey.TryGetValue(normalizedKey, out record))
+                {
+                    return record;
+                }
+
+                record = byKey.Values.FirstOrDefault(r => r != null && (
+                    string.Equals(NormalizeKeyForLookup(r.Crossing), normalizedKey, StringComparison.Ordinal) ||
+                    string.Equals(NormalizeKeyForLookup(r.CrossingKey), normalizedKey, StringComparison.Ordinal) ||
+                    CrossingRecord.CompareCrossingKeys(r.Crossing, normalizedKey) == 0));
+                if (record != null)
+                {
+                    return record;
+                }
+            }
+
+            var trimmedRaw = string.IsNullOrWhiteSpace(rawKey) ? string.Empty : rawKey.Trim();
+            if (!string.IsNullOrEmpty(trimmedRaw))
+            {
+                if (byKey.TryGetValue(trimmedRaw, out record))
+                {
+                    return record;
+                }
+
+                record = byKey.Values.FirstOrDefault(r =>
+                    r != null && string.Equals(r.CrossingKey, trimmedRaw, StringComparison.OrdinalIgnoreCase));
+                if (record != null)
+                {
+                    return record;
+                }
+            }
+
+            return null;
         }
 
         private static void SetCellCrossingValue(Table t, int row, int col, string crossingText)
@@ -634,15 +798,23 @@ namespace XingManager.Services
 
             var columnCount = table.Columns.Count;
 
+            var records = byKey?.Values ?? Enumerable.Empty<CrossingRecord>();
+
             for (var row = 0; row < table.Rows.Count; row++)
             {
-                var crossingKey = ResolveCrossingKey(table, row, 0);
-                var logKey = crossingKey ?? string.Empty;
-                Log(string.Format(CultureInfo.InvariantCulture, "Row {0} key='{1}'", row, logKey));
-                var record = FindRecordForKey(byKey, crossingKey);
+                var rawKey = ResolveCrossingKey(table, row, 0);
+                var key = NormalizeKeyForLookup(rawKey);
+                var logKey = !string.IsNullOrEmpty(key) ? key : (rawKey ?? string.Empty);
+
+                var record = FindRecordByKey(byKey, key, rawKey);
                 if (record == null)
                 {
-                    Log(string.Format(CultureInfo.InvariantCulture, "Row {0} key='{1}' -> NO MATCH", row, logKey));
+                    record = FindRecordByMainColumns(table, row, records);
+                }
+
+                if (record == null)
+                {
+                    Log(string.Format(CultureInfo.InvariantCulture, "Row {0} -> NO MATCH (key='{1}')", row, logKey));
                     continue;
                 }
 
@@ -656,7 +828,7 @@ namespace XingManager.Services
 
                 var rowUpdated = false;
 
-                if (columnCount > 0 && ValueDiffers(crossingKey, desiredCrossing))
+                if (columnCount > 0 && ValueDiffers(rawKey, desiredCrossing))
                 {
                     rowUpdated = true;
                 }
@@ -745,11 +917,9 @@ namespace XingManager.Services
                 if (rowUpdated)
                 {
                     updated++;
-                    Log(string.Format(CultureInfo.InvariantCulture, "Row {0} key='{1}' -> UPDATED", row, logKey));
+                    Log(string.Format(CultureInfo.InvariantCulture, "Row {0} -> UPDATED (key='{1}')", row, logKey));
                 }
             }
-
-            RefreshTable(table);
         }
 
         private void UpdatePageTable(Table table, IDictionary<string, CrossingRecord> byKey, out int matched, out int updated)
@@ -763,15 +933,23 @@ namespace XingManager.Services
 
             var columnCount = table.Columns.Count;
 
+            var records = byKey?.Values ?? Enumerable.Empty<CrossingRecord>();
+
             for (var row = 0; row < table.Rows.Count; row++)
             {
-                var crossingKey = ResolveCrossingKey(table, row, 0);
-                var logKey = crossingKey ?? string.Empty;
-                Log(string.Format(CultureInfo.InvariantCulture, "Row {0} key='{1}'", row, logKey));
-                var record = FindRecordForKey(byKey, crossingKey);
+                var rawKey = ResolveCrossingKey(table, row, 0);
+                var key = NormalizeKeyForLookup(rawKey);
+                var logKey = !string.IsNullOrEmpty(key) ? key : (rawKey ?? string.Empty);
+
+                var record = FindRecordByKey(byKey, key, rawKey);
                 if (record == null)
                 {
-                    Log(string.Format(CultureInfo.InvariantCulture, "Row {0} key='{1}' -> NO MATCH", row, logKey));
+                    record = FindRecordByPageColumns(table, row, records);
+                }
+
+                if (record == null)
+                {
+                    Log(string.Format(CultureInfo.InvariantCulture, "Row {0} -> NO MATCH (key='{1}')", row, logKey));
                     continue;
                 }
 
@@ -783,7 +961,7 @@ namespace XingManager.Services
 
                 var rowUpdated = false;
 
-                if (columnCount > 0 && ValueDiffers(crossingKey, desiredCrossing))
+                if (columnCount > 0 && ValueDiffers(rawKey, desiredCrossing))
                 {
                     rowUpdated = true;
                 }
@@ -834,11 +1012,9 @@ namespace XingManager.Services
                 if (rowUpdated)
                 {
                     updated++;
-                    Log(string.Format(CultureInfo.InvariantCulture, "Row {0} key='{1}' -> UPDATED", row, logKey));
+                    Log(string.Format(CultureInfo.InvariantCulture, "Row {0} -> UPDATED (key='{1}')", row, logKey));
                 }
             }
-
-            RefreshTable(table);
         }
 
         private void UpdateLatLongTable(Table table, IDictionary<string, CrossingRecord> byKey, out int matched, out int updated)
@@ -852,15 +1028,23 @@ namespace XingManager.Services
 
             var columnCount = table.Columns.Count;
 
+            var records = byKey?.Values ?? Enumerable.Empty<CrossingRecord>();
+
             for (var row = 0; row < table.Rows.Count; row++)
             {
-                var crossingKey = ResolveCrossingKey(table, row, 0);
-                var logKey = crossingKey ?? string.Empty;
-                Log(string.Format(CultureInfo.InvariantCulture, "Row {0} key='{1}'", row, logKey));
-                var record = FindRecordForKey(byKey, crossingKey);
+                var rawKey = ResolveCrossingKey(table, row, 0);
+                var key = NormalizeKeyForLookup(rawKey);
+                var logKey = !string.IsNullOrEmpty(key) ? key : (rawKey ?? string.Empty);
+
+                var record = FindRecordByKey(byKey, key, rawKey);
                 if (record == null)
                 {
-                    Log(string.Format(CultureInfo.InvariantCulture, "Row {0} key='{1}' -> NO MATCH", row, logKey));
+                    record = FindRecordByLatLongColumns(table, row, records);
+                }
+
+                if (record == null)
+                {
+                    Log(string.Format(CultureInfo.InvariantCulture, "Row {0} -> NO MATCH (key='{1}')", row, logKey));
                     continue;
                 }
 
@@ -873,7 +1057,7 @@ namespace XingManager.Services
 
                 var rowUpdated = false;
 
-                if (columnCount > 0 && ValueDiffers(crossingKey, desiredCrossing))
+                if (columnCount > 0 && ValueDiffers(rawKey, desiredCrossing))
                 {
                     rowUpdated = true;
                 }
@@ -943,120 +1127,9 @@ namespace XingManager.Services
                 if (rowUpdated)
                 {
                     updated++;
-                    Log(string.Format(CultureInfo.InvariantCulture, "Row {0} key='{1}' -> UPDATED", row, logKey));
+                    Log(string.Format(CultureInfo.InvariantCulture, "Row {0} -> UPDATED (key='{1}')", row, logKey));
                 }
             }
-
-            RefreshTable(table);
-        }
-
-        private static CrossingRecord FindRecordForKey(IDictionary<string, CrossingRecord> byKey, string crossingKey)
-        {
-            if (byKey == null)
-            {
-                return null;
-            }
-
-            var trimmedKey = crossingKey == null ? string.Empty : crossingKey.Trim();
-            if (string.IsNullOrEmpty(trimmedKey))
-            {
-                return null;
-            }
-
-            CrossingRecord record;
-            if (byKey.TryGetValue(trimmedKey, out record))
-            {
-                return record;
-            }
-
-            var normalizedKey = NormalizeCrossingLookupKey(trimmedKey);
-            if (!string.IsNullOrEmpty(normalizedKey) && !string.Equals(normalizedKey, trimmedKey, StringComparison.Ordinal))
-            {
-                if (byKey.TryGetValue(normalizedKey, out record))
-                {
-                    return record;
-                }
-            }
-
-            var finalKey = NormalizeKeyForLookup(trimmedKey);
-            if (!string.IsNullOrEmpty(finalKey))
-            {
-                if (!string.Equals(finalKey, trimmedKey, StringComparison.Ordinal) && byKey.TryGetValue(finalKey, out record))
-                {
-                    return record;
-                }
-
-                record = byKey.Values.FirstOrDefault(r => r != null &&
-                    (string.Equals(NormalizeKeyForLookup(r.Crossing), finalKey, StringComparison.Ordinal) ||
-                     string.Equals(NormalizeKeyForLookup(r.CrossingKey), finalKey, StringComparison.Ordinal)));
-                if (record != null)
-                {
-                    return record;
-                }
-            }
-
-            record = byKey.Values.FirstOrDefault(r =>
-                string.Equals(NormalizeCrossingLookupKey(r.Crossing), normalizedKey, StringComparison.Ordinal) ||
-                CrossingRecord.CompareCrossingKeys(r.Crossing, trimmedKey) == 0);
-            return record;
-        }
-
-        private static string NormalizeCrossingLookupKey(string key)
-        {
-            if (string.IsNullOrWhiteSpace(key))
-            {
-                return string.Empty;
-            }
-
-            var trimmed = key.Trim().ToUpperInvariant();
-            var builder = new StringBuilder(trimmed.Length);
-            var inDigits = false;
-            var appendedDigitInRun = false;
-            var hasAnyDigits = trimmed.Any(char.IsDigit);
-
-            foreach (var ch in trimmed)
-            {
-                if (char.IsDigit(ch))
-                {
-                    if (!inDigits)
-                    {
-                        inDigits = true;
-                        appendedDigitInRun = false;
-                    }
-
-                    if (ch == '0' && !appendedDigitInRun)
-                    {
-                        continue;
-                    }
-
-                    builder.Append(ch);
-                    appendedDigitInRun = true;
-                    continue;
-                }
-
-                if (inDigits)
-                {
-                    if (!appendedDigitInRun && hasAnyDigits)
-                    {
-                        builder.Append('0');
-                    }
-
-                    inDigits = false;
-                    appendedDigitInRun = false;
-                }
-
-                if (char.IsLetter(ch))
-                {
-                    builder.Append(ch);
-                }
-            }
-
-            if (inDigits && !appendedDigitInRun)
-            {
-                builder.Append('0');
-            }
-
-            return builder.ToString();
         }
 
         private static bool ValueDiffers(string existing, string desired)
@@ -1390,33 +1463,5 @@ namespace XingManager.Services
             }
         }
 
-        private static void RefreshTable(Table table)
-        {
-            if (table == null)
-            {
-                return;
-            }
-
-            var recompute = table.GetType().GetMethod("RecomputeTableBlock", new[] { typeof(bool) });
-            if (recompute != null)
-            {
-                try
-                {
-                    recompute.Invoke(table, new object[] { true });
-                    return;
-                }
-                catch
-                {
-                }
-            }
-
-            try
-            {
-                table.GenerateLayout();
-            }
-            catch
-            {
-            }
-        }
     }
 }
