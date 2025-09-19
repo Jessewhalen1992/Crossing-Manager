@@ -39,45 +39,56 @@ namespace XingManager.Services
             if (!duplicateCandidates.Any())
                 return true; // nothing to resolve
 
-            using (var dialog = new DuplicateResolverDialog(duplicateCandidates))
-            {
-                if (dialog.ShowDialog() != DialogResult.OK)
-                    return false;
+            var duplicateGroups = duplicateCandidates
+                .GroupBy(c => c.CrossingKey, StringComparer.OrdinalIgnoreCase)
+                .Select(g => g.ToList())
+                .Where(group => group.Count > 1)
+                .ToList();
 
-                // Push the chosen canonical values back to the record + all contexts for that crossing
-                foreach (var group in duplicateCandidates.GroupBy(c => c.CrossingKey, StringComparer.OrdinalIgnoreCase))
+            for (var i = 0; i < duplicateGroups.Count; i++)
+            {
+                var group = duplicateGroups[i];
+                var displayName = !string.IsNullOrWhiteSpace(group[0].Crossing)
+                    ? group[0].Crossing
+                    : group[0].CrossingKey;
+
+                using (var dialog = new DuplicateResolverDialog(group, displayName, i + 1, duplicateGroups.Count))
                 {
-                    var record = records.First(r => string.Equals(r.CrossingKey, group.Key, StringComparison.OrdinalIgnoreCase));
-                    var selected = group.FirstOrDefault(c => c.Canonical);
-                    if (selected == null)
+                    if (dialog.ShowDialog() != DialogResult.OK)
+                        return false;
+                }
+
+                var selected = group.FirstOrDefault(c => c.Canonical);
+                if (selected == null)
+                    continue;
+
+                var record = records.First(r => string.Equals(r.CrossingKey, group[0].CrossingKey, StringComparison.OrdinalIgnoreCase));
+
+                // Promote selected candidate's values to the record (canonical snapshot)
+                record.CanonicalInstance = selected.ObjectId;
+                record.Crossing = selected.Crossing;
+                record.Owner = selected.Owner;
+                record.Description = selected.Description;
+                record.Location = selected.Location;
+                record.DwgRef = selected.DwgRef;
+                record.Lat = selected.Lat;
+                record.Long = selected.Long;
+
+                // Write the chosen values into every instance context of the group
+                foreach (var candidate in group)
+                {
+                    if (contexts == null)
                         continue;
 
-                    // Promote selected candidate's values to the record (canonical snapshot)
-                    record.CanonicalInstance = selected.ObjectId;
-                    record.Crossing = selected.Crossing;
-                    record.Owner = selected.Owner;
-                    record.Description = selected.Description;
-                    record.Location = selected.Location;
-                    record.DwgRef = selected.DwgRef;
-                    record.Lat = selected.Lat;
-                    record.Long = selected.Long;
-
-                    // Write the chosen values into every instance context of the group
-                    foreach (var candidate in group)
+                    InstanceContext ctx;
+                    if (contexts.TryGetValue(candidate.ObjectId, out ctx) && ctx != null)
                     {
-                        if (contexts == null)
-                            continue;
-
-                        InstanceContext ctx;
-                        if (contexts.TryGetValue(candidate.ObjectId, out ctx) && ctx != null)
-                        {
-                            ctx.Owner = selected.Owner;
-                            ctx.Description = selected.Description;
-                            ctx.Location = selected.Location;
-                            ctx.DwgRef = selected.DwgRef;
-                            ctx.Lat = selected.Lat;
-                            ctx.Long = selected.Long;
-                        }
+                        ctx.Owner = selected.Owner;
+                        ctx.Description = selected.Description;
+                        ctx.Location = selected.Location;
+                        ctx.DwgRef = selected.DwgRef;
+                        ctx.Lat = selected.Lat;
+                        ctx.Long = selected.Long;
                     }
                 }
             }
@@ -181,12 +192,17 @@ namespace XingManager.Services
             private readonly DataGridView _grid;
             private readonly BindingSource _binding;
             private readonly List<DuplicateCandidate> _candidates;
+            private readonly string _crossingLabel;
 
-            public DuplicateResolverDialog(List<DuplicateCandidate> candidates)
+            public DuplicateResolverDialog(List<DuplicateCandidate> candidates, string crossingLabel, int groupIndex, int groupCount)
             {
-                _candidates = candidates;
+                if (candidates == null)
+                    throw new ArgumentNullException("candidates");
 
-                Text = "Resolve Duplicate Crossings";
+                _candidates = candidates;
+                _crossingLabel = string.IsNullOrWhiteSpace(crossingLabel) ? "Crossing" : crossingLabel;
+
+                Text = BuildDialogTitle(groupIndex, groupCount);
                 Width = 1000;
                 Height = 400;
                 StartPosition = FormStartPosition.CenterParent;
@@ -279,6 +295,14 @@ namespace XingManager.Services
 
                 _grid.CellContentClick += GridOnCellContentClick;
 
+                var headerLabel = new Label
+                {
+                    Dock = DockStyle.Top,
+                    Padding = new Padding(10),
+                    Height = 40,
+                    Text = string.Format("Select the canonical instance for {0} ({1} of {2}).", _crossingLabel, groupIndex, groupCount)
+                };
+
                 var buttonPanel = new FlowLayoutPanel
                 {
                     Dock = DockStyle.Bottom,
@@ -296,6 +320,7 @@ namespace XingManager.Services
 
                 Controls.Add(_grid);
                 Controls.Add(buttonPanel);
+                Controls.Add(headerLabel);
 
                 AcceptButton = okButton;
                 CancelButton = cancelButton;
@@ -325,29 +350,30 @@ namespace XingManager.Services
 
             private void OkButtonOnClick(object sender, EventArgs e)
             {
-                // Validate each duplicate group has exactly one canonical
-                var keys = _candidates.Select(c => c.CrossingKey).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
-                foreach (var key in keys)
+                var chosen = _candidates.Count(c => c.Canonical);
+                if (chosen != 1)
                 {
-                    var group = _candidates.Where(c => string.Equals(c.CrossingKey, key, StringComparison.OrdinalIgnoreCase)).ToList();
-                    if (group.Count <= 1)
-                        continue; // not a duplicate group
-
-                    var chosen = group.Count(c => c.Canonical);
-                    if (chosen != 1)
-                    {
-                        MessageBox.Show(
-                            "Please select exactly one canonical for " + (group[0].Crossing ?? key) + ".",
-                            "Resolve Duplicate Crossings",
-                            MessageBoxButtons.OK,
-                            MessageBoxIcon.Information);
-                        this.DialogResult = DialogResult.None; // prevent close
-                        return;
-                    }
+                    MessageBox.Show(
+                        "Please select exactly one canonical for " + _crossingLabel + ".",
+                        "Resolve Duplicate Crossings",
+                        MessageBoxButtons.OK,
+                        MessageBoxIcon.Information);
+                    this.DialogResult = DialogResult.None; // prevent close
+                    return;
                 }
 
                 this.DialogResult = DialogResult.OK;
                 Close();
+            }
+
+            private static string BuildDialogTitle(int groupIndex, int groupCount)
+            {
+                if (groupCount <= 0)
+                    return "Resolve Duplicate Crossings";
+
+                groupIndex = Math.Max(1, groupIndex);
+
+                return string.Format("Resolve Duplicate Crossings ({0} of {1})", groupIndex, groupCount);
             }
         }
     }
