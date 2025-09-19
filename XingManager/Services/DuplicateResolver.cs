@@ -124,11 +124,12 @@ namespace XingManager.Services
                 }
 
                 // Build UI candidates (use per-instance values only so differences are visible)
+                var recordCandidates = new List<DuplicateCandidate>();
                 foreach (var objectId in record.AllInstances)
                 {
                     var ctx = GetContext(contexts, objectId);
 
-                    list.Add(new DuplicateCandidate
+                    recordCandidates.Add(new DuplicateCandidate
                     {
                         Crossing = record.Crossing ?? string.Empty,
                         CrossingKey = record.CrossingKey,
@@ -143,6 +144,11 @@ namespace XingManager.Services
                         Canonical = objectId == record.CanonicalInstance
                     });
                 }
+
+                if (!RequiresResolution(recordCandidates))
+                    continue;
+
+                list.AddRange(recordCandidates);
             }
 
             return list;
@@ -185,6 +191,46 @@ namespace XingManager.Services
             public string Long { get; set; }
             public ObjectId ObjectId { get; set; }
             public bool Canonical { get; set; }
+        }
+
+        private static bool RequiresResolution(List<DuplicateCandidate> candidates)
+        {
+            if (candidates == null || candidates.Count <= 1)
+                return false;
+
+            var signatures = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var candidate in candidates)
+            {
+                var signature = BuildCandidateSignature(candidate);
+                signatures.Add(signature);
+
+                if (signatures.Count > 1)
+                    return true;
+            }
+
+            return false;
+        }
+
+        private static string BuildCandidateSignature(DuplicateCandidate candidate)
+        {
+            if (candidate == null)
+                return string.Empty;
+
+            return string.Join(
+                "|",
+                NormalizeAttribute(candidate.Owner),
+                NormalizeAttribute(candidate.Description),
+                NormalizeAttribute(candidate.Location),
+                NormalizeAttribute(candidate.DwgRef),
+                NormalizeAttribute(candidate.Lat),
+                NormalizeAttribute(candidate.Long));
+        }
+
+        private static string NormalizeAttribute(string value)
+        {
+            return string.IsNullOrWhiteSpace(value)
+                ? string.Empty
+                : value.Trim();
         }
 
         // ---------------------------- Inner dialog (WINFORMS) ----------------------------
