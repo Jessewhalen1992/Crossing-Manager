@@ -223,7 +223,7 @@ namespace XingManager.Services
 
             if (table.Columns.Count == 4 && table.Rows.Count >= 1)
             {
-                if (HasHeaderRow(table, 4, IsLatLongHeader))
+                if (HasHeaderRow(table, 4, IsLatLongHeader) || LooksLikeLatLongTable(table))
                 {
                     return XingTableType.LatLong;
                 }
@@ -282,6 +282,25 @@ namespace XingManager.Services
 
         private static bool HasHeaderRow(Table table, int columnCount, Func<List<string>, bool> predicate)
         {
+            int headerRowIndex;
+            return TryFindHeaderRow(table, columnCount, predicate, out headerRowIndex);
+        }
+
+        private static int GetDataStartRow(Table table, int columnCount, Func<List<string>, bool> predicate)
+        {
+            int headerRowIndex;
+            if (TryFindHeaderRow(table, columnCount, predicate, out headerRowIndex))
+            {
+                return Math.Min(headerRowIndex + 1, table?.Rows.Count ?? 0);
+            }
+
+            return 0;
+        }
+
+        private static bool TryFindHeaderRow(Table table, int columnCount, Func<List<string>, bool> predicate, out int headerRowIndex)
+        {
+            headerRowIndex = -1;
+
             if (table == null || predicate == null || columnCount <= 0)
             {
                 return false;
@@ -299,11 +318,64 @@ namespace XingManager.Services
                 var headers = ReadHeaders(table, columnCount, row);
                 if (predicate(headers))
                 {
+                    headerRowIndex = row;
                     return true;
                 }
             }
 
             return false;
+        }
+
+        private static bool LooksLikeLatLongTable(Table table)
+        {
+            if (table == null)
+            {
+                return false;
+            }
+
+            var rowCount = table.Rows.Count;
+            if (rowCount <= 0 || table.Columns.Count != 4)
+            {
+                return false;
+            }
+
+            var rowsToScan = Math.Min(rowCount, MaxHeaderRowsToScan);
+            var candidates = 0;
+
+            for (var row = 0; row < rowsToScan; row++)
+            {
+                var latText = ReadCellText(table, row, 2);
+                var longText = ReadCellText(table, row, 3);
+
+                if (IsCoordinateValue(latText, -90.0, 90.0) && IsCoordinateValue(longText, -180.0, 180.0))
+                {
+                    var crossing = ReadCellText(table, row, 0);
+                    if (string.IsNullOrWhiteSpace(crossing))
+                    {
+                        return false;
+                    }
+
+                    candidates++;
+                    continue;
+                }
+
+                if (string.IsNullOrWhiteSpace(latText) && string.IsNullOrWhiteSpace(longText))
+                {
+                    continue;
+                }
+
+                var normalizedLat = NormalizeHeader(latText, 2);
+                var normalizedLong = NormalizeHeader(longText, 3);
+                if (normalizedLat.StartsWith("LAT", StringComparison.Ordinal) &&
+                    normalizedLong.StartsWith("LONG", StringComparison.Ordinal))
+                {
+                    continue;
+                }
+
+                return false;
+            }
+
+            return candidates > 0;
         }
 
         private static List<string> ReadHeaders(Table table, int columns, int rowIndex)
@@ -457,7 +529,8 @@ namespace XingManager.Services
         {
             matched = 0;
             updated = 0;
-            for (var row = 1; row < table.Rows.Count; row++)
+            var startRow = GetDataStartRow(table, 5, IsMainHeader);
+            for (var row = startRow; row < table.Rows.Count; row++)
             {
                 var crossingKey = ResolveCrossingKey(table, row, 0);
                 var record = FindRecordForKey(byKey, crossingKey);
@@ -524,7 +597,8 @@ namespace XingManager.Services
         {
             matched = 0;
             updated = 0;
-            for (var row = 1; row < table.Rows.Count; row++)
+            var startRow = GetDataStartRow(table, 3, IsPageHeader);
+            for (var row = startRow; row < table.Rows.Count; row++)
             {
                 var crossingKey = ResolveCrossingKey(table, row, 0);
                 var record = FindRecordForKey(byKey, crossingKey);
@@ -576,7 +650,8 @@ namespace XingManager.Services
             matched = 0;
             updated = 0;
             // Only expect a single data row but iterate defensively.
-            for (var row = 1; row < table.Rows.Count; row++)
+            var startRow = GetDataStartRow(table, 4, IsLatLongHeader);
+            for (var row = startRow; row < table.Rows.Count; row++)
             {
                 var crossingKey = ResolveCrossingKey(table, row, 0);
                 var record = FindRecordForKey(byKey, crossingKey);
@@ -722,6 +797,45 @@ namespace XingManager.Services
             var left = (existing ?? string.Empty).Trim();
             var right = (desired ?? string.Empty).Trim();
             return !string.Equals(left, right, StringComparison.Ordinal);
+        }
+
+        private static string ReadCellText(Table table, int row, int column)
+        {
+            if (table == null || row < 0 || column < 0)
+            {
+                return string.Empty;
+            }
+
+            if (row >= table.Rows.Count || column >= table.Columns.Count)
+            {
+                return string.Empty;
+            }
+
+            try
+            {
+                var cell = table.Cells[row, column];
+                return ReadCellText(cell);
+            }
+            catch
+            {
+                return string.Empty;
+            }
+        }
+
+        private static bool IsCoordinateValue(string text, double min, double max)
+        {
+            if (string.IsNullOrWhiteSpace(text))
+            {
+                return false;
+            }
+
+            double value;
+            if (!double.TryParse(text.Trim(), NumberStyles.Float, CultureInfo.InvariantCulture, out value))
+            {
+                return false;
+            }
+
+            return value >= min && value <= max;
         }
 
         private static string ReadCellText(Cell cell)
