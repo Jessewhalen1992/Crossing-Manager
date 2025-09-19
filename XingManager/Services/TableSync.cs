@@ -514,12 +514,29 @@ namespace XingManager.Services
         {
             if (t == null) return;
 
-            if (TrySetBlockAttributeValue(t, row, col, "CROSSING", crossingText)) return;
+            // 1) Try to set the block attribute by any of our known tags
+            //    (this covers LABEL, X_NO, NUMBER, etc., not just CROSSING)
+            foreach (var tag in CrossingAttributeTags)
+            {
+                if (TrySetBlockAttributeValue(t, row, col, tag, crossingText))
+                    return;
+            }
 
+            // 2) If the cell currently hosts a block, do NOT overwrite it with text.
+            Cell cell = null;
+            try { cell = t.Cells[row, col]; } catch { cell = null; }
+
+            if (CellHasBlockContent(cell))
+            {
+                // We couldn't set an attribute—leave the block intact.
+                // (Optional: add a log if you want to see which rows failed.)
+                return;
+            }
+
+            // 3) Only fall back to plain text when the cell is not a block cell
             try
             {
-                var cell = t.Cells[row, col];
-                cell.TextString = crossingText ?? string.Empty;
+                if (cell != null) cell.TextString = crossingText ?? string.Empty;
             }
             catch { }
         }
@@ -837,6 +854,27 @@ namespace XingManager.Services
                 if (!string.IsNullOrWhiteSpace(textValue)) yield return textValue;
             }
         }
+        private static bool CellHasBlockContent(Cell cell)
+        {
+            if (cell == null) return false;
+            try
+            {
+                var contentsProp = cell.GetType().GetProperty("Contents", BindingFlags.Public | BindingFlags.Instance);
+                var contents = contentsProp?.GetValue(cell, null) as IEnumerable;
+                if (contents == null) return false;
+
+                foreach (var item in contents)
+                {
+                    var ctProp = item.GetType().GetProperty("ContentTypes", BindingFlags.Public | BindingFlags.Instance);
+                    var ctVal = ctProp?.GetValue(item, null)?.ToString() ?? string.Empty;
+                    if (ctVal.IndexOf("Block", StringComparison.OrdinalIgnoreCase) >= 0)
+                        return true;
+                }
+            }
+            catch { }
+            return false;
+        }
+
 
         private static string BuildHeaderLog(Table table)
         {
