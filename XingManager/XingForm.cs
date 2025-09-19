@@ -28,7 +28,6 @@ namespace XingManager
         private IDictionary<ObjectId, DuplicateResolver.InstanceContext> _contexts = new Dictionary<ObjectId, DuplicateResolver.InstanceContext>();
         private bool _isDirty;
         private bool _isScanning;
-        private bool _skipApplyOnceAfterRescan;
 
         private const string TemplatePath = @"M:\\Drafting\\_CURRENT TEMPLATES\\Compass_Main.dwt";
         private const string TemplateLayoutName = "X";
@@ -57,12 +56,12 @@ namespace XingManager
 
         public void LoadData()
         {
-            RescanRecords();
+            RescanRecords(applyToTables: false);
         }
 
         public void RescanData()
         {
-            RescanRecords();
+            RescanRecords(applyToTables: false);
         }
 
         public void ApplyToDrawing()
@@ -125,7 +124,6 @@ namespace XingManager
                 }
 
                 // Refresh the grid from the DWG **without** writing back to tables
-                _skipApplyOnceAfterRescan = true;
                 RescanRecords(applyToTables: false);
             }
             catch
@@ -185,18 +183,12 @@ namespace XingManager
 
         private void btnRescan_Click(object sender, EventArgs e)
         {
-            RescanRecords();
+            RescanRecords(applyToTables: false);
         }
 
-        // ===== Updated to auto-apply after duplicate resolution =====
+        // ===== Rescan optionally applies after duplicate resolution =====
         private void RescanRecords(bool applyToTables = true)
         {
-            if (_skipApplyOnceAfterRescan)
-            {
-                applyToTables = false;
-                _skipApplyOnceAfterRescan = false;
-            }
-
             _isScanning = true;
             try
             {
