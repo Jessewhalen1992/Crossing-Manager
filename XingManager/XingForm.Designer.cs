@@ -12,6 +12,7 @@ namespace XingManager
         private System.Windows.Forms.Button btnRenumber;
         private System.Windows.Forms.Button btnGeneratePage;
         private System.Windows.Forms.Button btnLatLong;
+        private System.Windows.Forms.Button btnMatchTable;
         private System.Windows.Forms.Button btnExport;
         private System.Windows.Forms.Button btnImport;
         private System.Windows.Forms.FlowLayoutPanel buttonPanel;
@@ -36,6 +37,7 @@ namespace XingManager
             this.btnRenumber = new System.Windows.Forms.Button();
             this.btnGeneratePage = new System.Windows.Forms.Button();
             this.btnLatLong = new System.Windows.Forms.Button();
+            this.btnMatchTable = new System.Windows.Forms.Button();
             this.btnExport = new System.Windows.Forms.Button();
             this.btnImport = new System.Windows.Forms.Button();
             this.buttonPanel = new System.Windows.Forms.FlowLayoutPanel();
@@ -138,23 +140,33 @@ namespace XingManager
             this.btnLatLong.Text = "Create LAT/LONG";
             this.btnLatLong.UseVisualStyleBackColor = true;
             this.btnLatLong.Click += new System.EventHandler(this.btnLatLong_Click);
+            //
+            // btnMatchTable
+            //
+            this.btnMatchTable.Location = new System.Drawing.Point(826, 3);
+            this.btnMatchTable.Name = "btnMatchTable";
+            this.btnMatchTable.Size = new System.Drawing.Size(120, 25);
+            this.btnMatchTable.TabIndex = 8;
+            this.btnMatchTable.Text = "MATCH TABLE";
+            this.btnMatchTable.UseVisualStyleBackColor = true;
+            this.btnMatchTable.Click += new System.EventHandler(this.btnMatchTable_Click);
             // 
             // btnExport
             // 
-            this.btnExport.Location = new System.Drawing.Point(826, 3);
+            this.btnExport.Location = new System.Drawing.Point(952, 3);
             this.btnExport.Name = "btnExport";
             this.btnExport.Size = new System.Drawing.Size(75, 25);
-            this.btnExport.TabIndex = 8;
+            this.btnExport.TabIndex = 9;
             this.btnExport.Text = "Export";
             this.btnExport.UseVisualStyleBackColor = true;
             this.btnExport.Click += new System.EventHandler(this.btnExport_Click);
             // 
             // btnImport
             // 
-            this.btnImport.Location = new System.Drawing.Point(907, 3);
+            this.btnImport.Location = new System.Drawing.Point(1033, 3);
             this.btnImport.Name = "btnImport";
             this.btnImport.Size = new System.Drawing.Size(75, 25);
-            this.btnImport.TabIndex = 9;
+            this.btnImport.TabIndex = 10;
             this.btnImport.Text = "Import";
             this.btnImport.UseVisualStyleBackColor = true;
             this.btnImport.Click += new System.EventHandler(this.btnImport_Click);
@@ -171,6 +183,7 @@ namespace XingManager
             this.buttonPanel.Controls.Add(this.btnRenumber);
             this.buttonPanel.Controls.Add(this.btnGeneratePage);
             this.buttonPanel.Controls.Add(this.btnLatLong);
+            this.buttonPanel.Controls.Add(this.btnMatchTable);
             this.buttonPanel.Controls.Add(this.btnExport);
             this.buttonPanel.Controls.Add(this.btnImport);
             this.buttonPanel.Dock = System.Windows.Forms.DockStyle.Top;

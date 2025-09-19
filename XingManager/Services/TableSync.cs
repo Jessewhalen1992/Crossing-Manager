@@ -371,7 +371,7 @@ namespace XingManager.Services
             return withoutSpecial.Replace("{", string.Empty).Replace("}", string.Empty);
         }
 
-        private static string ResolveCrossingKey(Table table, int row, int col)
+        internal static string ResolveCrossingKey(Table table, int row, int col)
         {
             if (table == null) return string.Empty;
 
@@ -489,7 +489,7 @@ namespace XingManager.Services
             return candidates.Count == 1 ? candidates[0] : null;
         }
 
-        private static string NormalizeKeyForLookup(string s)
+        internal static string NormalizeKeyForLookup(string s)
         {
             if (string.IsNullOrWhiteSpace(s)) return string.Empty;
 
@@ -528,7 +528,7 @@ namespace XingManager.Services
 
             if (CellHasBlockContent(cell))
             {
-                // We couldn't set an attribute—leave the block intact.
+                // We couldn't set an attribute; leave the block intact.
                 // (Optional: add a log if you want to see which rows failed.)
                 return;
             }
