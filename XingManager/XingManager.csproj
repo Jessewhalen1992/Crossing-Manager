@@ -51,6 +51,7 @@
   </ItemGroup>
   <ItemGroup>
     <Compile Include="Commands.cs" />
+    <Compile Include="DebugCommands.cs" />
     <Compile Include="Interop\MapOdShim.cs" />
     <Compile Include="Models\CrossingRecord.cs" />
     <Compile Include="Properties\AssemblyInfo.cs" />
