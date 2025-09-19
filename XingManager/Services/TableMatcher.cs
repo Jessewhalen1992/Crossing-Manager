@@ -51,6 +51,26 @@ namespace XingManager.Services
             "DWGREFNUMBER"
         }, StringComparer.OrdinalIgnoreCase);
 
+        private static string N(string s)
+        {
+            if (string.IsNullOrWhiteSpace(s)) return string.Empty;
+            s = s.Trim();
+            while (s.Contains("  ")) s = s.Replace("  ", " ");
+            // If needed to reduce false negatives:
+            // s = Regex.Replace(s, @"[.,;:/\\\-()]+", "");
+            return s;
+        }
+
+        private static string CompositeKeyMain(string owner, string desc, string loc, string dwg)
+        {
+            return string.Join("|", N(owner), N(desc), N(loc), N(dwg));
+        }
+
+        private static string CompositeKeyPage(string owner, string desc)
+        {
+            return string.Join("|", N(owner), N(desc));
+        }
+
         [CommandMethod("XING_MATCH_TABLE")]
         public void MatchTable()
         {
@@ -103,11 +123,13 @@ namespace XingManager.Services
                     Log(ed, $"Table type detected: {tableType}.");
 
                     HashSet<string> duplicateKeys;
-                    var byKey = BuildKeyIndexFromTable(table, tableType, out duplicateKeys, msg => Log(ed, msg));
+                    Dictionary<string, CrossingRecord> byKey, byComposite;
+                    Dictionary<string, string> byCompositeXKey;
+                    BuildIndexesFromTable(table, tableType, out byKey, out byComposite, out byCompositeXKey, out duplicateKeys, msg => Log(ed, msg));
 
-                    if (byKey.Count == 0)
+                    if (byKey.Count == 0 && byComposite.Count == 0)
                     {
-                        Log(ed, "Selected table did not provide any crossing rows (no readable X# in Column A).");
+                        Log(ed, "Selected table did not provide any usable crossing rows.");
                     }
 
                     var db = doc.Database;
@@ -118,6 +140,7 @@ namespace XingManager.Services
                     var updated = 0;
                     var skippedNoKey = 0;
                     var skippedNoMatch = 0;
+                    var matchedByComposite = 0;
                     var errors = 0;
 
                     foreach (ObjectId btrId in blockTable)
@@ -143,7 +166,8 @@ namespace XingManager.Services
 
                             try
                             {
-                                ProcessBlock(ed, br, tr, tableType, byKey, ref matched, ref updated, ref skippedNoKey, ref skippedNoMatch);
+                                ProcessBlock(ed, br, tr, tableType, byKey, byComposite, byCompositeXKey,
+                                    ref matched, ref updated, ref skippedNoKey, ref skippedNoMatch, ref matchedByComposite);
                             }
                             catch (System.Exception ex)
                             {
@@ -162,7 +186,7 @@ namespace XingManager.Services
                     }
 
                     Log(ed,
-                        $"MATCH TABLE summary -> XING2 blocks: {totalXing2}, matched: {matched}, updated: {updated}, skipped(no key): {skippedNoKey}, skipped(no match): {skippedNoMatch}, errors: {errors}.");
+                        $"MATCH TABLE summary -> XING2 blocks: {totalXing2}, matched: {matched}, matched(composite): {matchedByComposite}, updated: {updated}, skipped(no key): {skippedNoKey}, skipped(no match): {skippedNoMatch}, errors: {errors}.");
                 }
             }
             catch (System.Exception ex)
@@ -173,7 +197,9 @@ namespace XingManager.Services
 
         private static void ProcessBlock(Editor ed, BlockReference br, Transaction tr, TableSync.XingTableType tableType,
             IDictionary<string, CrossingRecord> byKey,
-            ref int matched, ref int updated, ref int skippedNoKey, ref int skippedNoMatch)
+            IDictionary<string, CrossingRecord> byComposite,
+            IDictionary<string, string> byCompositeXKey,
+            ref int matched, ref int updated, ref int skippedNoKey, ref int skippedNoMatch, ref int matchedByComposite)
         {
             if (br == null)
             {
@@ -184,24 +210,53 @@ namespace XingManager.Services
             var keyValue = GetAttributeText(br, tr, CrossingAttributeTags);
             var normalizedKey = TableSync.NormalizeKeyForLookup(keyValue);
 
-            if (string.IsNullOrEmpty(normalizedKey))
+            CrossingRecord record = null;
+            var matchedViaComposite = false;
+            string compositeUsed = null;
+
+            if (!string.IsNullOrEmpty(normalizedKey))
             {
-                skippedNoKey++;
-                Log(ed, $"Block {handle}: missing or invalid crossing key.");
-                return;
+                byKey?.TryGetValue(normalizedKey, out record);
             }
 
-            if (byKey == null)
+            if (record == null)
             {
-                skippedNoMatch++;
-                Log(ed, $"Block {handle}: key '{keyValue}' not found in the selected table.");
-                return;
+                var bOwner = GetAttributeText(br, tr, OwnerAttributeTags);
+                var bDesc = GetAttributeText(br, tr, DescriptionAttributeTags);
+
+                if (tableType == TableSync.XingTableType.Main)
+                {
+                    var bLoc = GetAttributeText(br, tr, LocationAttributeTags);
+                    var bDwg = GetAttributeText(br, tr, DwgRefAttributeTags);
+                    compositeUsed = CompositeKeyMain(bOwner, bDesc, bLoc, bDwg);
+                }
+                else
+                {
+                    compositeUsed = CompositeKeyPage(bOwner, bDesc);
+                }
+
+                if (!string.IsNullOrWhiteSpace(compositeUsed) &&
+                    byComposite != null && byComposite.TryGetValue(compositeUsed, out var rowRec))
+                {
+                    record = rowRec;
+                    matchedViaComposite = true;
+                    matchedByComposite++;
+                    Log(ed, $"Block {handle}: matched by composite.");
+                }
             }
 
-            if (!byKey.TryGetValue(normalizedKey, out var record))
+            if (record == null)
             {
-                skippedNoMatch++;
-                Log(ed, $"Block {handle}: key '{keyValue}' not found in the selected table.");
+                if (string.IsNullOrEmpty(normalizedKey))
+                {
+                    skippedNoKey++;
+                    Log(ed, $"Block {handle}: missing or invalid crossing key.");
+                }
+                else
+                {
+                    skippedNoMatch++;
+                    Log(ed, $"Block {handle}: key '{keyValue}' not found in the selected table.");
+                }
                 return;
             }
 
@@ -209,7 +264,18 @@ namespace XingManager.Services
             br.UpgradeOpen();
 
             var changed = false;
-            changed |= SetAttributeIfExists(br, tr, CrossingAttributeTags, record.Crossing, null);
+
+            if (!string.IsNullOrEmpty(normalizedKey))
+            {
+                changed |= SetAttributeIfExists(br, tr, CrossingAttributeTags, record.Crossing, null);
+            }
+            else if (matchedViaComposite && byCompositeXKey != null &&
+                     byCompositeXKey.TryGetValue(compositeUsed, out var readableKeyFromTable) &&
+                     !string.IsNullOrEmpty(readableKeyFromTable))
+            {
+                changed |= SetAttributeIfExists(br, tr, CrossingAttributeTags, record.Crossing, null);
+            }
+
             changed |= SetAttributeIfExists(br, tr, OwnerAttributeTags, record.Owner, null);
             changed |= SetAttributeIfExists(br, tr, DescriptionAttributeTags, record.Description, null);
 
@@ -223,11 +289,25 @@ namespace XingManager.Services
             {
                 updated++;
                 br.RecordGraphicsModified(true);
-                Log(ed, $"Block {handle}: updated using table key '{normalizedKey}'.");
+                if (!string.IsNullOrEmpty(normalizedKey) && !matchedViaComposite)
+                {
+                    Log(ed, $"Block {handle}: updated using table key '{normalizedKey}'.");
+                }
+                else if (matchedViaComposite)
+                {
+                    Log(ed, $"Block {handle}: updated via composite match.");
+                }
             }
             else
             {
-                Log(ed, $"Block {handle}: already aligned with table key '{normalizedKey}'.");
+                if (!string.IsNullOrEmpty(normalizedKey) && !matchedViaComposite)
+                {
+                    Log(ed, $"Block {handle}: already aligned with table key '{normalizedKey}'.");
+                }
+                else if (matchedViaComposite)
+                {
+                    Log(ed, $"Block {handle}: already aligned via composite match.");
+                }
             }
         }
 
@@ -362,47 +442,71 @@ namespace XingManager.Services
             return updated;
         }
 
-        private static Dictionary<string, CrossingRecord> BuildKeyIndexFromTable(
+        private static void BuildIndexesFromTable(
             Table table,
             TableSync.XingTableType type,
+            out Dictionary<string, CrossingRecord> byKey,
+            out Dictionary<string, CrossingRecord> byComposite,
+            out Dictionary<string, string> byCompositeXKey,
             out HashSet<string> duplicateKeys,
             Action<string> log)
         {
-            var byKey = new Dictionary<string, CrossingRecord>(StringComparer.OrdinalIgnoreCase);
+            byKey = new Dictionary<string, CrossingRecord>(StringComparer.OrdinalIgnoreCase);
+            byComposite = new Dictionary<string, CrossingRecord>(StringComparer.OrdinalIgnoreCase);
+            byCompositeXKey = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
             duplicateKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            if (table == null) return byKey;
+
+            if (table == null) return;
 
             var rows = table.Rows.Count;
             for (int row = 0; row < rows; row++)
             {
                 var rawKey = TableSync.ResolveCrossingKey(table, row, 0);
                 var key = TableSync.NormalizeKeyForLookup(rawKey);
-                if (string.IsNullOrEmpty(key)) continue;
 
-                if (byKey.ContainsKey(key))
-                {
-                    duplicateKeys.Add(key);
-                    log?.Invoke($"Row {row}: duplicate key '{key}' ignored; keeping the first occurrence.");
-                    continue;
-                }
+                var owner = ReadCellValue(table, row, 1);
+                var desc = ReadCellValue(table, row, 2);
 
                 var rec = new CrossingRecord
                 {
                     Crossing = (rawKey ?? string.Empty).Trim(),
-                    Owner = ReadCellValue(table, row, 1),
-                    Description = ReadCellValue(table, row, 2)
+                    Owner = owner,
+                    Description = desc
                 };
 
+                string comp;
                 if (type == TableSync.XingTableType.Main)
                 {
-                    rec.Location = ReadCellValue(table, row, 3);
-                    rec.DwgRef = ReadCellValue(table, row, 4);
+                    var loc = ReadCellValue(table, row, 3);
+                    var dwg = ReadCellValue(table, row, 4);
+                    rec.Location = loc;
+                    rec.DwgRef = dwg;
+                    comp = CompositeKeyMain(owner, desc, loc, dwg);
+                }
+                else
+                {
+                    comp = CompositeKeyPage(owner, desc);
                 }
 
-                byKey[key] = rec;
-            }
+                if (!string.IsNullOrEmpty(key))
+                {
+                    if (byKey.ContainsKey(key))
+                    {
+                        duplicateKeys.Add(key);
+                        log?.Invoke($"Row {row}: duplicate key '{key}' ignored; keeping the first occurrence.");
+                    }
+                    else
+                    {
+                        byKey[key] = rec;
+                    }
+                }
 
-            return byKey;
+                if (!string.IsNullOrWhiteSpace(comp) && !byComposite.ContainsKey(comp))
+                {
+                    byComposite[comp] = rec;
+                    byCompositeXKey[comp] = key ?? string.Empty;
+                }
+            }
         }
 
         private static string ReadCellValue(Table table, int row, int column)
