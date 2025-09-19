@@ -50,6 +50,8 @@ namespace XingManager.Services
             "LABEL"
         };
 
+        private const int MaxHeaderRowsToScan = 5;
+
         private static readonly Regex MTextFormattingCommandRegex = new Regex("\\\\[^;\\\\{}]*;", RegexOptions.Compiled);
         private static readonly Regex MTextResidualCommandRegex = new Regex("\\\\[^{}]", RegexOptions.Compiled);
         private static readonly Regex MTextSpecialCodeRegex = new Regex("%%[^\\s]+", RegexOptions.Compiled);
@@ -205,8 +207,7 @@ namespace XingManager.Services
 
             if (table.Columns.Count == 5 && table.Rows.Count >= 1)
             {
-                var headers = ReadHeaders(table, 5);
-                if (IsMainHeader(headers))
+                if (HasHeaderRow(table, 5, IsMainHeader))
                 {
                     return XingTableType.Main;
                 }
@@ -214,8 +215,7 @@ namespace XingManager.Services
 
             if (table.Columns.Count == 3 && table.Rows.Count >= 1)
             {
-                var headers = ReadHeaders(table, 3);
-                if (IsPageHeader(headers))
+                if (HasHeaderRow(table, 3, IsPageHeader))
                 {
                     return XingTableType.Page;
                 }
@@ -223,8 +223,7 @@ namespace XingManager.Services
 
             if (table.Columns.Count == 4 && table.Rows.Count >= 1)
             {
-                var headers = ReadHeaders(table, 4);
-                if (IsLatLongHeader(headers))
+                if (HasHeaderRow(table, 4, IsLatLongHeader))
                 {
                     return XingTableType.LatLong;
                 }
@@ -281,12 +280,51 @@ namespace XingManager.Services
             return true;
         }
 
-        private static List<string> ReadHeaders(Table table, int columns)
+        private static bool HasHeaderRow(Table table, int columnCount, Func<List<string>, bool> predicate)
         {
-            var list = new List<string>();
+            if (table == null || predicate == null || columnCount <= 0)
+            {
+                return false;
+            }
+
+            var rowCount = table.Rows.Count;
+            if (rowCount <= 0)
+            {
+                return false;
+            }
+
+            var rowsToScan = Math.Min(rowCount, MaxHeaderRowsToScan);
+            for (var row = 0; row < rowsToScan; row++)
+            {
+                var headers = ReadHeaders(table, columnCount, row);
+                if (predicate(headers))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        private static List<string> ReadHeaders(Table table, int columns, int rowIndex)
+        {
+            var list = new List<string>(columns);
             for (var col = 0; col < columns; col++)
             {
-                list.Add(NormalizeHeader(table.Cells[0, col].TextString, col));
+                string text = string.Empty;
+                if (table != null && rowIndex >= 0 && rowIndex < table.Rows.Count && col < table.Columns.Count)
+                {
+                    try
+                    {
+                        text = table.Cells[rowIndex, col].TextString ?? string.Empty;
+                    }
+                    catch
+                    {
+                        text = string.Empty;
+                    }
+                }
+
+                list.Add(NormalizeHeader(text, col));
             }
 
             return list;
