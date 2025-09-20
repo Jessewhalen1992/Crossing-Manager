@@ -127,6 +127,8 @@ namespace XingManager.Services
                     Dictionary<string, string> byCompositeXKey;
                     BuildIndexesFromTable(table, tableType, out byKey, out byComposite, out byCompositeXKey, out duplicateKeys, msg => Log(ed, msg));
 
+                    Log(ed, $"Indexed table: byKey={byKey.Count}, byComposite={byComposite.Count}");
+
                     if (byKey.Count == 0 && byComposite.Count == 0)
                     {
                         Log(ed, "Selected table did not provide any usable crossing rows.");
@@ -265,15 +267,24 @@ namespace XingManager.Services
 
             var changed = false;
 
-            if (!string.IsNullOrEmpty(normalizedKey))
+            // Decide what CROSSING value to write:
+            // 1) Prefer the table's readable X (raw) if we got it.
+            // 2) Else if we matched by composite and we have a normalized X from byCompositeXKey, use that.
+            // 3) Else fall back to the block's current normalizedKey (no harm if same).
+            string crossingFromTableRaw = record?.Crossing; // this is the raw value read from the table (e.g., "X1")
+            string crossingFromCompositeIndex = null;
+            if (matchedViaComposite && byCompositeXKey != null && !string.IsNullOrEmpty(compositeUsed))
             {
-                changed |= SetAttributeIfExists(br, tr, CrossingAttributeTags, record.Crossing, null);
+                byCompositeXKey.TryGetValue(compositeUsed, out crossingFromCompositeIndex); // normalized form like "X1"
             }
-            else if (matchedViaComposite && byCompositeXKey != null &&
-                     byCompositeXKey.TryGetValue(compositeUsed, out var readableKeyFromTable) &&
-                     !string.IsNullOrEmpty(readableKeyFromTable))
+
+            var crossingToWrite = !string.IsNullOrEmpty(crossingFromTableRaw)
+                ? crossingFromTableRaw
+                : (!string.IsNullOrEmpty(crossingFromCompositeIndex) ? crossingFromCompositeIndex : normalizedKey);
+
+            if (!string.IsNullOrEmpty(crossingToWrite))
             {
-                changed |= SetAttributeIfExists(br, tr, CrossingAttributeTags, record.Crossing, null);
+                changed |= SetAttributeIfExists(br, tr, CrossingAttributeTags, crossingToWrite, null);
             }
 
             changed |= SetAttributeIfExists(br, tr, OwnerAttributeTags, record.Owner, null);
