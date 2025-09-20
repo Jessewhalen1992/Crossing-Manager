@@ -472,7 +472,11 @@ namespace XingManager.Services
             var rows = table.Rows.Count;
             for (int row = 0; row < rows; row++)
             {
-                var rawKey = TableSync.ResolveCrossingKey(table, row, 0);
+                var rawKey = TableCellProbe.TryGetCellBlockAttr(table, row, 0, "CROSSING");
+                if (string.IsNullOrWhiteSpace(rawKey))
+                {
+                    rawKey = TableSync.ResolveCrossingKey(table, row, 0);
+                }
                 var key = TableSync.NormalizeKeyForLookup(rawKey);
 
                 var owner = ReadCellValue(table, row, 1);

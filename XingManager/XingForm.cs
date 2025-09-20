@@ -56,12 +56,12 @@ namespace XingManager
 
         public void LoadData()
         {
-            RescanRecords(applyToTables: false);
+            RescanRecords();
         }
 
         public void RescanData()
         {
-            RescanRecords(applyToTables: false);
+            RescanRecords();
         }
 
         public void ApplyToDrawing()
@@ -124,7 +124,7 @@ namespace XingManager
                 }
 
                 // Refresh the grid from the DWG **without** writing back to tables
-                RescanRecords(applyToTables: false);
+                RescanRecords();
             }
             catch
             {
@@ -183,11 +183,11 @@ namespace XingManager
 
         private void btnRescan_Click(object sender, EventArgs e)
         {
-            RescanRecords(applyToTables: false);
+            RescanRecords();
         }
 
-        // ===== Rescan optionally applies after duplicate resolution =====
-        private void RescanRecords(bool applyToTables = true)
+        // ===== Rescan refreshes the grid without applying to the drawing =====
+        private void RescanRecords()
         {
             _isScanning = true;
             try
@@ -206,21 +206,8 @@ namespace XingManager
                     return;
                 }
 
-                // Immediately push chosen canonical values to ALL instances & tables when requested
-                if (applyToTables)
-                {
-                    try
-                    {
-                        _repository.ApplyChanges(_records.ToList(), _tableSync);
-                        _isDirty = false; // synced
-                    }
-                    catch (Exception applyEx)
-                    {
-                        MessageBox.Show(applyEx.Message, "Crossing Manager", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                    }
-                }
-
                 gridCrossings.Refresh();
+                _isDirty = false;
             }
             catch (Exception ex)
             {

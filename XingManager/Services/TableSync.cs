@@ -387,6 +387,13 @@ namespace XingManager.Services
 
             foreach (var tag in CrossingAttributeTags)
             {
+                var blockVal = TableCellProbe.TryGetCellBlockAttr(table, row, col, tag);
+                var cleaned = CleanCellText(blockVal);
+                if (!string.IsNullOrWhiteSpace(cleaned)) return cleaned;
+            }
+
+            foreach (var tag in CrossingAttributeTags)
+            {
                 var blockValue = TryGetBlockAttributeValue(table, row, col, tag);
                 var cleanedBlockValue = CleanCellText(blockValue);
                 if (!string.IsNullOrWhiteSpace(cleanedBlockValue)) return cleanedBlockValue;
