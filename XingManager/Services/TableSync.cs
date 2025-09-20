@@ -410,6 +410,14 @@ namespace XingManager.Services
                 if (!string.IsNullOrWhiteSpace(cleanedContent)) return cleanedContent;
             }
 
+            // LAST RESORT: discover & try any attribute tags present on the block content in this cell
+            foreach (var discoveredTag in GetBlockAttributeTagsFromCell(table, row, col))
+            {
+                var any = TryGetBlockAttributeValue(table, row, col, discoveredTag);
+                var cleaned = CleanCellText(any);
+                if (!string.IsNullOrWhiteSpace(cleaned)) return cleaned;
+            }
+
             return string.Empty;
         }
 
@@ -912,6 +920,50 @@ namespace XingManager.Services
             return false;
         }
 
+        // NEW: Enumerate attribute TAGs from the block definition referenced by a table cell's content
+        private static IEnumerable<string> GetBlockAttributeTagsFromCell(Table t, int row, int col)
+        {
+            if (t == null) yield break;
+
+            Cell cell = null;
+            try { cell = t.Cells[row, col]; } catch { cell = null; }
+            if (cell == null) yield break;
+
+            var contentsProp = cell.GetType().GetProperty("Contents", BindingFlags.Public | BindingFlags.Instance);
+            var contents = contentsProp?.GetValue(cell, null) as IEnumerable;
+            if (contents == null) yield break;
+
+            // Use the top transaction this code already runs under (UpdateAllTables/commands open one)
+            var tr = t.Database?.TransactionManager?.TopTransaction as Transaction;
+            if (tr == null) yield break;
+
+            foreach (var item in contents)
+            {
+                if (item == null) continue;
+
+                var typesProp = item.GetType().GetProperty("ContentTypes", BindingFlags.Public | BindingFlags.Instance);
+                var typesStr = typesProp?.GetValue(item, null)?.ToString() ?? string.Empty;
+                if (typesStr.IndexOf("Block", StringComparison.OrdinalIgnoreCase) < 0) continue;
+
+                var btrProp = item.GetType().GetProperty("BlockTableRecordId", BindingFlags.Public | BindingFlags.Instance);
+                var idObj = btrProp?.GetValue(item, null);
+                if (idObj is ObjectId btrId && btrId.IsValid && !btrId.IsNull)
+                {
+                    BlockTableRecord btr = null;
+                    try { btr = tr.GetObject(btrId, OpenMode.ForRead) as BlockTableRecord; } catch { btr = null; }
+                    if (btr == null) continue;
+
+                    foreach (ObjectId entId in btr)
+                    {
+                        AttributeDefinition ad = null;
+                        try { ad = tr.GetObject(entId, OpenMode.ForRead) as AttributeDefinition; } catch { ad = null; }
+                        if (ad != null && !string.IsNullOrWhiteSpace(ad.Tag))
+                            yield return ad.Tag.Trim();
+                    }
+                }
+            }
+        }
+
 
         private static string BuildHeaderLog(Table table)
         {
@@ -943,82 +995,52 @@ namespace XingManager.Services
 
             foreach (var method in methods)
             {
-                var parameters = method.GetParameters();
-                try
+                var p = method.GetParameters();
+
+                // Signature: (int row, int col, string tag, [optional ...])
+                if (p.Length >= 3 &&
+                    p[0].ParameterType != typeof(string) &&
+                    p[1].ParameterType != typeof(string) &&
+                    typeof(string).IsAssignableFrom(p[2].ParameterType))
                 {
-                    object[] args = null;
-
-                    // Variant 1: (row, col, string tag [, ...])
-                    if (parameters.Length >= 3 &&
-                        IsIntLike(parameters[0].ParameterType) &&
-                        IsIntLike(parameters[1].ParameterType) &&
-                        typeof(string).IsAssignableFrom(parameters[2].ParameterType))
-                    {
-                        args = new object[parameters.Length];
-                        if (!TryConvertParameter(row, parameters[0], out args[0]) ||
-                            !TryConvertParameter(col, parameters[1], out args[1]) ||
-                            !TryConvertParameter(tag, parameters[2], out args[2]))
-                        {
-                            continue;
-                        }
-
-                        for (var i = 3; i < parameters.Length; i++)
-                        {
-                            if (!parameters[i].IsOptional)
-                            {
-                                args = null;
-                                break;
-                            }
-                            args[i] = Type.Missing; // optional
-                        }
-                    }
-                    // Variant 2: (row, col, contentIndex, string tag [, ...])
-                    else if (parameters.Length >= 4 &&
-                             IsIntLike(parameters[0].ParameterType) &&
-                             IsIntLike(parameters[1].ParameterType) &&
-                             IsIntLike(parameters[2].ParameterType) &&
-                             typeof(string).IsAssignableFrom(parameters[3].ParameterType))
-                    {
-                        args = new object[parameters.Length];
-                        if (!TryConvertParameter(row, parameters[0], out args[0]) ||
-                            !TryConvertParameter(col, parameters[1], out args[1]) ||
-                            !TryConvertParameter(0, parameters[2], out args[2]) ||
-                            !TryConvertParameter(tag, parameters[3], out args[3]))
-                        {
-                            continue;
-                        }
-
-                        for (var i = 4; i < parameters.Length; i++)
-                        {
-                            if (!parameters[i].IsOptional)
-                            {
-                                args = null;
-                                break;
-                            }
-                            args[i] = Type.Missing; // optional
-                        }
-                    }
-
-                    if (args == null)
-                    {
+                    var args = new object[p.Length];
+                    if (!TryConvertParameter(row, p[0], out args[0]) ||
+                        !TryConvertParameter(col, p[1], out args[1]) ||
+                        !TryConvertParameter(tag, p[2], out args[2]))
                         continue;
-                    }
 
-                    var result = method.Invoke(table, args);
-                    if (result == null)
+                    for (int i = 3; i < p.Length; i++) args[i] = p[i].IsOptional ? Type.Missing : null;
+                    try
                     {
-                        continue;
+                        var result = method.Invoke(table, args);
+                        var text = Convert.ToString(result, CultureInfo.InvariantCulture);
+                        if (!string.IsNullOrWhiteSpace(text)) return text;
                     }
-
-                    var text = Convert.ToString(result, CultureInfo.InvariantCulture);
-                    if (!string.IsNullOrWhiteSpace(text))
-                    {
-                        return text;
-                    }
+                    catch { }
                 }
-                catch
+
+                // Signature: (int row, int col, int contentIndex, string tag, [optional ...])
+                if (p.Length >= 4 &&
+                    p[0].ParameterType != typeof(string) &&
+                    p[1].ParameterType != typeof(string) &&
+                    p[2].ParameterType != typeof(string) &&
+                    typeof(string).IsAssignableFrom(p[3].ParameterType))
                 {
-                    // ignore and try next overload
+                    var args = new object[p.Length];
+                    if (!TryConvertParameter(row, p[0], out args[0]) ||
+                        !TryConvertParameter(col, p[1], out args[1]) ||
+                        !TryConvertParameter(0, p[2], out args[2]) ||
+                        !TryConvertParameter(tag, p[3], out args[3]))
+                        continue;
+
+                    for (int i = 4; i < p.Length; i++) args[i] = p[i].IsOptional ? Type.Missing : null;
+                    try
+                    {
+                        var result = method.Invoke(table, args);
+                        var text = Convert.ToString(result, CultureInfo.InvariantCulture);
+                        if (!string.IsNullOrWhiteSpace(text)) return text;
+                    }
+                    catch { }
                 }
             }
             return string.Empty;
@@ -1037,77 +1059,54 @@ namespace XingManager.Services
 
             foreach (var method in methods)
             {
-                var parameters = method.GetParameters();
-                try
+                var p = method.GetParameters();
+
+                // Signature: (int row, int col, string tag, string value, [optional ...])
+                if (p.Length >= 4 &&
+                    p[0].ParameterType != typeof(string) &&
+                    p[1].ParameterType != typeof(string) &&
+                    typeof(string).IsAssignableFrom(p[2].ParameterType) &&
+                    typeof(string).IsAssignableFrom(p[3].ParameterType))
                 {
-                    object[] args = null;
-
-                    // Variant 1: (row, col, string tag, string value [, ...])
-                    if (parameters.Length >= 4 &&
-                        IsIntLike(parameters[0].ParameterType) &&
-                        IsIntLike(parameters[1].ParameterType) &&
-                        typeof(string).IsAssignableFrom(parameters[2].ParameterType) &&
-                        typeof(string).IsAssignableFrom(parameters[3].ParameterType))
-                    {
-                        args = new object[parameters.Length];
-                        if (!TryConvertParameter(row, parameters[0], out args[0]) ||
-                            !TryConvertParameter(col, parameters[1], out args[1]) ||
-                            !TryConvertParameter(tag, parameters[2], out args[2]) ||
-                            !TryConvertParameter(value ?? string.Empty, parameters[3], out args[3]))
-                        {
-                            continue;
-                        }
-
-                        for (var i = 4; i < parameters.Length; i++)
-                        {
-                            if (!parameters[i].IsOptional)
-                            {
-                                args = null;
-                                break;
-                            }
-                            args[i] = Type.Missing; // optional
-                        }
-                    }
-                    // Variant 2: (row, col, contentIndex, string tag, string value [, ...])
-                    else if (parameters.Length >= 5 &&
-                             IsIntLike(parameters[0].ParameterType) &&
-                             IsIntLike(parameters[1].ParameterType) &&
-                             IsIntLike(parameters[2].ParameterType) &&
-                             typeof(string).IsAssignableFrom(parameters[3].ParameterType) &&
-                             typeof(string).IsAssignableFrom(parameters[4].ParameterType))
-                    {
-                        args = new object[parameters.Length];
-                        if (!TryConvertParameter(row, parameters[0], out args[0]) ||
-                            !TryConvertParameter(col, parameters[1], out args[1]) ||
-                            !TryConvertParameter(0, parameters[2], out args[2]) ||
-                            !TryConvertParameter(tag, parameters[3], out args[3]) ||
-                            !TryConvertParameter(value ?? string.Empty, parameters[4], out args[4]))
-                        {
-                            continue;
-                        }
-
-                        for (var i = 5; i < parameters.Length; i++)
-                        {
-                            if (!parameters[i].IsOptional)
-                            {
-                                args = null;
-                                break;
-                            }
-                            args[i] = Type.Missing; // optional
-                        }
-                    }
-
-                    if (args == null)
-                    {
+                    var args = new object[p.Length];
+                    if (!TryConvertParameter(row, p[0], out args[0]) ||
+                        !TryConvertParameter(col, p[1], out args[1]) ||
+                        !TryConvertParameter(tag, p[2], out args[2]) ||
+                        !TryConvertParameter(value ?? string.Empty, p[3], out args[3]))
                         continue;
-                    }
 
-                    method.Invoke(table, args);
-                    return true;
+                    for (int i = 4; i < p.Length; i++) args[i] = p[i].IsOptional ? Type.Missing : null;
+                    try
+                    {
+                        method.Invoke(table, args);
+                        return true;
+                    }
+                    catch { }
                 }
-                catch
+
+                // Signature: (int row, int col, int contentIndex, string tag, string value, [optional ...])
+                if (p.Length >= 5 &&
+                    p[0].ParameterType != typeof(string) &&
+                    p[1].ParameterType != typeof(string) &&
+                    p[2].ParameterType != typeof(string) &&
+                    typeof(string).IsAssignableFrom(p[3].ParameterType) &&
+                    typeof(string).IsAssignableFrom(p[4].ParameterType))
                 {
-                    // ignore and try next overload
+                    var args = new object[p.Length];
+                    if (!TryConvertParameter(row, p[0], out args[0]) ||
+                        !TryConvertParameter(col, p[1], out args[1]) ||
+                        !TryConvertParameter(0, p[2], out args[2]) ||
+                        !TryConvertParameter(tag, p[3], out args[3]) ||
+                        !TryConvertParameter(value ?? string.Empty, p[4], out args[4]))
+                        continue;
+
+                    for (int i = 5; i < p.Length; i++) args[i] = p[i].IsOptional ? Type.Missing : null;
+                    try
+                    {
+                        method.Invoke(table, args);
+                        return true;
+                    }
+                    catch { }
                 }
             }
 
