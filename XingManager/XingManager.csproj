@@ -59,6 +59,7 @@
     <Compile Include="Services\LayerUtils.cs" />
     <Compile Include="Services\LayoutUtils.cs" />
     <Compile Include="Services\Serde.cs" />
+    <Compile Include="Services\TableCellProbe.cs" />
     <Compile Include="Services\TableFactory.cs" />
     <Compile Include="Services\TableMatcher.cs" />
     <Compile Include="Services\TableSync.cs" />
