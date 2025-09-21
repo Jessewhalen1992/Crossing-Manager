@@ -124,7 +124,7 @@ namespace XingManager
                 }
 
                 // Refresh the grid from the DWG **without** writing back to tables
-                RescanRecords();
+                RescanRecords(applyToTables: false);
             }
             catch
             {
@@ -187,11 +187,12 @@ namespace XingManager
         }
 
         // ===== Rescan refreshes the grid without applying to the drawing =====
-        private void RescanRecords()
+        private void RescanRecords(bool applyToTables = true)
         {
             _isScanning = true;
             try
             {
+                // applyToTables is reserved for symmetry with command workflows; this scan only reads block values.
                 var result = _repository.ScanCrossings();
                 _records = new BindingList<CrossingRecord>(result.Records.ToList());
                 _contexts = result.InstanceContexts ?? new Dictionary<ObjectId, DuplicateResolver.InstanceContext>();
