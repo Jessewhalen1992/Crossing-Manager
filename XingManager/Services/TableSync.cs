@@ -417,14 +417,6 @@ namespace XingManager.Services
                 if (!string.IsNullOrWhiteSpace(cleanedContent)) return cleanedContent;
             }
 
-            // LAST RESORT: discover & try any attribute tags present on the block content in this cell
-            foreach (var discoveredTag in GetBlockAttributeTagsFromCell(table, row, col))
-            {
-                var any = TryGetBlockAttributeValue(table, row, col, discoveredTag);
-                var cleaned = CleanCellText(any);
-                if (!string.IsNullOrWhiteSpace(cleaned)) return cleaned;
-            }
-
             return string.Empty;
         }
 
@@ -848,23 +840,7 @@ namespace XingManager.Services
                 yield break;
             }
 
-            var contentsProperty = cell.GetType().GetProperty("Contents", BindingFlags.Public | BindingFlags.Instance);
-            if (contentsProperty == null)
-            {
-                yield break;
-            }
-
-            object contents;
-            try
-            {
-                contents = contentsProperty.GetValue(cell, null);
-            }
-            catch
-            {
-                yield break;
-            }
-
-            var enumerable = contents as IEnumerable;
+            var enumerable = GetCellContents(cell);
             if (enumerable == null)
             {
                 yield break;
@@ -927,51 +903,6 @@ namespace XingManager.Services
             return false;
         }
 
-        // NEW: Enumerate attribute TAGs from the block definition referenced by a table cell's content
-        private static IEnumerable<string> GetBlockAttributeTagsFromCell(Table t, int row, int col)
-        {
-            if (t == null) yield break;
-
-            Cell cell = null;
-            try { cell = t.Cells[row, col]; } catch { cell = null; }
-            if (cell == null) yield break;
-
-            var contentsProp = cell.GetType().GetProperty("Contents", BindingFlags.Public | BindingFlags.Instance);
-            var contents = contentsProp?.GetValue(cell, null) as IEnumerable;
-            if (contents == null) yield break;
-
-            // Use the top transaction this code already runs under (UpdateAllTables/commands open one)
-            var tr = t.Database?.TransactionManager?.TopTransaction as Transaction;
-            if (tr == null) yield break;
-
-            foreach (var item in contents)
-            {
-                if (item == null) continue;
-
-                var typesProp = item.GetType().GetProperty("ContentTypes", BindingFlags.Public | BindingFlags.Instance);
-                var typesStr = typesProp?.GetValue(item, null)?.ToString() ?? string.Empty;
-                if (typesStr.IndexOf("Block", StringComparison.OrdinalIgnoreCase) < 0) continue;
-
-                var btrProp = item.GetType().GetProperty("BlockTableRecordId", BindingFlags.Public | BindingFlags.Instance);
-                var idObj = btrProp?.GetValue(item, null);
-                if (idObj is ObjectId btrId && btrId.IsValid && !btrId.IsNull)
-                {
-                    BlockTableRecord btr = null;
-                    try { btr = tr.GetObject(btrId, OpenMode.ForRead) as BlockTableRecord; } catch { btr = null; }
-                    if (btr == null) continue;
-
-                    foreach (ObjectId entId in btr)
-                    {
-                        AttributeDefinition ad = null;
-                        try { ad = tr.GetObject(entId, OpenMode.ForRead) as AttributeDefinition; } catch { ad = null; }
-                        if (ad != null && !string.IsNullOrWhiteSpace(ad.Tag))
-                            yield return ad.Tag.Trim();
-                    }
-                }
-            }
-        }
-
-
         private static string BuildHeaderLog(Table table)
         {
             if (table == null) return "headers=[]";
@@ -1033,21 +964,45 @@ namespace XingManager.Services
                     p[2].ParameterType != typeof(string) &&
                     typeof(string).IsAssignableFrom(p[3].ParameterType))
                 {
-                    var args = new object[p.Length];
-                    if (!TryConvertParameter(row, p[0], out args[0]) ||
-                        !TryConvertParameter(col, p[1], out args[1]) ||
-                        !TryConvertParameter(0, p[2], out args[2]) ||
-                        !TryConvertParameter(tag, p[3], out args[3]))
-                        continue;
-
-                    for (int i = 4; i < p.Length; i++) args[i] = p[i].IsOptional ? Type.Missing : null;
-                    try
+                    var anyIndex = false;
+                    foreach (var contentIndex in EnumerateCellContentIndexes(table, row, col))
                     {
-                        var result = method.Invoke(table, args);
-                        var text = Convert.ToString(result, CultureInfo.InvariantCulture);
-                        if (!string.IsNullOrWhiteSpace(text)) return text;
+                        anyIndex = true;
+                        var args = new object[p.Length];
+                        if (!TryConvertParameter(row, p[0], out args[0]) ||
+                            !TryConvertParameter(col, p[1], out args[1]) ||
+                            !TryConvertParameter(contentIndex, p[2], out args[2]) ||
+                            !TryConvertParameter(tag, p[3], out args[3]))
+                            continue;
+
+                        for (int i = 4; i < p.Length; i++) args[i] = p[i].IsOptional ? Type.Missing : null;
+                        try
+                        {
+                            var result = method.Invoke(table, args);
+                            var text = Convert.ToString(result, CultureInfo.InvariantCulture);
+                            if (!string.IsNullOrWhiteSpace(text)) return text;
+                        }
+                        catch { }
                     }
-                    catch { }
+
+                    if (!anyIndex)
+                    {
+                        var args = new object[p.Length];
+                        if (!TryConvertParameter(row, p[0], out args[0]) ||
+                            !TryConvertParameter(col, p[1], out args[1]) ||
+                            !TryConvertParameter(0, p[2], out args[2]) ||
+                            !TryConvertParameter(tag, p[3], out args[3]))
+                            continue;
+
+                        for (int i = 4; i < p.Length; i++) args[i] = p[i].IsOptional ? Type.Missing : null;
+                        try
+                        {
+                            var result = method.Invoke(table, args);
+                            var text = Convert.ToString(result, CultureInfo.InvariantCulture);
+                            if (!string.IsNullOrWhiteSpace(text)) return text;
+                        }
+                        catch { }
+                    }
                 }
             }
             return string.Empty;
@@ -1099,25 +1054,110 @@ namespace XingManager.Services
                     typeof(string).IsAssignableFrom(p[3].ParameterType) &&
                     typeof(string).IsAssignableFrom(p[4].ParameterType))
                 {
-                    var args = new object[p.Length];
-                    if (!TryConvertParameter(row, p[0], out args[0]) ||
-                        !TryConvertParameter(col, p[1], out args[1]) ||
-                        !TryConvertParameter(0, p[2], out args[2]) ||
-                        !TryConvertParameter(tag, p[3], out args[3]) ||
-                        !TryConvertParameter(value ?? string.Empty, p[4], out args[4]))
-                        continue;
-
-                    for (int i = 5; i < p.Length; i++) args[i] = p[i].IsOptional ? Type.Missing : null;
-                    try
+                    var anyIndex = false;
+                    foreach (var contentIndex in EnumerateCellContentIndexes(table, row, col))
                     {
-                        method.Invoke(table, args);
-                        return true;
+                        anyIndex = true;
+                        var args = new object[p.Length];
+                        if (!TryConvertParameter(row, p[0], out args[0]) ||
+                            !TryConvertParameter(col, p[1], out args[1]) ||
+                            !TryConvertParameter(contentIndex, p[2], out args[2]) ||
+                            !TryConvertParameter(tag, p[3], out args[3]) ||
+                            !TryConvertParameter(value ?? string.Empty, p[4], out args[4]))
+                            continue;
+
+                        for (int i = 5; i < p.Length; i++) args[i] = p[i].IsOptional ? Type.Missing : null;
+                        try
+                        {
+                            method.Invoke(table, args);
+                            return true;
+                        }
+                        catch { }
                     }
-                    catch { }
+
+                    if (!anyIndex)
+                    {
+                        var args = new object[p.Length];
+                        if (!TryConvertParameter(row, p[0], out args[0]) ||
+                            !TryConvertParameter(col, p[1], out args[1]) ||
+                            !TryConvertParameter(0, p[2], out args[2]) ||
+                            !TryConvertParameter(tag, p[3], out args[3]) ||
+                            !TryConvertParameter(value ?? string.Empty, p[4], out args[4]))
+                            continue;
+
+                        for (int i = 5; i < p.Length; i++) args[i] = p[i].IsOptional ? Type.Missing : null;
+                        try
+                        {
+                            method.Invoke(table, args);
+                            return true;
+                        }
+                        catch { }
+                    }
                 }
             }
 
             return false;
+        }
+
+        private static IEnumerable<int> EnumerateCellContentIndexes(Table table, int row, int col)
+        {
+            var cell = GetTableCell(table, row, col);
+            if (cell == null)
+            {
+                yield break;
+            }
+
+            var enumerable = GetCellContents(cell);
+            if (enumerable == null)
+            {
+                yield break;
+            }
+
+            var index = 0;
+            foreach (var _ in enumerable)
+            {
+                yield return index++;
+            }
+        }
+
+        private static Cell GetTableCell(Table table, int row, int col)
+        {
+            if (table == null)
+            {
+                return null;
+            }
+
+            try
+            {
+                return table.Cells[row, col];
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        private static IEnumerable GetCellContents(Cell cell)
+        {
+            if (cell == null)
+            {
+                return null;
+            }
+
+            var contentsProperty = cell.GetType().GetProperty("Contents", BindingFlags.Public | BindingFlags.Instance);
+            if (contentsProperty == null)
+            {
+                return null;
+            }
+
+            try
+            {
+                return contentsProperty.GetValue(cell, null) as IEnumerable;
+            }
+            catch
+            {
+                return null;
+            }
         }
 
         private static bool TryConvertParameter(object value, ParameterInfo parameter, out object converted)
