@@ -18,6 +18,7 @@ namespace XingManager.Services
         public class InstanceContext
         {
             public ObjectId ObjectId { get; set; }
+            public string Crossing { get; set; }
             public string SpaceName { get; set; }
             public string Owner { get; set; }
             public string Description { get; set; }
@@ -84,6 +85,7 @@ namespace XingManager.Services
                     InstanceContext ctx;
                     if (contexts.TryGetValue(candidate.ObjectId, out ctx) && ctx != null)
                     {
+                        ctx.Crossing = selected.Crossing;
                         ctx.Owner = selected.Owner;
                         ctx.Description = selected.Description;
                         ctx.Location = selected.Location;
@@ -128,10 +130,13 @@ namespace XingManager.Services
                 foreach (var objectId in record.AllInstances)
                 {
                     var ctx = GetContext(contexts, objectId);
+                    var crossing = !string.IsNullOrWhiteSpace(ctx.Crossing)
+                        ? ctx.Crossing
+                        : record.Crossing ?? string.Empty;
 
                     recordCandidates.Add(new DuplicateCandidate
                     {
-                        Crossing = record.Crossing ?? string.Empty,
+                        Crossing = crossing,
                         CrossingKey = record.CrossingKey,
                         ObjectId = objectId,
                         Layout = ctx.SpaceName ?? "Unknown",
@@ -167,6 +172,7 @@ namespace XingManager.Services
             return new InstanceContext
             {
                 ObjectId = id,
+                Crossing = string.Empty,
                 SpaceName = "Unknown",
                 Owner = string.Empty,
                 Description = string.Empty,
