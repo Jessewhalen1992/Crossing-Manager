@@ -22,14 +22,16 @@ namespace XingManager.Services
 
         public XingRepository(Document doc)
         {
-            _doc = doc ?? throw new ArgumentNullException("doc");
+            _doc = doc ?? throw new ArgumentNullException(nameof(doc));
         }
 
-        public Document Document
-        {
-            get { return _doc; }
-        }
+        public Document Document => _doc;
 
+        /// <summary>
+        /// Scans the drawing for xing2 blocks and collects their attribute values.
+        /// Block references inserted into table cells are ignored by checking their
+        /// insertion point against the bounding extents of each table in the drawing.
+        /// </summary>
         public ScanResult ScanCrossings()
         {
             var db = _doc.Database;
@@ -38,7 +40,34 @@ namespace XingManager.Services
 
             using (var tr = db.TransactionManager.StartTransaction())
             {
-                var blockTable = (BlockTable)tr.GetObject(db.BlockTableId, OpenMode.ForRead);
+                // Collect extents of all tables in model/paper space.  Any block whose
+                // insertion point lies within one of these extents is treated as a
+                // table‑embedded “icon” and skipped.
+                var tableExtents = new List<Extents3d>();
+                var btab = (BlockTable)tr.GetObject(db.BlockTableId, OpenMode.ForRead);
+                foreach (ObjectId btrId in btab)
+                {
+                    var btr = (BlockTableRecord)tr.GetObject(btrId, OpenMode.ForRead);
+                    if (!btr.IsLayout) continue;
+
+                    foreach (ObjectId entId in btr)
+                    {
+                        var tbl = tr.GetObject(entId, OpenMode.ForRead) as Table;
+                        if (tbl == null) continue;
+
+                        try
+                        {
+                            var ext = tbl.GeometricExtents;
+                            tableExtents.Add(ext);
+                        }
+                        catch
+                        {
+                            // Ignore tables without extents.
+                        }
+                    }
+                }
+
+                // Build a map of layout BlockTableRecordId -> layout name.
                 var layoutDict = (DBDictionary)tr.GetObject(db.LayoutDictionaryId, OpenMode.ForRead);
                 var layoutNames = new Dictionary<ObjectId, string>();
                 foreach (DBDictionaryEntry entry in layoutDict)
@@ -49,36 +78,46 @@ namespace XingManager.Services
 
                 var blockRefClass = RXClass.GetClass(typeof(BlockReference));
 
-                foreach (ObjectId btrId in blockTable)
+                foreach (ObjectId btrId in btab)
                 {
                     var btr = (BlockTableRecord)tr.GetObject(btrId, OpenMode.ForRead);
                     if (!btr.IsLayout)
-                    {
                         continue;
-                    }
 
                     var spaceName = layoutNames.ContainsKey(btrId) ? layoutNames[btrId] : btr.Name;
 
                     foreach (ObjectId entId in btr)
                     {
                         if (!entId.ObjectClass.IsDerivedFrom(blockRefClass))
-                        {
                             continue;
-                        }
 
                         var br = (BlockReference)tr.GetObject(entId, OpenMode.ForRead);
+                        if (br == null)
+                            continue;
+
+                        // Skip block references drawn within any table’s extents.
+                        var pos = br.Position;
+                        bool insideTable = false;
+                        foreach (var ext in tableExtents)
+                        {
+                            if (pos.X >= ext.MinPoint.X && pos.X <= ext.MaxPoint.X &&
+                                pos.Y >= ext.MinPoint.Y && pos.Y <= ext.MaxPoint.Y)
+                            {
+                                insideTable = true;
+                                break;
+                            }
+                        }
+                        if (insideTable)
+                            continue;
+
                         var blockEffectiveName = GetBlockName(br, tr);
                         if (!string.Equals(blockEffectiveName, BlockName, StringComparison.OrdinalIgnoreCase))
-                        {
                             continue;
-                        }
 
                         var attributes = ReadAttributes(br, tr);
                         var crossing = GetValue(attributes, "CROSSING");
                         if (string.IsNullOrEmpty(crossing))
-                        {
                             continue;
-                        }
 
                         var owner = GetValue(attributes, "OWNER");
                         var description = GetValue(attributes, "DESCRIPTION");
@@ -103,13 +142,12 @@ namespace XingManager.Services
                                 Long = lng,
                                 CanonicalInstance = ObjectId.Null
                             };
-
                             records.Add(crossingKey, record);
                         }
 
                         record.AllInstances.Add(entId);
 
-                        // Capture per-instance values so the duplicate dialog shows true differences
+                        // Capture per-instance values for duplicate resolution.
                         contexts[entId] = new DuplicateResolver.InstanceContext
                         {
                             ObjectId = entId,
@@ -123,7 +161,9 @@ namespace XingManager.Services
                             Long = lng
                         };
 
-                        if (record.CanonicalInstance.IsNull && string.Equals(spaceName, "Model", StringComparison.OrdinalIgnoreCase))
+                        // Prefer a model-space instance as canonical; otherwise choose first.
+                        if (record.CanonicalInstance.IsNull &&
+                            string.Equals(spaceName, "Model", StringComparison.OrdinalIgnoreCase))
                         {
                             record.CanonicalInstance = entId;
                             record.Crossing = crossing;
@@ -163,8 +203,8 @@ namespace XingManager.Services
 
         public void ApplyChanges(IList<CrossingRecord> records, TableSync tableSync)
         {
-            if (records == null) throw new ArgumentNullException("records");
-            if (tableSync == null) throw new ArgumentNullException("tableSync");
+            if (records == null) throw new ArgumentNullException(nameof(records));
+            if (tableSync == null) throw new ArgumentNullException(nameof(tableSync));
 
             var db = _doc.Database;
 
@@ -201,7 +241,7 @@ namespace XingManager.Services
         public ObjectId InsertCrossing(CrossingRecord record, Point3d position)
         {
             if (record == null)
-                throw new ArgumentNullException("record");
+                throw new ArgumentNullException(nameof(record));
 
             var db = _doc.Database;
 
@@ -299,8 +339,8 @@ namespace XingManager.Services
 
         public void SetLatLong(BlockReference br, Transaction tr, string lat, string lng)
         {
-            if (br == null) throw new ArgumentNullException("br");
-            if (tr == null) throw new ArgumentNullException("tr");
+            if (br == null) throw new ArgumentNullException(nameof(br));
+            if (tr == null) throw new ArgumentNullException(nameof(tr));
 
             if (br.ExtensionDictionary.IsNull)
                 br.CreateExtensionDictionary();
@@ -346,10 +386,7 @@ namespace XingManager.Services
 
         private static string GetValue(IDictionary<string, string> dict, string key)
         {
-            string value;
-            if (dict != null && dict.TryGetValue(key, out value))
-                return value;
-            return string.Empty;
+            return (dict != null && dict.TryGetValue(key, out var value)) ? value : string.Empty;
         }
 
         private static void WriteAttribute(Transaction tr, BlockReference br, string tag, string value)
