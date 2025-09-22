@@ -113,6 +113,7 @@ namespace XingManager.Services
                         contexts[entId] = new DuplicateResolver.InstanceContext
                         {
                             ObjectId = entId,
+                            Crossing = crossing,
                             SpaceName = spaceName,
                             Owner = owner,
                             Description = description,
