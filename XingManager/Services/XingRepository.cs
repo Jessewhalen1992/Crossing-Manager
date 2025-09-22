@@ -30,7 +30,7 @@ namespace XingManager.Services
         /// <summary>
         /// Scans the drawing for xing2 blocks and collects their attribute values.
         /// Block references inserted into table cells are ignored by checking their
-        /// insertion point against the bounding extents of each table in the drawing.
+        /// geometric extents against the bounding extents of each table in the drawing.
         /// </summary>
         public ScanResult ScanCrossings()
         {
@@ -40,9 +40,7 @@ namespace XingManager.Services
 
             using (var tr = db.TransactionManager.StartTransaction())
             {
-                // Collect extents of all tables in model/paper space.  Any block whose
-                // insertion point lies within one of these extents is treated as a
-                // table‑embedded “icon” and skipped.
+                // Collect extents of all tables in the drawing.
                 var tableExtents = new List<Extents3d>();
                 var btab = (BlockTable)tr.GetObject(db.BlockTableId, OpenMode.ForRead);
                 foreach (ObjectId btrId in btab)
@@ -62,7 +60,7 @@ namespace XingManager.Services
                         }
                         catch
                         {
-                            // Ignore tables without extents.
+                            // ignore tables without extents
                         }
                     }
                 }
@@ -95,25 +93,32 @@ namespace XingManager.Services
                         if (br == null)
                             continue;
 
-                        // Skip block references drawn within any table’s extents.
-                        var pos = br.Position;
-                        bool insideTable = false;
-                        foreach (var ext in tableExtents)
-                        {
-                            if (pos.X >= ext.MinPoint.X && pos.X <= ext.MaxPoint.X &&
-                                pos.Y >= ext.MinPoint.Y && pos.Y <= ext.MaxPoint.Y)
-                            {
-                                insideTable = true;
-                                break;
-                            }
-                        }
-                        if (insideTable)
-                            continue;
-
                         var blockEffectiveName = GetBlockName(br, tr);
                         if (!string.Equals(blockEffectiveName, BlockName, StringComparison.OrdinalIgnoreCase))
                             continue;
 
+                        // Determine if this block is inside a table or on a paper-space layout.
+                        bool isInTable = false;
+                        try
+                        {
+                            var blkExt = br.GeometricExtents;
+                            foreach (var tblExt in tableExtents)
+                            {
+                                bool xOverlaps = blkExt.MinPoint.X <= tblExt.MaxPoint.X && blkExt.MaxPoint.X >= tblExt.MinPoint.X;
+                                bool yOverlaps = blkExt.MinPoint.Y <= tblExt.MaxPoint.Y && blkExt.MaxPoint.Y >= tblExt.MinPoint.Y;
+                                if (xOverlaps && yOverlaps)
+                                {
+                                    isInTable = true;
+                                    break;
+                                }
+                            }
+                        }
+                        catch
+                        {
+                            // ignore extents errors
+                        }
+
+                        // Capture attributes
                         var attributes = ReadAttributes(br, tr);
                         var crossing = GetValue(attributes, "CROSSING");
                         if (string.IsNullOrEmpty(crossing))
@@ -147,7 +152,8 @@ namespace XingManager.Services
 
                         record.AllInstances.Add(entId);
 
-                        // Capture per-instance values for duplicate resolution.
+                        // Create instance context; mark as ignored if in table or not in Model space
+                        bool ignore = isInTable || !string.Equals(spaceName, "Model", StringComparison.OrdinalIgnoreCase);
                         contexts[entId] = new DuplicateResolver.InstanceContext
                         {
                             ObjectId = entId,
@@ -158,7 +164,8 @@ namespace XingManager.Services
                             Location = location,
                             DwgRef = dwgRef,
                             Lat = lat,
-                            Long = lng
+                            Long = lng,
+                            IgnoreForDuplicates = ignore
                         };
 
                         // Prefer a model-space instance as canonical; otherwise choose first.

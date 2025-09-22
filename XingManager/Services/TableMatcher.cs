@@ -108,6 +108,7 @@ namespace XingManager.Services
                         return;
                     }
 
+                    // Determine the table type (Main or Page)
                     var tableType = DetectTableType(table);
                     if (tableType == TableSync.XingTableType.Unknown)
                     {
@@ -123,6 +124,7 @@ namespace XingManager.Services
 
                     Log(ed, $"Table type detected: {tableType}.");
 
+                    // Build lookup dictionaries from the selected table
                     HashSet<string> duplicateKeys;
                     Dictionary<string, CrossingRecord> byKey, byComposite;
                     Dictionary<string, string> byCompositeXKey;
@@ -146,7 +148,7 @@ namespace XingManager.Services
 
                     // ---------------------------------------------------------------------
                     // Collect extents of every table in the drawing.  Blocks whose
-                    // insertion point lies within one of these extents are considered
+                    // geometric extents intersect any of these extents are considered
                     // table‑embedded and should be ignored when matching/updating.
                     // ---------------------------------------------------------------------
                     var tableExtents = new List<Extents3d>();
@@ -180,10 +182,11 @@ namespace XingManager.Services
                     int matchedByComposite = 0;
                     int errors = 0;
 
+                    // Iterate over all block references in model and paper space
                     foreach (ObjectId btrId in blockTable)
                     {
                         var btr = (BlockTableRecord)tr.GetObject(btrId, OpenMode.ForRead);
-                        // Only process modelspace/paperspace, skip block definition records
+                        // Only process layout space (Model/Paperspace), skip block definitions
                         if (!btr.IsLayout) continue;
 
                         foreach (ObjectId entId in btr)
@@ -191,19 +194,27 @@ namespace XingManager.Services
                             var br = tr.GetObject(entId, OpenMode.ForRead) as BlockReference;
                             if (br == null) continue;
 
-                            // Skip blocks whose insertion point lies within any table extents
-                            var pos = br.Position;
-                            bool insideTable = false;
-                            foreach (var ext in tableExtents)
+                            // Skip block references whose geometric extents intersect any table extents
+                            bool intersectsTable = false;
+                            try
                             {
-                                if (pos.X >= ext.MinPoint.X && pos.X <= ext.MaxPoint.X &&
-                                    pos.Y >= ext.MinPoint.Y && pos.Y <= ext.MaxPoint.Y)
+                                var blkExt = br.GeometricExtents;
+                                foreach (var tblExt in tableExtents)
                                 {
-                                    insideTable = true;
-                                    break;
+                                    bool xOverlaps = blkExt.MinPoint.X <= tblExt.MaxPoint.X && blkExt.MaxPoint.X >= tblExt.MinPoint.X;
+                                    bool yOverlaps = blkExt.MinPoint.Y <= tblExt.MaxPoint.Y && blkExt.MaxPoint.Y >= tblExt.MinPoint.Y;
+                                    if (xOverlaps && yOverlaps)
+                                    {
+                                        intersectsTable = true;
+                                        break;
+                                    }
                                 }
                             }
-                            if (insideTable)
+                            catch
+                            {
+                                // If extents can't be computed, assume it's not a table block
+                            }
+                            if (intersectsTable)
                                 continue;
 
                             var name = GetEffectiveBlockName(br, tr);
@@ -238,6 +249,7 @@ namespace XingManager.Services
 
                     tr.Commit();
 
+                    // Report any duplicate keys that were ignored when building indexes
                     if (duplicateKeys.Count > 0)
                     {
                         var list = duplicateKeys
@@ -246,6 +258,7 @@ namespace XingManager.Services
                         Log(ed, $"Duplicate keys ignored: {string.Join(", ", list)}.");
                     }
 
+                    // Summary output
                     Log(
                         ed,
                         $"MATCH TABLE summary -> XING2 blocks: {totalXing2}, matched: {matched}, matched(composite): {matchedByComposite}, updated: {updated}, skipped(no key): {skippedNoKey}, skipped(no match): {skippedNoMatch}, errors: {errors}.");

@@ -15,6 +15,7 @@ namespace XingManager.Services
     public class DuplicateResolver
     {
         // ---------------------------- Context carried per BlockReference ----------------------------
+        // Inside DuplicateResolver.cs
         public class InstanceContext
         {
             public ObjectId ObjectId { get; set; }
@@ -26,7 +27,12 @@ namespace XingManager.Services
             public string DwgRef { get; set; }
             public string Lat { get; set; }
             public string Long { get; set; }
+
+            // New flag: true if this instance is inside a table or on a paper-space layout.
+            // Such instances should be updated silently but not shown in the duplicate resolver UI.
+            public bool IgnoreForDuplicates { get; set; }
         }
+
 
         /// <summary>
         /// Show the dialog if duplicates exist; on OK, set one canonical per crossing group and
@@ -100,12 +106,14 @@ namespace XingManager.Services
         }
 
         // ---------------------------- Build candidate rows for the dialog ----------------------------
+        // Build a flat list of duplicate candidates to display in the UI
         private static List<DuplicateCandidate> BuildCandidateList(IEnumerable<CrossingRecord> records, IDictionary<ObjectId, InstanceContext> contexts)
         {
             var list = new List<DuplicateCandidate>();
 
             foreach (var record in records)
             {
+                // Only consider records with more than one instance
                 if (record.AllInstances == null || record.AllInstances.Count <= 1)
                     continue;
 
@@ -125,11 +133,14 @@ namespace XingManager.Services
                     record.CanonicalInstance = defaultCanonical;
                 }
 
-                // Build UI candidates (use per-instance values only so differences are visible)
+                // Build per-instance UI candidates; skip those flagged as IgnoreForDuplicates
                 var recordCandidates = new List<DuplicateCandidate>();
                 foreach (var objectId in record.AllInstances)
                 {
                     var ctx = GetContext(contexts, objectId);
+                    if (ctx.IgnoreForDuplicates)
+                        continue; // table cell or paper-space block: update later but don't show
+
                     var crossing = !string.IsNullOrWhiteSpace(ctx.Crossing)
                         ? ctx.Crossing
                         : record.Crossing ?? string.Empty;
@@ -150,7 +161,8 @@ namespace XingManager.Services
                     });
                 }
 
-                if (!RequiresResolution(recordCandidates))
+                // If all instances are ignored or there’s no visible discrepancy, skip this record
+                if (!recordCandidates.Any() || !RequiresResolution(recordCandidates))
                     continue;
 
                 list.AddRange(recordCandidates);
