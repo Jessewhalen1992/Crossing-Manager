@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.Linq;                    // <-- needed for Where/Select/GroupBy
@@ -36,17 +36,19 @@ namespace XingManager.Services
 
         /// <summary>
         /// Show the dialog if duplicates exist; on OK, set one canonical per crossing group and
-        /// write the chosen values back into the in-memory records/contexts. The caller handles DB apply.
+        /// write the chosen values back into the in‑memory records/contexts. The caller handles DB apply.
         /// </summary>
         public bool ResolveDuplicates(IList<CrossingRecord> records, IDictionary<ObjectId, InstanceContext> contexts)
         {
             if (records == null)
                 throw new ArgumentNullException("records");
 
+            // Build the flat list of duplicate candidates, skipping ignored instances
             var duplicateCandidates = BuildCandidateList(records, contexts);
             if (!duplicateCandidates.Any())
                 return true; // nothing to resolve
 
+            // Group candidates by crossing key; show only groups with > 1 candidate
             var duplicateGroups = duplicateCandidates
                 .GroupBy(c => c.CrossingKey, StringComparer.OrdinalIgnoreCase)
                 .Select(g => g.ToList())
@@ -60,16 +62,19 @@ namespace XingManager.Services
                     ? group[0].Crossing
                     : group[0].CrossingKey;
 
+                // Display the dialog for this group and let the user choose the canonical
                 using (var dialog = new DuplicateResolverDialog(group, displayName, i + 1, duplicateGroups.Count))
                 {
                     if (dialog.ShowDialog() != DialogResult.OK)
                         return false;
                 }
 
+                // Find the candidate marked as canonical
                 var selected = group.FirstOrDefault(c => c.Canonical);
                 if (selected == null)
                     continue;
 
+                // Find the CrossingRecord associated with this key
                 var record = records.First(r => string.Equals(r.CrossingKey, group[0].CrossingKey, StringComparison.OrdinalIgnoreCase));
 
                 // Promote selected candidate's values to the record (canonical snapshot)
@@ -82,14 +87,13 @@ namespace XingManager.Services
                 record.Lat = selected.Lat;
                 record.Long = selected.Long;
 
-                // Write the chosen values into every instance context of the group
-                foreach (var candidate in group)
+                // Write the chosen values into every instance context of the record,
+                // including those flagged as IgnoreForDuplicates. This keeps the in-memory
+                // contexts in sync so the grid no longer shows *VARIES*.
+                foreach (var instanceId in record.AllInstances)
                 {
-                    if (contexts == null)
-                        continue;
-
                     InstanceContext ctx;
-                    if (contexts.TryGetValue(candidate.ObjectId, out ctx) && ctx != null)
+                    if (contexts != null && contexts.TryGetValue(instanceId, out ctx) && ctx != null)
                     {
                         ctx.Crossing = selected.Crossing;
                         ctx.Owner = selected.Owner;
@@ -161,7 +165,7 @@ namespace XingManager.Services
                     });
                 }
 
-                // If all instances are ignored or there�s no visible discrepancy, skip this record
+                // If all instances are ignored or there’s no visible discrepancy, skip this record
                 if (!recordCandidates.Any() || !RequiresResolution(recordCandidates))
                     continue;
 
