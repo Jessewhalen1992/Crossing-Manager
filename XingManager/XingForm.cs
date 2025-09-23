@@ -1,18 +1,22 @@
+﻿using Autodesk.AutoCAD.ApplicationServices;  // for Document, CommandEventArgs
+using Autodesk.AutoCAD.DatabaseServices;
+using Autodesk.AutoCAD.EditorInput;
+using Autodesk.AutoCAD.Geometry;
 using System;
 using System.Collections.Generic;
 using System.ComponentModel;
 using System.Globalization;
 using System.IO;
 using System.Linq;
+using System.Text.RegularExpressions;
 using System.Windows.Forms;
-using Autodesk.AutoCAD.ApplicationServices;  // for Document, CommandEventArgs
-using Autodesk.AutoCAD.DatabaseServices;
-using Autodesk.AutoCAD.EditorInput;
-using Autodesk.AutoCAD.Geometry;
 using XingManager.Models;
 using XingManager.Services;
-using WinFormsFlowDirection = System.Windows.Forms.FlowDirection;
 using AcadApp = Autodesk.AutoCAD.ApplicationServices.Application;
+using WinFormsFlowDirection = System.Windows.Forms.FlowDirection;
+using System.Text.RegularExpressions;
+
+
 namespace XingManager
 {
     public partial class XingForm : UserControl
@@ -186,25 +190,37 @@ namespace XingManager
             RescanRecords();
         }
 
-        // ===== Rescan refreshes the grid without applying to the drawing =====
+        // ===== Rescan refreshes the grid, resolves dups, APPLIES to DWG, then re-reads from DWG =====
+        // ===== Rescan resolves duplicates, APPLIES to DWG, then re-reads from DWG =====
         private void RescanRecords(bool applyToTables = true)
         {
             _isScanning = true;
             try
             {
-                // applyToTables is reserved for symmetry with command workflows; this scan only reads block values.
+                // 1) Read from DWG
                 var result = _repository.ScanCrossings();
                 _records = new BindingList<CrossingRecord>(result.Records.ToList());
                 _contexts = result.InstanceContexts ?? new Dictionary<ObjectId, DuplicateResolver.InstanceContext>();
                 gridCrossings.DataSource = _records;
 
-                // Let the user choose canonicals if duplicates exist
+                // 2) Resolve duplicates
                 var ok = _duplicateResolver.ResolveDuplicates(_records, _contexts);
-                if (!ok)
+                if (!ok) { gridCrossings.Refresh(); _isDirty = false; return; }
+
+                // 3) Persist only if requested
+                if (applyToTables)
                 {
-                    gridCrossings.Refresh();
-                    _isDirty = false;
-                    return;
+                    try { _repository.ApplyChanges(_records.ToList(), _tableSync); }
+                    catch (Exception ex)
+                    {
+                        MessageBox.Show(ex.Message, "Crossing Manager", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    }
+
+                    // 4) Re-read from DWG for fresh state
+                    var post = _repository.ScanCrossings();
+                    _records = new BindingList<CrossingRecord>(post.Records.ToList());
+                    _contexts = post.InstanceContexts ?? new Dictionary<ObjectId, DuplicateResolver.InstanceContext>();
+                    gridCrossings.DataSource = _records;
                 }
 
                 gridCrossings.Refresh();
@@ -214,10 +230,7 @@ namespace XingManager
             {
                 MessageBox.Show(ex.Message, "Crossing Manager", MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
-            finally
-            {
-                _isScanning = false;
-            }
+            finally { _isScanning = false; }
         }
 
         private void btnApply_Click(object sender, EventArgs e)
@@ -340,9 +353,10 @@ namespace XingManager
             _isDirty = true;
         }
 
+        // Button: MATCH TABLE  ->  Grid-only merge from selected table (no DWG/table writes)
         private void btnMatchTable_Click(object sender, EventArgs e)
         {
-            MatchTableFromCommand();
+            MatchTableIntoGrid();   // <- updates the grid only
         }
 
         private void btnGeneratePage_Click(object sender, EventArgs e)
@@ -467,11 +481,326 @@ namespace XingManager
             }
             return string.Format(CultureInfo.InvariantCulture, "X{0}", max + 1);
         }
+        // ===== GRID-ONLY: read a selected table and merge its values into the form =====
+        // Never writes to DWG or to the table. Updates only the in-memory BindingList.
+        // ===== GRID‑ONLY: read a selected table and merge values into the form =====
+        // This version:
+        //   * reads Column A strictly from a BLOCK ATTRIBUTE only,
+        //   * reads B..E as plain text,
+        //   * merges by X# only (no heuristics), and
+        //   * never writes to DWG or to the table — grid only.
+        // ===== GRID‑ONLY: read a selected table and merge values into the form =====
+        // Reads Column A strictly from a BLOCK ATTRIBUTE, B..E as plain text,
+        // merges by X only (no heuristics), never writes to DWG/tables.
+        // ===== GRID‑ONLY: read a selected table and merge values into the form =====
+        // Reads Column A from the block in the cell (attribute first, then block def text/name),
+        // reads B..E as plain text, and merges STRICTLY BY X only. No DWG/table writes.
+        // ===== GRID‑ONLY: read a selected table and merge values into the form =====
+        // Reads Column A from the BLOCK attribute inside the cell (strict), B..E as plain text,
+        // merges by X only (no heuristics). Never writes to DWG/tables.
+        // ===== GRID‑ONLY: read a selected table and merge values into the form =====
+        // Reads Column A from the block in the cell (attribute on the cell *content*),
+        // reads B..E as plain text, and merges STRICTLY BY X only. Never writes DWG/tables.
+        private void MatchTableIntoGrid()
+        {
+            var doc = AcadApp.DocumentManager.MdiActiveDocument;
+            if (doc == null) return;
+
+            var ed = doc.Editor;
+
+            var peo = new PromptEntityOptions("\nSelect a crossing table (Main/Page):");
+            peo.SetRejectMessage("\nEntity must be a TABLE.");
+            peo.AddAllowedClass(typeof(Table), exactMatch: true);
+
+            var sel = ed.GetEntity(peo);
+            if (sel.Status != PromptStatus.OK) return;
+
+            using (doc.LockDocument())
+            using (var tr = doc.TransactionManager.StartTransaction())
+            {
+                var table = tr.GetObject(sel.ObjectId, OpenMode.ForRead) as Table;
+                if (table == null)
+                {
+                    ed.WriteMessage("\n[CrossingManager] Selection was not a Table.");
+                    return;
+                }
+
+                // Identify table kind (Main or Page). Lat/Long not supported here.
+                var kind = _tableSync.IdentifyTable(table, tr);
+                if (kind == TableSync.XingTableType.Unknown)
+                {
+                    ed.WriteMessage("\n[CrossingManager] Could not determine table type.");
+                    return;
+                }
+                if (kind == TableSync.XingTableType.LatLong)
+                {
+                    ed.WriteMessage("\n[CrossingManager] Lat/Long tables are not supported by MATCH TABLE.");
+                    return;
+                }
+
+                // Index strictly by X read from the block attribute on the cell content.
+                // byX: "X1" -> (Owner, Desc, Loc, Dwg, Row)
+                var byX = new Dictionary<string, (string Owner, string Desc, string Loc, string Dwg, int Row)>(StringComparer.OrdinalIgnoreCase);
+
+                ed.WriteMessage("\n[CrossingManager] --- TABLE VALUES (parsed) ---");
+
+                for (int r = 0; r < table.Rows.Count; r++)
+                {
+                    string xRaw = ReadXFromCellAttributeOnly(table, r, tr); // ← attribute on cell *content*
+                    if (string.IsNullOrWhiteSpace(xRaw))
+                        continue; // no X → skip row
+
+                    var owner = ReadTableCellText(table, r, 1);
+                    var desc = ReadTableCellText(table, r, 2);
+
+                    string loc = string.Empty, dwg = string.Empty;
+                    if (kind == TableSync.XingTableType.Main)
+                    {
+                        loc = ReadTableCellText(table, r, 3);
+                        dwg = ReadTableCellText(table, r, 4);
+                    }
+
+                    var xKey = NormalizeXKey(xRaw);
+                    ed.WriteMessage($"\n[CrossingManager] [T] row {r}: X='{xKey}' owner='{owner}' desc='{desc}' loc='{loc}' dwg='{dwg}'");
+
+                    if (!byX.ContainsKey(xKey))
+                        byX[xKey] = (owner, desc, loc, dwg, r);
+                    else
+                        ed.WriteMessage($"\n[CrossingManager] [!] Duplicate X '{xKey}' in table (row {r}). First occurrence kept.");
+                }
+
+                ed.WriteMessage($"\n[CrossingManager] Table rows indexed by X = {byX.Count}");
+                ed.WriteMessage("\n[CrossingManager] --- TABLE→FORM UPDATES (X-only) ---");
+
+                int matched = 0, updated = 0, noMatch = 0;
+
+                foreach (var rec in _records)
+                {
+                    var xKey = NormalizeXKey(rec.Crossing);
+                    if (string.IsNullOrWhiteSpace(xKey) || !byX.TryGetValue(xKey, out var src))
+                    {
+                        ed.WriteMessage($"\n[CrossingManager] [!] {rec.Crossing}: no matching X in table.");
+                        noMatch++;
+                        continue;
+                    }
+
+                    bool changed = false;
+
+                    if (!string.Equals(rec.Owner, src.Owner, StringComparison.Ordinal))
+                    { rec.Owner = src.Owner; changed = true; }
+
+                    if (!string.Equals(rec.Description, src.Desc, StringComparison.Ordinal))
+                    { rec.Description = src.Desc; changed = true; }
+
+                    if (kind == TableSync.XingTableType.Main)
+                    {
+                        if (!string.Equals(rec.Location, src.Loc, StringComparison.Ordinal))
+                        { rec.Location = src.Loc; changed = true; }
+
+                        if (!string.Equals(rec.DwgRef, src.Dwg, StringComparison.Ordinal))
+                        { rec.DwgRef = src.Dwg; changed = true; }
+                    }
+
+                    matched++;
+                    if (changed)
+                        ed.WriteMessage($"\n[CrossingManager] [U] {rec.Crossing}: grid updated from table (row {src.Row}).");
+                    else
+                        ed.WriteMessage($"\n[CrossingManager] [=] {rec.Crossing}: no changes needed (already matches).");
+                }
+
+                tr.Commit();
+                gridCrossings.Refresh();
+                _isDirty = true;
+
+                ed.WriteMessage($"\n[CrossingManager] Match Table -> grid only (X-only): matched={matched}, updated={updated}, noMatch={noMatch}");
+            }
+        }
+        /// Read Column A strictly from the block attribute living on the cell *content*.
+        /// We try both signatures seen across releases:
+        ///   GetBlockAttributeValue(string tag)
+        ///   GetBlockAttributeValue(ObjectId attDefId)
+        /// Returns the raw value ("X1", "X02", ...) or "" if not present.
+        private static string ReadXFromCellAttributeOnly(Table table, int row, Transaction tr)
+        {
+            if (table == null || row < 0 || row >= table.Rows.Count) return string.Empty;
+
+            // Tags you commonly use for the index bubble.
+            string[] tags = { "CROSSING", "X", "XING", "X_NO", "XNUM", "XNUMBER", "NUMBER", "INDEX", "NO", "LABEL" };
+
+            Cell cell = null;
+            try { cell = table.Cells[row, 0]; } catch { return string.Empty; }
+            if (cell == null) return string.Empty;
+
+            foreach (var content in EnumerateCellContents(cell))
+            {
+                var ct = content.GetType();
+
+                // --- (A) signature: GetBlockAttributeValue(string tag)
+                var miStr = ct.GetMethod("GetBlockAttributeValue", new[] { typeof(string) });
+                if (miStr != null)
+                {
+                    foreach (var tag in tags)
+                    {
+                        try
+                        {
+                            var res = miStr.Invoke(content, new object[] { tag });
+                            var s = Convert.ToString(res, CultureInfo.InvariantCulture);
+                            if (!string.IsNullOrWhiteSpace(s))
+                                return s.Trim();
+                        }
+                        catch { /* try next */ }
+                    }
+                }
+
+                // --- (B) signature: GetBlockAttributeValue(ObjectId attDefId)
+                var miId = ct.GetMethod("GetBlockAttributeValue", new[] { typeof(ObjectId) });
+                if (miId != null)
+                {
+                    var btrId = TryGetBlockTableRecordIdFromContent(content);
+                    if (!btrId.IsNull)
+                    {
+                        var btr = (BlockTableRecord)tr.GetObject(btrId, OpenMode.ForRead);
+                        foreach (ObjectId id in btr)
+                        {
+                            var ad = tr.GetObject(id, OpenMode.ForRead) as AttributeDefinition;
+                            if (ad == null) continue;
+
+                            try
+                            {
+                                var res = miId.Invoke(content, new object[] { ad.ObjectId });
+                                var s = Convert.ToString(res, CultureInfo.InvariantCulture);
+                                if (!string.IsNullOrWhiteSpace(s))
+                                    return s.Trim();
+                            }
+                            catch { /* try next attdef */ }
+                        }
+                    }
+                }
+            }
+
+            // STRICT: no fallback to block definition text/name; if we can't read the instance attribute, return "".
+            return string.Empty;
+        }
+
+        /// Enumerate the cell's "Contents" collection (robust across versions).
+        private static IEnumerable<object> EnumerateCellContents(Cell cell)
+        {
+            if (cell == null) yield break;
+
+            var contentsProp = cell.GetType().GetProperty("Contents",
+                System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
+
+            System.Collections.IEnumerable seq = null;
+            try { seq = contentsProp?.GetValue(cell, null) as System.Collections.IEnumerable; } catch { }
+            if (seq == null) yield break;
+
+            foreach (var item in seq)
+                if (item != null) yield return item;
+        }
+
+        /// Pull BlockTableRecordId out of a content item (if exposed).
+        private static ObjectId TryGetBlockTableRecordIdFromContent(object content)
+        {
+            if (content == null) return ObjectId.Null;
+
+            var btrProp = content.GetType().GetProperty("BlockTableRecordId",
+                System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
+
+            try
+            {
+                var val = btrProp?.GetValue(content, null);
+                if (val is ObjectId id) return id;
+            }
+            catch { }
+
+            return ObjectId.Null;
+        }
+
+        /// Normalize "X", "X 1", "X01" -> "X1". If it doesn't look like X-digits, return compacted uppercase.
+        private static string NormalizeXKey(string s)
+        {
+            if (string.IsNullOrWhiteSpace(s)) return string.Empty;
+            var up = Regex.Replace(s.ToUpperInvariant(), @"\s+", "");
+            // X##  -> X#
+            var m = Regex.Match(up, @"^X0*(\d+)$");
+            if (m.Success) return "X" + m.Groups[1].Value;
+            // ##   -> X#
+            m = Regex.Match(up, @"^0*(\d+)$");
+            if (m.Success) return "X" + m.Groups[1].Value;
+            return up;
+        }
+
+        /// Read a table cell as plain text. Treat "-" and "—" as empty.
+        private static string ReadTableCellText(Table t, int row, int col)
+        {
+            if (t == null || row < 0 || col < 0) return string.Empty;
+            if (row >= t.Rows.Count || col >= t.Columns.Count) return string.Empty;
+            try
+            {
+                var s = t.Cells[row, col]?.TextString ?? string.Empty;
+                s = s.Trim();
+                return (s == "-" || s == "—") ? string.Empty : s;
+            }
+            catch { return string.Empty; }
+        }
+
+        private static IEnumerable<string> EnumerateCellTextFragments(Cell cell)
+        {
+            if (cell == null) yield break;
+
+            var contentsProp = cell.GetType().GetProperty("Contents",
+                System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
+
+            System.Collections.IEnumerable seq = null;
+            try { seq = contentsProp?.GetValue(cell, null) as System.Collections.IEnumerable; } catch { }
+            if (seq == null) yield break;
+
+            foreach (var item in seq)
+            {
+                if (item == null) continue;
+                var textProp = item.GetType().GetProperty("TextString",
+                    System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
+                if (textProp == null) continue;
+
+                string frag = null;
+                try { frag = textProp.GetValue(item, null) as string; } catch { }
+                if (!string.IsNullOrWhiteSpace(frag))
+                    yield return frag;
+            }
+        }
+
+        // Normalize a variety of inputs to "X#". Accepts "X 01", "X01", "01", "1", etc.
+        private static string ExtractXToken(string text)
+        {
+            if (string.IsNullOrWhiteSpace(text)) return string.Empty;
+            var s = Regex.Replace(text, @"\s+", "");
+            var m = Regex.Match(s, @"[Xx]0*(\d+)");
+            if (m.Success) return "X" + m.Groups[1].Value;
+            m = Regex.Match(s, @"^0*(\d+)$");
+            if (m.Success) return "X" + m.Groups[1].Value;
+            return string.Empty;
+        }
+
+        private static System.Collections.Generic.IEnumerable<object> EnumerateCellContentObjects(Cell cell)
+        {
+            if (cell == null) yield break;
+
+            var contentsProp = cell.GetType().GetProperty("Contents",
+                System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
+
+            System.Collections.IEnumerable seq = null;
+            try { seq = contentsProp?.GetValue(cell, null) as System.Collections.IEnumerable; } catch { }
+            if (seq == null) yield break;
+
+            foreach (var item in seq)
+                if (item != null) yield return item;
+        }
 
         private string GenerateCrossingName(int index)
         {
             return string.Format(CultureInfo.InvariantCulture, "X{0}", index + 1);
         }
+        // Treat "-" and "—" as empty placeholders for table cells
 
         private void ShiftCrossings(int startIndex, int delta)
         {

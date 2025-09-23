@@ -10,76 +10,57 @@ using XingManager.Models;
 
 namespace XingManager.Services
 {
+    /// <summary>
+    /// Reads a selected crossing table and pushes those values into XING2 blocks.
+    /// Column A is a block cell; we read the CROSSING value from the cell's block attributes.
+    /// Adjacent cells provide OWNER / DESCRIPTION / LOCATION / DWG_REF.
+    /// </summary>
     public class TableMatcher
     {
+        // --- Tag groups used when reading/writing block attributes ---
         private static readonly ISet<string> CrossingAttributeTags = new HashSet<string>(new[]
         {
-            "CROSSING",
-            "XING",
-            "X_NO",
-            "XNUM",
-            "XNUMBER",
-            "NUMBER",
-            "INDEX",
-            "NO",
-            "LABEL"
+            "CROSSING","XING","X_NO","XNUM","XNUMBER","NUMBER","INDEX","NO","LABEL"
         }, StringComparer.OrdinalIgnoreCase);
 
         private static readonly ISet<string> OwnerAttributeTags = new HashSet<string>(new[]
         {
-            "OWNER",
-            "OWN",
-            "COMPANY"
+            "OWNER","OWN","COMPANY"
         }, StringComparer.OrdinalIgnoreCase);
 
         private static readonly ISet<string> DescriptionAttributeTags = new HashSet<string>(new[]
         {
-            "DESCRIPTION",
-            "DESC"
+            "DESCRIPTION","DESC"
         }, StringComparer.OrdinalIgnoreCase);
 
         private static readonly ISet<string> LocationAttributeTags = new HashSet<string>(new[]
         {
-            "LOCATION",
-            "LOC"
+            "LOCATION","LOC"
         }, StringComparer.OrdinalIgnoreCase);
 
         private static readonly ISet<string> DwgRefAttributeTags = new HashSet<string>(new[]
         {
-            "DWG_REF",
-            "DWGREF",
-            "DWGREFNO",
-            "DWGREFNUMBER"
+            "DWG_REF","DWGREF","DWGREFNO","DWGREFNUMBER"
         }, StringComparer.OrdinalIgnoreCase);
 
+        // --- simple normalizer for composite matching keys ---
         private static string N(string s)
         {
             if (string.IsNullOrWhiteSpace(s)) return string.Empty;
             s = s.Trim();
             while (s.Contains("  ")) s = s.Replace("  ", " ");
-            // If needed to reduce false negatives:
-            // s = Regex.Replace(s, @"[.,;:/\\\-()]+", "");
             return s;
         }
-
         private static string CompositeKeyMain(string owner, string desc, string loc, string dwg)
-        {
-            return string.Join("|", N(owner), N(desc), N(loc), N(dwg));
-        }
-
+            => string.Join("|", N(owner), N(desc), N(loc), N(dwg));
         private static string CompositeKeyPage(string owner, string desc)
-        {
-            return string.Join("|", N(owner), N(desc));
-        }
+            => string.Join("|", N(owner), N(desc));
 
         [CommandMethod("XING_MATCH_TABLE")]
         public void MatchTable()
         {
             var doc = Application.DocumentManager.MdiActiveDocument;
-            if (doc == null)
-            {
-                return;
-            }
+            if (doc == null) return;
 
             var ed = doc.Editor;
             try
@@ -108,23 +89,21 @@ namespace XingManager.Services
                         return;
                     }
 
-                    // Determine the table type (Main or Page)
-                    var tableType = DetectTableType(table);
+                    // Determine table type with your existing logic.
+                    var tableType = DetectTableType(table, tr);
                     if (tableType == TableSync.XingTableType.Unknown)
                     {
                         Log(ed, "Selected table type could not be determined. Command aborted.");
                         return;
                     }
-
                     if (tableType == TableSync.XingTableType.LatLong)
                     {
                         Log(ed, "Lat/Long tables are not supported by MATCH TABLE.");
                         return;
                     }
-
                     Log(ed, $"Table type detected: {tableType}.");
 
-                    // Build lookup dictionaries from the selected table
+                    // Build lookup dictionaries FROM the selected table (this is the "source of truth")
                     HashSet<string> duplicateKeys;
                     Dictionary<string, CrossingRecord> byKey, byComposite;
                     Dictionary<string, string> byCompositeXKey;
@@ -137,20 +116,11 @@ namespace XingManager.Services
                         out duplicateKeys,
                         msg => Log(ed, msg));
 
-                    Log(ed, $"Indexed table: byKey={byKey.Count}, byComposite={byComposite.Count}");
-                    if (byKey.Count == 0 && byComposite.Count == 0)
-                    {
-                        Log(ed, "Selected table did not provide any usable crossing rows.");
-                    }
+                    Log(ed, $"Indexed table rows -> byKey={byKey.Count}, byComposite={byComposite.Count}");
 
+                    // Collect extents of all tables so we can ignore blocks embedded in tables
                     var db = doc.Database;
                     var blockTable = (BlockTable)tr.GetObject(db.BlockTableId, OpenMode.ForRead);
-
-                    // ---------------------------------------------------------------------
-                    // Collect extents of every table in the drawing.  Blocks whose
-                    // geometric extents intersect any of these extents are considered
-                    // table‑embedded and should be ignored when matching/updating.
-                    // ---------------------------------------------------------------------
                     var tableExtents = new List<Extents3d>();
                     foreach (ObjectId btrId in blockTable)
                     {
@@ -159,34 +129,18 @@ namespace XingManager.Services
 
                         foreach (ObjectId id in btr)
                         {
-                            var tblRef = tr.GetObject(id, OpenMode.ForRead) as Table;
-                            if (tblRef == null) continue;
-
-                            try
-                            {
-                                var ext = tblRef.GeometricExtents;
-                                tableExtents.Add(ext);
-                            }
-                            catch
-                            {
-                                // ignore tables without extents
-                            }
+                            var t = tr.GetObject(id, OpenMode.ForRead) as Table;
+                            if (t == null) continue;
+                            try { tableExtents.Add(t.GeometricExtents); } catch { }
                         }
                     }
 
-                    int totalXing2 = 0;
-                    int matched = 0;
-                    int updated = 0;
-                    int skippedNoKey = 0;
-                    int skippedNoMatch = 0;
-                    int matchedByComposite = 0;
-                    int errors = 0;
+                    int totalXing2 = 0, matched = 0, updated = 0, skippedNoKey = 0, skippedNoMatch = 0, matchedByComposite = 0, errors = 0;
 
-                    // Iterate over all block references in model and paper space
+                    // Update blocks in model & paper spaces (but skip those intersecting any table extents)
                     foreach (ObjectId btrId in blockTable)
                     {
                         var btr = (BlockTableRecord)tr.GetObject(btrId, OpenMode.ForRead);
-                        // Only process layout space (Model/Paperspace), skip block definitions
                         if (!btr.IsLayout) continue;
 
                         foreach (ObjectId entId in btr)
@@ -194,50 +148,31 @@ namespace XingManager.Services
                             var br = tr.GetObject(entId, OpenMode.ForRead) as BlockReference;
                             if (br == null) continue;
 
-                            // Skip block references whose geometric extents intersect any table extents
-                            bool intersectsTable = false;
+                            bool insideTable = false;
                             try
                             {
-                                var blkExt = br.GeometricExtents;
-                                foreach (var tblExt in tableExtents)
+                                var ext = br.GeometricExtents;
+                                foreach (var tExt in tableExtents)
                                 {
-                                    bool xOverlaps = blkExt.MinPoint.X <= tblExt.MaxPoint.X && blkExt.MaxPoint.X >= tblExt.MinPoint.X;
-                                    bool yOverlaps = blkExt.MinPoint.Y <= tblExt.MaxPoint.Y && blkExt.MaxPoint.Y >= tblExt.MinPoint.Y;
-                                    if (xOverlaps && yOverlaps)
-                                    {
-                                        intersectsTable = true;
-                                        break;
-                                    }
+                                    bool xOver = ext.MinPoint.X <= tExt.MaxPoint.X && ext.MaxPoint.X >= tExt.MinPoint.X;
+                                    bool yOver = ext.MinPoint.Y <= tExt.MaxPoint.Y && ext.MaxPoint.Y >= tExt.MinPoint.Y;
+                                    if (xOver && yOver) { insideTable = true; break; }
                                 }
                             }
-                            catch
-                            {
-                                // If extents can't be computed, assume it's not a table block
-                            }
-                            if (intersectsTable)
-                                continue;
+                            catch { }
+                            if (insideTable) continue;
 
                             var name = GetEffectiveBlockName(br, tr);
                             if (!string.Equals(name, "XING2", StringComparison.OrdinalIgnoreCase))
                                 continue;
 
                             totalXing2++;
-
                             try
                             {
                                 ProcessBlock(
-                                    ed,
-                                    br,
-                                    tr,
-                                    tableType,
-                                    byKey,
-                                    byComposite,
-                                    byCompositeXKey,
-                                    ref matched,
-                                    ref updated,
-                                    ref skippedNoKey,
-                                    ref skippedNoMatch,
-                                    ref matchedByComposite);
+                                    ed, br, tr, tableType,
+                                    byKey, byComposite, byCompositeXKey,
+                                    ref matched, ref updated, ref skippedNoKey, ref skippedNoMatch, ref matchedByComposite);
                             }
                             catch (System.Exception ex)
                             {
@@ -249,19 +184,10 @@ namespace XingManager.Services
 
                     tr.Commit();
 
-                    // Report any duplicate keys that were ignored when building indexes
                     if (duplicateKeys.Count > 0)
-                    {
-                        var list = duplicateKeys
-                            .OrderBy(k => k, StringComparer.OrdinalIgnoreCase)
-                            .ToList();
-                        Log(ed, $"Duplicate keys ignored: {string.Join(", ", list)}.");
-                    }
+                        Log(ed, "Duplicate X keys in table ignored: " + string.Join(", ", duplicateKeys));
 
-                    // Summary output
-                    Log(
-                        ed,
-                        $"MATCH TABLE summary -> XING2 blocks: {totalXing2}, matched: {matched}, matched(composite): {matchedByComposite}, updated: {updated}, skipped(no key): {skippedNoKey}, skipped(no match): {skippedNoMatch}, errors: {errors}.");
+                    Log(ed, $"MATCH TABLE summary -> XING2: {totalXing2}, matched: {matched}, matched(composite): {matchedByComposite}, updated: {updated}, skipped(no key): {skippedNoKey}, skipped(no match): {skippedNoMatch}, errors: {errors}.");
                 }
             }
             catch (System.Exception ex)
@@ -288,7 +214,7 @@ namespace XingManager.Services
 
             var handle = br.Handle.ToString();
             var keyValue = GetAttributeText(br, tr, CrossingAttributeTags);
-            var normalizedKey = TableSync.NormalizeKeyForLookup(keyValue);
+            var normalizedKey = TableSync.NormalizeKeyForLookup(keyValue); // same normalizer as tables. :contentReference[oaicite:2]{index=2}
 
             CrossingRecord record = null;
             var matchedViaComposite = false;
@@ -331,7 +257,7 @@ namespace XingManager.Services
                 if (string.IsNullOrEmpty(normalizedKey))
                 {
                     skippedNoKey++;
-                    Log(ed, $"Block {handle}: missing or invalid crossing key.");
+                    Log(ed, $"Block {handle}: missing/invalid CROSSING.");
                 }
                 else
                 {
@@ -346,30 +272,21 @@ namespace XingManager.Services
 
             var changed = false;
 
-            // Decide what CROSSING value to write:
-            // 1) Prefer the table's readable X (raw) if we got it.
-            // 2) Else if we matched by composite and we have a normalized X from byCompositeXKey, use that.
-            // 3) Else fall back to the block's current normalizedKey (no harm if same).
-            string crossingFromTableRaw = record?.Crossing; // raw value read from the table (e.g., "X1")
+            // CROSSING to write:
+            // 1) prefer the raw X from the table; 2) else if matched via composite, use its X; 3) else keep block's.
+            string crossingFromTableRaw = record.Crossing;
             string crossingFromCompositeIndex = null;
-            if (matchedViaComposite &&
-                byCompositeXKey != null &&
-                !string.IsNullOrEmpty(compositeUsed))
-            {
-                byCompositeXKey.TryGetValue(compositeUsed, out crossingFromCompositeIndex); // normalized form like "X1"
-            }
+            if (matchedViaComposite && byCompositeXKey != null && !string.IsNullOrEmpty(compositeUsed))
+                byCompositeXKey.TryGetValue(compositeUsed, out crossingFromCompositeIndex);
 
             var crossingToWrite = !string.IsNullOrEmpty(crossingFromTableRaw)
                 ? crossingFromTableRaw
-                : (!string.IsNullOrEmpty(crossingFromCompositeIndex)
-                    ? crossingFromCompositeIndex
-                    : normalizedKey);
+                : (!string.IsNullOrEmpty(crossingFromCompositeIndex) ? crossingFromCompositeIndex : normalizedKey);
 
             if (!string.IsNullOrEmpty(crossingToWrite))
-            {
                 changed |= SetAttributeIfExists(br, tr, CrossingAttributeTags, crossingToWrite, null);
-            }
 
+            // From table to block
             changed |= SetAttributeIfExists(br, tr, OwnerAttributeTags, record.Owner, null);
             changed |= SetAttributeIfExists(br, tr, DescriptionAttributeTags, record.Description, null);
 
@@ -383,100 +300,37 @@ namespace XingManager.Services
             {
                 updated++;
                 br.RecordGraphicsModified(true);
-                if (!string.IsNullOrEmpty(normalizedKey) && !matchedViaComposite)
-                {
-                    Log(ed, $"Block {handle}: updated using table key '{normalizedKey}'.");
-                }
-                else if (matchedViaComposite)
-                {
-                    Log(ed, $"Block {handle}: updated via composite match.");
-                }
+                Log(ed, $"Block {handle}: attributes updated from table.");
             }
             else
             {
-                if (!string.IsNullOrEmpty(normalizedKey) && !matchedViaComposite)
-                {
-                    Log(ed, $"Block {handle}: already aligned with table key '{normalizedKey}'.");
-                }
-                else if (matchedViaComposite)
-                {
-                    Log(ed, $"Block {handle}: already aligned via composite match.");
-                }
+                Log(ed, $"Block {handle}: already aligned with table.");
             }
         }
 
-        // Helpers below (unchanged from your original code except for ReadCellValue):
+        // ---------- Helpers used to build the table indexes ----------
 
-        private static string GetAttributeText(BlockReference br, Transaction tr, ISet<string> tags)
+        private static TableSync.XingTableType DetectTableType(Table table, Transaction tr)
         {
-            if (br == null || tags == null || br.AttributeCollection == null)
+            try
             {
-                return string.Empty;
+                // Reuse your existing IdentifyTable logic. :contentReference[oaicite:3]{index=3}
+                var ts = new TableSync(new TableFactory());
+                return ts.IdentifyTable(table, tr);
             }
-
-            foreach (ObjectId attId in br.AttributeCollection)
+            catch
             {
-                if (!attId.IsValid) continue;
-                var attRef = tr.GetObject(attId, OpenMode.ForRead) as AttributeReference;
-                if (attRef == null) continue;
-                if (tags.Contains(attRef.Tag))
-                    return attRef.TextString;
+                return TableSync.XingTableType.Unknown;
             }
-
-            return string.Empty;
         }
 
-        private static bool SetAttributeIfExists(
-            BlockReference br,
-            Transaction tr,
-            ISet<string> tags,
-            string value,
-            ISet<string> onlyIfMissing)
-        {
-            bool changed = false;
-            if (br.AttributeCollection == null) return false;
-
-            foreach (ObjectId attId in br.AttributeCollection)
-            {
-                var attRef = tr.GetObject(attId, OpenMode.ForWrite) as AttributeReference;
-                if (attRef == null) continue;
-
-                if (!tags.Contains(attRef.Tag)) continue;
-
-                // if we only set if missing and current is not empty, skip
-                if (onlyIfMissing != null && onlyIfMissing.Contains(attRef.Tag) && !string.IsNullOrEmpty(attRef.TextString))
-                    continue;
-
-                if (!string.Equals(attRef.TextString, value ?? string.Empty))
-                {
-                    attRef.TextString = value ?? string.Empty;
-                    changed = true;
-                }
-            }
-
-            return changed;
-        }
-
-        private static string GetEffectiveBlockName(BlockReference br, Transaction tr)
-        {
-            if (br == null)
-            {
-                return string.Empty;
-            }
-
-            var btrId = br.DynamicBlockTableRecord != ObjectId.Null
-                ? br.DynamicBlockTableRecord
-                : br.BlockTableRecord;
-            var btr = (BlockTableRecord)tr.GetObject(btrId, OpenMode.ForRead);
-            return btr.Name;
-        }
-
-        private static TableSync.XingTableType DetectTableType(Table table)
-        {
-            // detection logic unchanged – omitted for brevity
-            return TableSync.XingTableType.Main; // placeholder; replace with original detection logic
-        }
-
+        /// <summary>
+        /// Reads each data row from the selected table and builds:
+        ///  byKey           : "X#" (normalized) -> row record
+        ///  byComposite     : composite(owner,desc[,loc,dwg]) -> row record
+        ///  byCompositeXKey : composite -> "X#" (normalized)
+        /// Tracks duplicate X#s encountered in duplicateKeys.
+        /// </summary>
         private static void BuildIndexesFromTable(
             Table table,
             TableSync.XingTableType tableType,
@@ -486,60 +340,143 @@ namespace XingManager.Services
             out HashSet<string> duplicateKeys,
             Action<string> log)
         {
-            // index building logic unchanged – omitted for brevity
-            byKey = new Dictionary<string, CrossingRecord>();
-            byComposite = new Dictionary<string, CrossingRecord>();
-            byCompositeXKey = new Dictionary<string, string>();
-            duplicateKeys = new HashSet<string>();
-            // You can copy your existing implementation here.
+            byKey = new Dictionary<string, CrossingRecord>(StringComparer.OrdinalIgnoreCase);
+            byComposite = new Dictionary<string, CrossingRecord>(StringComparer.OrdinalIgnoreCase);
+            byCompositeXKey = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            duplicateKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            if (table == null) return;
+
+            var rows = table.Rows.Count;
+            var cols = table.Columns.Count;
+
+            for (int row = 0; row < rows; row++)
+            {
+                // Column A: read CROSSING from the block cell (falls back to text). :contentReference[oaicite:4]{index=4}
+                var rawKey = TableSync.ResolveCrossingKey(table, row, 0);
+                var normalized = TableSync.NormalizeKeyForLookup(rawKey);
+                if (string.IsNullOrEmpty(normalized))
+                {
+                    // Likely header/empty row; ignore.
+                    continue;
+                }
+
+                // Adjacent cells
+                var owner = (cols > 1) ? ReadCellValue(table, row, 1) : string.Empty;
+                var desc = (cols > 2) ? ReadCellValue(table, row, 2) : string.Empty;
+
+                string loc = string.Empty, dwg = string.Empty;
+                if (tableType == TableSync.XingTableType.Main)
+                {
+                    loc = (cols > 3) ? ReadCellValue(table, row, 3) : string.Empty;
+                    dwg = (cols > 4) ? ReadCellValue(table, row, 4) : string.Empty;
+                }
+
+                var rec = new CrossingRecord
+                {
+                    Crossing = (rawKey ?? string.Empty).Trim(),
+                    Owner = owner,
+                    Description = desc,
+                    Location = loc,
+                    DwgRef = dwg
+                };
+
+                if (byKey.ContainsKey(normalized))
+                {
+                    duplicateKeys.Add(normalized);
+                }
+                else
+                {
+                    byKey[normalized] = rec;
+                }
+
+                // Composite key (to match blocks even when X is off)
+                var composite = (tableType == TableSync.XingTableType.Main)
+                    ? CompositeKeyMain(owner, desc, loc, dwg)
+                    : CompositeKeyPage(owner, desc);
+
+                if (!string.IsNullOrWhiteSpace(composite) && !byComposite.ContainsKey(composite))
+                {
+                    byComposite[composite] = rec;
+                    byCompositeXKey[composite] = normalized;
+                }
+            }
+
+            if (duplicateKeys.Count > 0 && log != null)
+                log("Table has duplicate X keys: " + string.Join(", ", duplicateKeys));
         }
 
-        // ReadCellValue now treats a single dash as an empty value
+        // ---------- Local cell/attribute helpers ----------
+
+        private static string GetAttributeText(BlockReference br, Transaction tr, ISet<string> tags)
+        {
+            if (br == null || tags == null || br.AttributeCollection == null)
+                return string.Empty;
+
+            foreach (ObjectId attId in br.AttributeCollection)
+            {
+                if (!attId.IsValid) continue;
+                var attRef = tr.GetObject(attId, OpenMode.ForRead) as AttributeReference;
+                if (attRef == null) continue;
+                if (tags.Contains(attRef.Tag))
+                    return attRef.TextString;
+            }
+            return string.Empty;
+        }
+
+        private static bool SetAttributeIfExists(BlockReference br, Transaction tr, ISet<string> tags, string value, ISet<string> onlyIfMissing)
+        {
+            bool changed = false;
+            if (br.AttributeCollection == null) return false;
+
+            foreach (ObjectId attId in br.AttributeCollection)
+            {
+                var attRef = tr.GetObject(attId, OpenMode.ForWrite) as AttributeReference;
+                if (attRef == null) continue;
+                if (!tags.Contains(attRef.Tag)) continue;
+
+                if (onlyIfMissing != null && onlyIfMissing.Contains(attRef.Tag) && !string.IsNullOrEmpty(attRef.TextString))
+                    continue;
+
+                var desired = value ?? string.Empty;
+                if (!string.Equals(attRef.TextString, desired, StringComparison.Ordinal))
+                {
+                    attRef.TextString = desired;
+                    changed = true;
+                }
+            }
+            return changed;
+        }
+
+        private static string GetEffectiveBlockName(BlockReference br, Transaction tr)
+        {
+            if (br == null) return string.Empty;
+            var btrId = br.DynamicBlockTableRecord != ObjectId.Null ? br.DynamicBlockTableRecord : br.BlockTableRecord;
+            var btr = (BlockTableRecord)tr.GetObject(btrId, OpenMode.ForRead);
+            return btr.Name;
+        }
+
+        // Treat solitary "-" (and em-dash) as empty placeholders
         private static string ReadCellValue(Table table, int row, int column)
         {
-            if (table == null || row < 0 || column < 0)
-            {
-                return string.Empty;
-            }
-
-            if (row >= table.Rows.Count || column >= table.Columns.Count)
-            {
-                return string.Empty;
-            }
+            if (table == null || row < 0 || column < 0) return string.Empty;
+            if (row >= table.Rows.Count || column >= table.Columns.Count) return string.Empty;
 
             try
             {
                 var cell = table.Cells[row, column];
                 var text = cell?.TextString ?? string.Empty;
                 var trimmed = (text ?? string.Empty).Trim();
-                // Normalize single dash (often used as placeholder) to empty
-                if (trimmed == "-" || trimmed == "—")
-                {
-                    return string.Empty;
-                }
+                if (trimmed == "-" || trimmed == "—") return string.Empty;
                 return trimmed;
             }
-            catch
-            {
-                return string.Empty;
-            }
+            catch { return string.Empty; }
         }
 
         private static void Log(Editor ed, string message)
         {
-            if (ed == null || string.IsNullOrEmpty(message))
-            {
-                return;
-            }
-
-            try
-            {
-                ed.WriteMessage("\n[CrossingManager] " + message);
-            }
-            catch
-            {
-                // Ignore logging failures.
-            }
+            if (ed == null || string.IsNullOrEmpty(message)) return;
+            try { ed.WriteMessage("\n[CrossingManager] " + message); } catch { }
         }
     }
 }

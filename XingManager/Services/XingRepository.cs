@@ -216,33 +216,35 @@ namespace XingManager.Services
             var db = _doc.Database;
 
             using (_doc.LockDocument())
+            using (var tr = db.TransactionManager.StartTransaction())
             {
-                using (var tr = db.TransactionManager.StartTransaction())
+                foreach (var record in records)
                 {
-                    foreach (var record in records)
+                    foreach (var instanceId in record.AllInstances.Distinct())
                     {
-                        foreach (var instanceId in record.AllInstances.Distinct())
-                        {
-                            if (!instanceId.IsValid)
-                                continue;
+                        if (!instanceId.IsValid)
+                            continue;
 
-                            var br = tr.GetObject(instanceId, OpenMode.ForWrite) as BlockReference;
-                            if (br == null)
-                                continue;
+                        var br = tr.GetObject(instanceId, OpenMode.ForWrite) as BlockReference;
+                        if (br == null)
+                            continue;
 
-                            WriteAttribute(tr, br, "CROSSING", record.Crossing);
-                            WriteAttribute(tr, br, "OWNER", record.Owner);
-                            WriteAttribute(tr, br, "DESCRIPTION", record.Description);
-                            WriteAttribute(tr, br, "LOCATION", record.Location);
-                            WriteAttribute(tr, br, "DWG_REF", record.DwgRef);
-                            SetLatLong(br, tr, record.Lat, record.Long);
-                        }
+                        // Write block attributes from the in-memory record
+                        WriteAttribute(tr, br, "CROSSING", record.Crossing);
+                        WriteAttribute(tr, br, "OWNER", record.Owner);
+                        WriteAttribute(tr, br, "DESCRIPTION", record.Description);
+                        WriteAttribute(tr, br, "LOCATION", record.Location);
+                        WriteAttribute(tr, br, "DWG_REF", record.DwgRef);
+                        SetLatLong(br, tr, record.Lat, record.Long);
                     }
-                    tr.Commit();
                 }
 
-                tableSync.UpdateAllTables(_doc, records);
+                tr.Commit();
             }
+
+            // IMPORTANT: removed automatic table updates here.
+            // Tables will ONLY change when you run XING_MATCH_TABLE (table -> blocks)
+            // or when you explicitly execute a table creation/update command.
         }
 
         public ObjectId InsertCrossing(CrossingRecord record, Point3d position)
