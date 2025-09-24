@@ -1,4 +1,4 @@
-﻿using Autodesk.AutoCAD.ApplicationServices;  // for Document, CommandEventArgs
+﻿using Autodesk.AutoCAD.ApplicationServices;  // Document, CommandEventArgs
 using Autodesk.AutoCAD.DatabaseServices;
 using Autodesk.AutoCAD.EditorInput;
 using Autodesk.AutoCAD.Geometry;
@@ -14,8 +14,6 @@ using XingManager.Models;
 using XingManager.Services;
 using AcadApp = Autodesk.AutoCAD.ApplicationServices.Application;
 using WinFormsFlowDirection = System.Windows.Forms.FlowDirection;
-using System.Text.RegularExpressions;
-
 
 namespace XingManager
 {
@@ -28,25 +26,36 @@ namespace XingManager
         private readonly TableFactory _tableFactory;
         private readonly Serde _serde;
         private readonly DuplicateResolver _duplicateResolver;
+
         private BindingList<CrossingRecord> _records = new BindingList<CrossingRecord>();
-        private IDictionary<ObjectId, DuplicateResolver.InstanceContext> _contexts = new Dictionary<ObjectId, DuplicateResolver.InstanceContext>();
+        private IDictionary<ObjectId, DuplicateResolver.InstanceContext> _contexts =
+            new Dictionary<ObjectId, DuplicateResolver.InstanceContext>();
+
         private bool _isDirty;
         private bool _isScanning;
 
-        private const string TemplatePath = @"M:\\Drafting\\_CURRENT TEMPLATES\\Compass_Main.dwt";
+        private const string TemplatePath = @"M:\Drafting\_CURRENT TEMPLATES\Compass_Main.dwt";
         private const string TemplateLayoutName = "X";
 
-        public XingForm(Document doc, XingRepository repository, TableSync tableSync, LayoutUtils layoutUtils, TableFactory tableFactory, Serde serde, DuplicateResolver duplicateResolver)
+        public XingForm(
+            Document doc,
+            XingRepository repository,
+            TableSync tableSync,
+            LayoutUtils layoutUtils,
+            TableFactory tableFactory,
+            Serde serde,
+            DuplicateResolver duplicateResolver)
         {
-            if (doc == null) throw new ArgumentNullException("doc");
-            if (repository == null) throw new ArgumentNullException("repository");
-            if (tableSync == null) throw new ArgumentNullException("tableSync");
-            if (layoutUtils == null) throw new ArgumentNullException("layoutUtils");
-            if (tableFactory == null) throw new ArgumentNullException("tableFactory");
-            if (serde == null) throw new ArgumentNullException("serde");
-            if (duplicateResolver == null) throw new ArgumentNullException("duplicateResolver");
+            if (doc == null) throw new ArgumentNullException(nameof(doc));
+            if (repository == null) throw new ArgumentNullException(nameof(repository));
+            if (tableSync == null) throw new ArgumentNullException(nameof(tableSync));
+            if (layoutUtils == null) throw new ArgumentNullException(nameof(layoutUtils));
+            if (tableFactory == null) throw new ArgumentNullException(nameof(tableFactory));
+            if (serde == null) throw new ArgumentNullException(nameof(serde));
+            if (duplicateResolver == null) throw new ArgumentNullException(nameof(duplicateResolver));
 
             InitializeComponent();
+
             _doc = doc;
             _repository = repository;
             _tableSync = tableSync;
@@ -58,52 +67,17 @@ namespace XingManager
             ConfigureGrid();
         }
 
-        public void LoadData()
-        {
-            RescanRecords();
-        }
+        // ===== Public entry points called by your commands =====
 
-        public void RescanData()
-        {
-            RescanRecords();
-        }
+        public void LoadData() => RescanRecords();
 
-        public void ApplyToDrawing()
-        {
-            ApplyChangesToDrawing();
-        }
+        public void RescanData() => RescanRecords();
 
-        public void GenerateXingPageFromCommand()
-        {
-            GenerateXingPage();
-        }
+        public void ApplyToDrawing() => ApplyChangesToDrawing();
 
-        public void CreateLatLongRowFromCommand()
-        {
-            CreateOrUpdateLatLongTable();
-        }
+        public void GenerateXingPageFromCommand() => GenerateXingPage();
 
-        public void MatchTableFromCommand()
-        {
-            var doc = AcadApp.DocumentManager.MdiActiveDocument;
-            if (doc == null) return;
-
-            // Subscribe once; will auto-unsubscribe inside the handler
-            doc.CommandEnded += OnCommandMatchTableDone;
-            doc.CommandCancelled += OnCommandMatchTableDone;
-            try
-            {
-                // In some versions you also have CommandFailed; subscribe if present in your SDK
-                doc.CommandFailed += OnCommandMatchTableDone;
-            }
-            catch
-            {
-                // ignore if not available
-            }
-
-            // Run the command (space to execute)
-            doc.SendStringToExecute("XING_MATCH_TABLE ", true, false, true);
-        }
+        public void CreateLatLongRowFromCommand() => CreateOrUpdateLatLongTable();
 
         private void OnCommandMatchTableDone(object sender, CommandEventArgs e)
         {
@@ -112,28 +86,17 @@ namespace XingManager
                 if (!string.Equals(e.GlobalCommandName, "XING_MATCH_TABLE", StringComparison.OrdinalIgnoreCase))
                     return;
 
-                var doc = sender as Document;
-                if (doc != null)
+                if (sender is Document d)
                 {
-                    // Unhook to avoid duplicate subscriptions
-                    doc.CommandEnded -= OnCommandMatchTableDone;
-                    doc.CommandCancelled -= OnCommandMatchTableDone;
-                    try
-                    {
-                        doc.CommandFailed -= OnCommandMatchTableDone;
-                    }
-                    catch
-                    {
-                    }
+                    d.CommandEnded -= OnCommandMatchTableDone;
+                    d.CommandCancelled -= OnCommandMatchTableDone;
+                    try { d.CommandFailed -= OnCommandMatchTableDone; } catch { }
                 }
 
-                // Refresh the grid from the DWG **without** writing back to tables
+                // Refresh grid only (no table writes)
                 RescanRecords(applyToTables: false);
             }
-            catch
-            {
-                // Best-effort; avoid surfacing handler errors
-            }
+            catch { /* best effort */ }
         }
 
         public void RenumberSequentiallyFromCommand()
@@ -141,6 +104,8 @@ namespace XingManager
             RenumberSequential();
             _isDirty = true;
         }
+
+        // ===== UI wiring =====
 
         private void ConfigureGrid()
         {
@@ -174,9 +139,7 @@ namespace XingManager
         private void GridCrossingsOnCurrentCellDirtyStateChanged(object sender, EventArgs e)
         {
             if (gridCrossings.IsCurrentCellDirty)
-            {
                 gridCrossings.CommitEdit(DataGridViewDataErrorContexts.Commit);
-            }
         }
 
         private void GridCrossingsOnCellValueChanged(object sender, DataGridViewCellEventArgs e)
@@ -185,110 +148,11 @@ namespace XingManager
             _isDirty = true;
         }
 
-        private void btnRescan_Click(object sender, EventArgs e)
-        {
-            RescanRecords();
-        }
+        // ===== Buttons (Designer wires to these; keep them) =====
 
-        // ===== Rescan refreshes the grid, resolves dups, APPLIES to DWG, then re-reads from DWG =====
-        // ===== Rescan resolves duplicates, APPLIES to DWG, then re-reads from DWG =====
-        private void RescanRecords(bool applyToTables = true)
-        {
-            _isScanning = true;
-            try
-            {
-                // 1) Read from DWG
-                var result = _repository.ScanCrossings();
-                _records = new BindingList<CrossingRecord>(result.Records.ToList());
-                _contexts = result.InstanceContexts ?? new Dictionary<ObjectId, DuplicateResolver.InstanceContext>();
-                gridCrossings.DataSource = _records;
+        private void btnRescan_Click(object sender, EventArgs e) => RescanRecords();
 
-                // 2) Resolve duplicates
-                var ok = _duplicateResolver.ResolveDuplicates(_records, _contexts);
-                if (!ok) { gridCrossings.Refresh(); _isDirty = false; return; }
-
-                // 3) Persist only if requested
-                if (applyToTables)
-                {
-                    try { _repository.ApplyChanges(_records.ToList(), _tableSync); }
-                    catch (Exception ex)
-                    {
-                        MessageBox.Show(ex.Message, "Crossing Manager", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                    }
-
-                    // 4) Re-read from DWG for fresh state
-                    var post = _repository.ScanCrossings();
-                    _records = new BindingList<CrossingRecord>(post.Records.ToList());
-                    _contexts = post.InstanceContexts ?? new Dictionary<ObjectId, DuplicateResolver.InstanceContext>();
-                    gridCrossings.DataSource = _records;
-                }
-
-                gridCrossings.Refresh();
-                _isDirty = false;
-            }
-            catch (Exception ex)
-            {
-                MessageBox.Show(ex.Message, "Crossing Manager", MessageBoxButtons.OK, MessageBoxIcon.Error);
-            }
-            finally { _isScanning = false; }
-        }
-
-        private void btnApply_Click(object sender, EventArgs e)
-        {
-            ApplyChangesToDrawing();
-        }
-
-        private void ApplyChangesToDrawing()
-        {
-            if (!ValidateRecords()) return;
-
-            try
-            {
-                _repository.ApplyChanges(_records.ToList(), _tableSync);
-                _isDirty = false;
-                MessageBox.Show("Crossing data applied to drawing.", "Crossing Manager", MessageBoxButtons.OK, MessageBoxIcon.Information);
-            }
-            catch (Exception ex)
-            {
-                MessageBox.Show(ex.Message, "Crossing Manager", MessageBoxButtons.OK, MessageBoxIcon.Error);
-            }
-        }
-
-        private bool ValidateRecords()
-        {
-            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            foreach (var record in _records)
-            {
-                if (string.IsNullOrWhiteSpace(record.Crossing))
-                {
-                    MessageBox.Show("Each record must have a CROSSING value.", "Crossing Manager", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                    return false;
-                }
-
-                var key = record.Crossing.Trim().ToUpperInvariant();
-                if (!seen.Add(key))
-                {
-                    MessageBox.Show(string.Format(CultureInfo.InvariantCulture, "Duplicate CROSSING value '{0}' detected.", record.Crossing), "Crossing Manager", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                    return false;
-                }
-
-                if (!ValidateLatLongValue(record.Lat) || !ValidateLatLongValue(record.Long))
-                {
-                    MessageBox.Show(string.Format(CultureInfo.InvariantCulture, "LAT/LONG values for {0} must be decimal numbers.", record.Crossing), "Crossing Manager", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                    return false;
-                }
-            }
-
-            return true;
-        }
-
-        private static bool ValidateLatLongValue(string value)
-        {
-            if (string.IsNullOrWhiteSpace(value)) return true;
-
-            double parsed;
-            return double.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out parsed);
-        }
+        private void btnApply_Click(object sender, EventArgs e) => ApplyChangesToDrawing();
 
         private void btnAdd_Click(object sender, EventArgs e)
         {
@@ -326,11 +190,16 @@ namespace XingManager
             var record = GetSelectedRecord();
             if (record == null)
             {
-                MessageBox.Show("Select a crossing to delete.", "Crossing Manager", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                MessageBox.Show("Select a crossing to delete.", "Crossing Manager",
+                    MessageBoxButtons.OK, MessageBoxIcon.Information);
                 return;
             }
 
-            var confirm = MessageBox.Show(string.Format(CultureInfo.InvariantCulture, "Delete crossing {0}?", record.Crossing), "Crossing Manager", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
+            var confirm = MessageBox.Show(
+                string.Format(CultureInfo.InvariantCulture, "Delete crossing {0}?", record.Crossing),
+                "Crossing Manager",
+                MessageBoxButtons.YesNo, MessageBoxIcon.Question);
+
             if (confirm != DialogResult.Yes) return;
 
             try
@@ -343,7 +212,8 @@ namespace XingManager
             }
             catch (Exception ex)
             {
-                MessageBox.Show(ex.Message, "Crossing Manager", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                MessageBox.Show(ex.Message, "Crossing Manager",
+                    MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
         }
 
@@ -353,21 +223,41 @@ namespace XingManager
             _isDirty = true;
         }
 
-        // Button: MATCH TABLE  ->  Grid-only merge from selected table (no DWG/table writes)
+        // Button: MATCH TABLE  ->  Merge from selected table, then persist to blocks.
+        // No table writes here.
         private void btnMatchTable_Click(object sender, EventArgs e)
         {
-            MatchTableIntoGrid();   // <- updates the grid only
+            // Read a selected table into the grid only
+            var gridChanged = MatchTableIntoGrid();   // <- now returns bool
+
+            if (gridChanged)
+            {
+                try
+                {
+                    // Push grid -> crossing block attributes
+                    _repository.ApplyChanges(_records.ToList(), _tableSync);
+
+                    // OPTIONAL: also push grid -> tables right away (uncomment if you want that here too)
+                    // UpdateAllXingTablesFromGrid();
+
+                    // OPTIONAL: refresh grid from DWG (no table writes)
+                    // RescanRecords(applyToTables: false);
+                }
+                catch (Exception ex)
+                {
+                    MessageBox.Show(ex.Message, "Crossing Manager", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                }
+            }
         }
 
-        private void btnGeneratePage_Click(object sender, EventArgs e)
+        public void MatchTableFromCommand()
         {
-            GenerateXingPage();
+            // Same behavior when invoked as a command
+            MatchTableIntoGrid(persistAfterMatch: true);
         }
+        private void btnGeneratePage_Click(object sender, EventArgs e) => GenerateXingPage();
 
-        private void btnLatLong_Click(object sender, EventArgs e)
-        {
-            CreateOrUpdateLatLongTable();
-        }
+        private void btnLatLong_Click(object sender, EventArgs e) => CreateOrUpdateLatLongTable();
 
         private void btnExport_Click(object sender, EventArgs e)
         {
@@ -380,11 +270,13 @@ namespace XingManager
                     try
                     {
                         _serde.Export(dialog.FileName, _records);
-                        MessageBox.Show("Export complete.", "Crossing Manager", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                        MessageBox.Show("Export complete.", "Crossing Manager",
+                            MessageBoxButtons.OK, MessageBoxIcon.Information);
                     }
                     catch (Exception ex)
                     {
-                        MessageBox.Show(ex.Message, "Crossing Manager", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                        MessageBox.Show(ex.Message, "Crossing Manager",
+                            MessageBoxButtons.OK, MessageBoxIcon.Error);
                     }
                 }
             }
@@ -405,10 +297,120 @@ namespace XingManager
                     }
                     catch (Exception ex)
                     {
-                        MessageBox.Show(ex.Message, "Crossing Manager", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                        MessageBox.Show(ex.Message, "Crossing Manager",
+                            MessageBoxButtons.OK, MessageBoxIcon.Error);
                     }
                 }
             }
+        }
+
+        // ===== Core actions =====
+
+        private void RescanRecords(bool applyToTables = true)
+        {
+            _isScanning = true;
+            try
+            {
+                // 1) Read from DWG
+                var result = _repository.ScanCrossings();
+                _records = new BindingList<CrossingRecord>(result.Records.ToList());
+                _contexts = result.InstanceContexts ?? new Dictionary<ObjectId, DuplicateResolver.InstanceContext>();
+                gridCrossings.DataSource = _records;
+
+                // 2) Resolve duplicates (choose canonicals)
+                var ok = _duplicateResolver.ResolveDuplicates(_records, _contexts);
+                if (!ok) { gridCrossings.Refresh(); _isDirty = false; return; }
+
+                // 3) Persist to DWG/tables only if requested
+                if (applyToTables)
+                {
+                    try { _repository.ApplyChanges(_records.ToList(), _tableSync); }
+                    catch (Exception ex)
+                    {
+                        MessageBox.Show(ex.Message, "Crossing Manager",
+                            MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    }
+
+                    // 4) Re-read to reflect the new persisted state
+                    var post = _repository.ScanCrossings();
+                    _records = new BindingList<CrossingRecord>(post.Records.ToList());
+                    _contexts = post.InstanceContexts ?? new Dictionary<ObjectId, DuplicateResolver.InstanceContext>();
+                    gridCrossings.DataSource = _records;
+                }
+
+                gridCrossings.Refresh();
+                _isDirty = false;
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(ex.Message, "Crossing Manager",
+                    MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+            finally { _isScanning = false; }
+        }
+
+        private void ApplyChangesToDrawing()
+        {
+            if (!ValidateRecords()) return;
+
+            try
+            {
+                // Persist changes to the crossing blocks/attributes in the DWG
+                _repository.ApplyChanges(_records.ToList(), _tableSync);
+
+                // Also push the changes into any MAIN/PAGE/LATLNG tables
+                UpdateAllXingTablesFromGrid();
+
+                _isDirty = false;
+                MessageBox.Show("Crossing data applied to drawing.", "Crossing Manager",
+                    MessageBoxButtons.OK, MessageBoxIcon.Information);
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(ex.Message, "Crossing Manager",
+                    MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        }
+
+        private bool ValidateRecords()
+        {
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            foreach (var record in _records)
+            {
+                if (string.IsNullOrWhiteSpace(record.Crossing))
+                {
+                    MessageBox.Show("Each record must have a CROSSING value.", "Crossing Manager",
+                        MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    return false;
+                }
+
+                var key = record.Crossing.Trim().ToUpperInvariant();
+                if (!seen.Add(key))
+                {
+                    MessageBox.Show(
+                        string.Format(CultureInfo.InvariantCulture, "Duplicate CROSSING value '{0}' detected.", record.Crossing),
+                        "Crossing Manager", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    return false;
+                }
+
+                if (!ValidateLatLongValue(record.Lat) || !ValidateLatLongValue(record.Long))
+                {
+                    MessageBox.Show(
+                        string.Format(CultureInfo.InvariantCulture, "LAT/LONG values for {0} must be decimal numbers.", record.Crossing),
+                        "Crossing Manager", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    return false;
+                }
+            }
+
+            return true;
+        }
+
+        private static bool ValidateLatLongValue(string value)
+        {
+            if (string.IsNullOrWhiteSpace(value)) return true;
+            double parsed;
+            return double.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out parsed);
         }
 
         private void MergeImportedRecords(IEnumerable<CrossingRecord> imported)
@@ -416,8 +418,7 @@ namespace XingManager
             var map = _records.ToDictionary(r => r.CrossingKey, r => r, StringComparer.OrdinalIgnoreCase);
             foreach (var record in imported)
             {
-                CrossingRecord existing;
-                if (map.TryGetValue(record.CrossingKey, out existing))
+                if (map.TryGetValue(record.CrossingKey, out var existing))
                 {
                     existing.Owner = record.Owner;
                     existing.Description = record.Description;
@@ -433,88 +434,150 @@ namespace XingManager
             }
         }
 
-        private void PromptPlacement(CrossingRecord record)
-        {
-            var point = _doc.Editor.GetPoint("\nSpecify insertion point for new crossing:");
-            if (point.Status != PromptStatus.OK)
-            {
-                MessageBox.Show("Crossing created in the list only. Apply will skip until placed.", "Crossing Manager", MessageBoxButtons.OK, MessageBoxIcon.Information);
-                return;
-            }
+        // ===== Update all recognized crossing tables from the grid =====
 
-            try
-            {
-                var id = _repository.InsertCrossing(record, point.Value);
-                record.AllInstances.Add(id);
-                record.CanonicalInstance = id;
-                _contexts[id] = new DuplicateResolver.InstanceContext
-                {
-                    ObjectId = id,
-                    SpaceName = "Model",
-                    Owner = record.Owner,
-                    Description = record.Description,
-                    Location = record.Location,
-                    DwgRef = record.DwgRef,
-                    Lat = record.Lat,
-                    Long = record.Long
-                };
-            }
-            catch (Exception ex)
-            {
-                MessageBox.Show(ex.Message, "Crossing Manager", MessageBoxButtons.OK, MessageBoxIcon.Error);
-            }
-        }
-
-        private CrossingRecord GetSelectedRecord()
+        /// Update every recognized crossing table (MAIN, PAGE, LATLONG) from the current grid.
+        /// Matching uses the same X-key logic as MatchTableIntoGrid: attribute-first with fallbacks,
+        /// and NormalizeXKey handles digits-only (e.g., "3" => "X3").
+        /// Update recognized crossing tables (MAIN/PAGE/LATLONG) from the current grid,
+        /// but never modify Column A (X/bubble). Columns B..E only.
+        private void UpdateAllXingTablesFromGrid()
         {
-            if (gridCrossings.CurrentRow == null) return null;
-            return gridCrossings.CurrentRow.DataBoundItem as CrossingRecord;
-        }
-
-        private string GenerateNextCrossingName()
-        {
-            var max = 0;
-            foreach (var record in _records)
-            {
-                var token = CrossingRecord.ParseCrossingNumber(record.Crossing);
-                if (token.Number > max) max = token.Number;
-            }
-            return string.Format(CultureInfo.InvariantCulture, "X{0}", max + 1);
-        }
-        // ===== GRID-ONLY: read a selected table and merge its values into the form =====
-        // Never writes to DWG or to the table. Updates only the in-memory BindingList.
-        // ===== GRID‑ONLY: read a selected table and merge values into the form =====
-        // This version:
-        //   * reads Column A strictly from a BLOCK ATTRIBUTE only,
-        //   * reads B..E as plain text,
-        //   * merges by X# only (no heuristics), and
-        //   * never writes to DWG or to the table — grid only.
-        // ===== GRID‑ONLY: read a selected table and merge values into the form =====
-        // Reads Column A strictly from a BLOCK ATTRIBUTE, B..E as plain text,
-        // merges by X only (no heuristics), never writes to DWG/tables.
-        // ===== GRID‑ONLY: read a selected table and merge values into the form =====
-        // Reads Column A from the block in the cell (attribute first, then block def text/name),
-        // reads B..E as plain text, and merges STRICTLY BY X only. No DWG/table writes.
-        // ===== GRID‑ONLY: read a selected table and merge values into the form =====
-        // Reads Column A from the BLOCK attribute inside the cell (strict), B..E as plain text,
-        // merges by X only (no heuristics). Never writes to DWG/tables.
-        // ===== GRID‑ONLY: read a selected table and merge values into the form =====
-        // Reads Column A from the block in the cell (attribute on the cell *content*),
-        // reads B..E as plain text, and merges STRICTLY BY X only. Never writes DWG/tables.
-        private void MatchTableIntoGrid()
-        {
-            var doc = AcadApp.DocumentManager.MdiActiveDocument;
+            var doc = _doc ?? AcadApp.DocumentManager.MdiActiveDocument;
             if (doc == null) return;
 
             var ed = doc.Editor;
 
+            // Build quick index by normalized X key (e.g., "3" -> "X3")
+            var byX = new Dictionary<string, CrossingRecord>(StringComparer.OrdinalIgnoreCase);
+            foreach (var r in _records)
+            {
+                var key = NormalizeXKey(r.Crossing);
+                if (!string.IsNullOrWhiteSpace(key) && !byX.ContainsKey(key))
+                    byX[key] = r;
+            }
+
+            using (doc.LockDocument())
+            using (var tr = doc.TransactionManager.StartTransaction())
+            {
+                var bt = (BlockTable)tr.GetObject(doc.Database.BlockTableId, OpenMode.ForRead);
+
+                foreach (ObjectId btrId in bt)
+                {
+                    var btr = (BlockTableRecord)tr.GetObject(btrId, OpenMode.ForRead);
+                    foreach (ObjectId entId in btr)
+                    {
+                        if (!entId.ObjectClass.DxfName.Equals("ACAD_TABLE", StringComparison.OrdinalIgnoreCase))
+                            continue;
+
+                        var table = tr.GetObject(entId, OpenMode.ForRead) as Table;
+                        if (table == null) continue;
+
+                        var kind = _tableSync.IdentifyTable(table, tr);
+                        if (kind == TableSync.XingTableType.Unknown) continue;
+
+                        table.UpgradeOpen();
+
+                        int matched = 0, updated = 0;
+
+                        // Data rows only (row 0 = header)
+                        for (int row = 1; row < table.Rows.Count; row++)
+                        {
+                            // Read X exactly like MATCH TABLE does (attribute-first; no fallbacks that would alter cells)
+                            string xRaw = ReadXFromCellAttributeOnly(table, row, tr);
+                            if (string.IsNullOrWhiteSpace(xRaw))
+                            {
+                                // plain-text fallback for tables created by TableFactory (which uses text in A)
+                                try
+                                {
+                                    var txt = table.Cells[row, 0]?.TextString ?? string.Empty;
+                                    xRaw = ExtractXToken(txt);
+                                }
+                                catch { /* ignore */ }
+                            }
+
+                            var xKey = NormalizeXKey(xRaw);
+                            if (string.IsNullOrWhiteSpace(xKey) || !byX.TryGetValue(xKey, out var rec))
+                            {
+                                ed.WriteMessage($"\n[CrossingManager] Row {row} -> NO MATCH (key='{xRaw}')");
+                                continue;
+                            }
+
+                            matched++;
+                            bool changed = false;
+
+                            // IMPORTANT: DO NOT write Column 0 (bubble). Only B..E.
+                            if (kind == TableSync.XingTableType.Main)
+                            {
+                                changed |= SetCellIfChanged(table, row, 1, rec.Owner);
+                                changed |= SetCellIfChanged(table, row, 2, rec.Description);
+                                changed |= SetCellIfChanged(table, row, 3, rec.Location);
+                                changed |= SetCellIfChanged(table, row, 4, rec.DwgRef);
+                            }
+                            else if (kind == TableSync.XingTableType.Page)
+                            {
+                                changed |= SetCellIfChanged(table, row, 1, rec.Owner);
+                                changed |= SetCellIfChanged(table, row, 2, rec.Description);
+                            }
+                            else if (kind == TableSync.XingTableType.LatLong)
+                            {
+                                changed |= SetCellIfChanged(table, row, 1, rec.Description);
+                                changed |= SetCellIfChanged(table, row, 2, rec.Lat);
+                                changed |= SetCellIfChanged(table, row, 3, rec.Long);
+                            }
+
+                            if (changed) updated++;
+                        }
+
+                        // Best-effort reflow
+                        try { if (updated > 0) table.GenerateLayout(); } catch { }
+
+                        var handleHex = table.ObjectId.Handle.Value.ToString("X");
+                        ed.WriteMessage($"\n[CrossingManager] Table {handleHex}: {kind.ToString().ToUpperInvariant()} matched={matched} updated={updated}");
+                    }
+                }
+
+                tr.Commit();
+            }
+        }
+
+        /// Set a table cell's TextString only if it actually changes; returns true if changed.
+        private static bool SetCellIfChanged(Table t, int row, int col, string newText)
+        {
+            string desired = newText ?? string.Empty;
+            string current = string.Empty;
+            try { current = t.Cells[row, col]?.TextString ?? string.Empty; } catch { }
+
+            if (!string.Equals(current, desired, StringComparison.Ordinal))
+            {
+                try { t.Cells[row, col].TextString = desired; } catch { return false; }
+                return true;
+            }
+            return false;
+        }
+
+        // ===== MATCH TABLE (grid-only) =====
+
+        /// MATCH TABLE:
+        /// - Reads a selected table and merges values into the grid (never writes DWG/table here)
+        /// - Returns true if the grid changed.
+        /// - If persistAfterMatch = true, also writes grid -> blocks and grid -> tables afterwards.
+        private bool MatchTableIntoGrid(bool persistAfterMatch = false)
+        {
+            var doc = AcadApp.DocumentManager.MdiActiveDocument;
+            if (doc == null) return false;
+
+            var ed = doc.Editor;
             var peo = new PromptEntityOptions("\nSelect a crossing table (Main/Page):");
             peo.SetRejectMessage("\nEntity must be a TABLE.");
             peo.AddAllowedClass(typeof(Table), exactMatch: true);
 
             var sel = ed.GetEntity(peo);
-            if (sel.Status != PromptStatus.OK) return;
+            if (sel.Status != PromptStatus.OK) return false;
 
+            bool gridChanged = false;
+
+            // === Read the table and update the grid (grid only) ===
             using (doc.LockDocument())
             using (var tr = doc.TransactionManager.StartTransaction())
             {
@@ -522,33 +585,29 @@ namespace XingManager
                 if (table == null)
                 {
                     ed.WriteMessage("\n[CrossingManager] Selection was not a Table.");
-                    return;
+                    return false;
                 }
 
-                // Identify table kind (Main or Page). Lat/Long not supported here.
                 var kind = _tableSync.IdentifyTable(table, tr);
                 if (kind == TableSync.XingTableType.Unknown)
                 {
                     ed.WriteMessage("\n[CrossingManager] Could not determine table type.");
-                    return;
+                    return false;
                 }
                 if (kind == TableSync.XingTableType.LatLong)
                 {
                     ed.WriteMessage("\n[CrossingManager] Lat/Long tables are not supported by MATCH TABLE.");
-                    return;
+                    return false;
                 }
 
-                // Index strictly by X read from the block attribute on the cell content.
-                // byX: "X1" -> (Owner, Desc, Loc, Dwg, Row)
                 var byX = new Dictionary<string, (string Owner, string Desc, string Loc, string Dwg, int Row)>(StringComparer.OrdinalIgnoreCase);
 
                 ed.WriteMessage("\n[CrossingManager] --- TABLE VALUES (parsed) ---");
-
                 for (int r = 0; r < table.Rows.Count; r++)
                 {
-                    string xRaw = ReadXFromCellAttributeOnly(table, r, tr); // ← attribute on cell *content*
-                    if (string.IsNullOrWhiteSpace(xRaw))
-                        continue; // no X → skip row
+                    // Column A: attribute-first X-key (strict)
+                    string xRaw = ReadXFromCellAttributeOnly(table, r, tr);
+                    if (string.IsNullOrWhiteSpace(xRaw)) continue;
 
                     var owner = ReadTableCellText(table, r, 1);
                     var desc = ReadTableCellText(table, r, 2);
@@ -603,9 +662,14 @@ namespace XingManager
 
                     matched++;
                     if (changed)
+                    {
+                        updated++;
                         ed.WriteMessage($"\n[CrossingManager] [U] {rec.Crossing}: grid updated from table (row {src.Row}).");
+                    }
                     else
+                    {
                         ed.WriteMessage($"\n[CrossingManager] [=] {rec.Crossing}: no changes needed (already matches).");
+                    }
                 }
 
                 tr.Commit();
@@ -613,8 +677,36 @@ namespace XingManager
                 _isDirty = true;
 
                 ed.WriteMessage($"\n[CrossingManager] Match Table -> grid only (X-only): matched={matched}, updated={updated}, noMatch={noMatch}");
+
+                gridChanged = (updated > 0);
+            } // end read/lock
+
+            // === Persist to DWG + tables if requested ===
+            if (persistAfterMatch && gridChanged)
+            {
+                try
+                {
+                    // 1) Write block attributes from the grid
+                    _repository.ApplyChanges(_records.ToList(), _tableSync);
+
+                    // 2) Update MAIN/PAGE/LATLONG tables from the grid (B..E only — never col 0)
+                    UpdateAllXingTablesFromGrid();
+
+                    // 3) Reload grid from DWG (no table writes)
+                    RescanRecords(applyToTables: false);
+
+                    _isDirty = false;
+                    ed.WriteMessage("\n[CrossingManager] MATCH TABLE: applied changes to DWG (blocks & tables).");
+                }
+                catch (Exception ex)
+                {
+                    MessageBox.Show(ex.Message, "Crossing Manager", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                }
             }
+
+            return gridChanged;
         }
+
         /// Read Column A strictly from the block attribute living on the cell *content*.
         /// We try both signatures seen across releases:
         ///   GetBlockAttributeValue(string tag)
@@ -624,7 +716,7 @@ namespace XingManager
         {
             if (table == null || row < 0 || row >= table.Rows.Count) return string.Empty;
 
-            // Tags you commonly use for the index bubble.
+            // Common attribute tags used for the bubble/index
             string[] tags = { "CROSSING", "X", "XING", "X_NO", "XNUM", "XNUMBER", "NUMBER", "INDEX", "NO", "LABEL" };
 
             Cell cell = null;
@@ -635,7 +727,7 @@ namespace XingManager
             {
                 var ct = content.GetType();
 
-                // --- (A) signature: GetBlockAttributeValue(string tag)
+                // (A) GetBlockAttributeValue(string tag)
                 var miStr = ct.GetMethod("GetBlockAttributeValue", new[] { typeof(string) });
                 if (miStr != null)
                 {
@@ -648,11 +740,11 @@ namespace XingManager
                             if (!string.IsNullOrWhiteSpace(s))
                                 return s.Trim();
                         }
-                        catch { /* try next */ }
+                        catch { /* try next tag */ }
                     }
                 }
 
-                // --- (B) signature: GetBlockAttributeValue(ObjectId attDefId)
+                // (B) GetBlockAttributeValue(ObjectId attDefId)
                 var miId = ct.GetMethod("GetBlockAttributeValue", new[] { typeof(ObjectId) });
                 if (miId != null)
                 {
@@ -678,16 +770,17 @@ namespace XingManager
                 }
             }
 
-            // STRICT: no fallback to block definition text/name; if we can't read the instance attribute, return "".
+            // STRICT: no text/name fallback here
             return string.Empty;
         }
 
-        /// Enumerate the cell's "Contents" collection (robust across versions).
+        /// Enumerate the cell's "Contents" collection (works across versions).
         private static IEnumerable<object> EnumerateCellContents(Cell cell)
         {
             if (cell == null) yield break;
 
-            var contentsProp = cell.GetType().GetProperty("Contents",
+            var contentsProp = cell.GetType().GetProperty(
+                "Contents",
                 System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
 
             System.Collections.IEnumerable seq = null;
@@ -703,7 +796,8 @@ namespace XingManager
         {
             if (content == null) return ObjectId.Null;
 
-            var btrProp = content.GetType().GetProperty("BlockTableRecordId",
+            var btrProp = content.GetType().GetProperty(
+                "BlockTableRecordId",
                 System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
 
             try
@@ -716,25 +810,26 @@ namespace XingManager
             return ObjectId.Null;
         }
 
-        /// Normalize "X", "X 1", "X01" -> "X1". If it doesn't look like X-digits, return compacted uppercase.
         private static string NormalizeXKey(string s)
         {
             if (string.IsNullOrWhiteSpace(s)) return string.Empty;
+
             var up = Regex.Replace(s.ToUpperInvariant(), @"\s+", "");
-            // X##  -> X#
+            // "X##" -> "X#"
             var m = Regex.Match(up, @"^X0*(\d+)$");
             if (m.Success) return "X" + m.Groups[1].Value;
-            // ##   -> X#
+            // "##"  -> "X#"
             m = Regex.Match(up, @"^0*(\d+)$");
             if (m.Success) return "X" + m.Groups[1].Value;
+
             return up;
         }
 
-        /// Read a table cell as plain text. Treat "-" and "—" as empty.
         private static string ReadTableCellText(Table t, int row, int col)
         {
             if (t == null || row < 0 || col < 0) return string.Empty;
             if (row >= t.Rows.Count || col >= t.Columns.Count) return string.Empty;
+
             try
             {
                 var s = t.Cells[row, col]?.TextString ?? string.Empty;
@@ -744,32 +839,6 @@ namespace XingManager
             catch { return string.Empty; }
         }
 
-        private static IEnumerable<string> EnumerateCellTextFragments(Cell cell)
-        {
-            if (cell == null) yield break;
-
-            var contentsProp = cell.GetType().GetProperty("Contents",
-                System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
-
-            System.Collections.IEnumerable seq = null;
-            try { seq = contentsProp?.GetValue(cell, null) as System.Collections.IEnumerable; } catch { }
-            if (seq == null) yield break;
-
-            foreach (var item in seq)
-            {
-                if (item == null) continue;
-                var textProp = item.GetType().GetProperty("TextString",
-                    System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
-                if (textProp == null) continue;
-
-                string frag = null;
-                try { frag = textProp.GetValue(item, null) as string; } catch { }
-                if (!string.IsNullOrWhiteSpace(frag))
-                    yield return frag;
-            }
-        }
-
-        // Normalize a variety of inputs to "X#". Accepts "X 01", "X01", "01", "1", etc.
         private static string ExtractXToken(string text)
         {
             if (string.IsNullOrWhiteSpace(text)) return string.Empty;
@@ -781,26 +850,63 @@ namespace XingManager
             return string.Empty;
         }
 
-        private static System.Collections.Generic.IEnumerable<object> EnumerateCellContentObjects(Cell cell)
+        // ===== Helpers for editing/placement =====
+
+        private void PromptPlacement(CrossingRecord record)
         {
-            if (cell == null) yield break;
+            var point = _doc.Editor.GetPoint("\nSpecify insertion point for new crossing:");
+            if (point.Status != PromptStatus.OK)
+            {
+                MessageBox.Show("Crossing created in the list only. Apply will skip until placed.",
+                    "Crossing Manager", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
 
-            var contentsProp = cell.GetType().GetProperty("Contents",
-                System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
-
-            System.Collections.IEnumerable seq = null;
-            try { seq = contentsProp?.GetValue(cell, null) as System.Collections.IEnumerable; } catch { }
-            if (seq == null) yield break;
-
-            foreach (var item in seq)
-                if (item != null) yield return item;
+            try
+            {
+                var id = _repository.InsertCrossing(record, point.Value);
+                record.AllInstances.Add(id);
+                record.CanonicalInstance = id;
+                _contexts[id] = new DuplicateResolver.InstanceContext
+                {
+                    ObjectId = id,
+                    SpaceName = "Model",
+                    Owner = record.Owner,
+                    Description = record.Description,
+                    Location = record.Location,
+                    DwgRef = record.DwgRef,
+                    Lat = record.Lat,
+                    Long = record.Long
+                };
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(ex.Message, "Crossing Manager",
+                    MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
         }
 
-        private string GenerateCrossingName(int index)
+        private CrossingRecord GetSelectedRecord()
+        {
+            if (gridCrossings.CurrentRow == null) return null;
+            return gridCrossings.CurrentRow.DataBoundItem as CrossingRecord;
+        }
+
+        private string GenerateNextCrossingName()
+        {
+            var max = 0;
+            foreach (var record in _records)
+            {
+                var token = CrossingRecord.ParseCrossingNumber(record.Crossing);
+                if (token.Number > max) max = token.Number;
+            }
+            return string.Format(CultureInfo.InvariantCulture, "X{0}", max + 1);
+        }
+
+        private static string GenerateCrossingName(int index)
         {
             return string.Format(CultureInfo.InvariantCulture, "X{0}", index + 1);
         }
-        // Treat "-" and "—" as empty placeholders for table cells
 
         private void ShiftCrossings(int startIndex, int delta)
         {
@@ -819,7 +925,6 @@ namespace XingManager
         private static string ExtractPrefix(string crossing)
         {
             if (string.IsNullOrEmpty(crossing)) return "X";
-
             var chars = crossing.TakeWhile(c => !char.IsDigit(c)).ToArray();
             var prefix = new string(chars);
             if (string.IsNullOrEmpty(prefix)) prefix = "X";
@@ -836,6 +941,8 @@ namespace XingManager
             }
         }
 
+        // ===== Page & Lat/Long creation =====
+
         private void GenerateXingPage()
         {
             var choices = _records
@@ -847,7 +954,8 @@ namespace XingManager
 
             if (!choices.Any())
             {
-                MessageBox.Show("No DWG_REF values available.", "Crossing Manager", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                MessageBox.Show("No DWG_REF values available.", "Crossing Manager",
+                    MessageBoxButtons.OK, MessageBoxIcon.Information);
                 return;
             }
 
@@ -857,14 +965,16 @@ namespace XingManager
             try
             {
                 string actualName;
-                var layoutId = _layoutUtils.CloneLayoutFromTemplate(_doc, TemplatePath, TemplateLayoutName, string.Format(CultureInfo.InvariantCulture, "X-{0}", selected), out actualName);
+                var layoutId = _layoutUtils.CloneLayoutFromTemplate(
+                    _doc, TemplatePath, TemplateLayoutName,
+                    string.Format(CultureInfo.InvariantCulture, "X-{0}", selected),
+                    out actualName);
+
                 _layoutUtils.SwitchToLayout(_doc, actualName);
 
                 var locationText = BuildLocationText(selected);
                 if (!string.IsNullOrEmpty(locationText))
-                {
                     _layoutUtils.ReplacePlaceholderText(_doc.Database, layoutId, locationText);
-                }
 
                 var pointRes = _doc.Editor.GetPoint("\nSpecify insertion point for Crossing Page Table:");
                 if (pointRes.Status != PromptStatus.OK) return;
@@ -880,21 +990,25 @@ namespace XingManager
             }
             catch (FileNotFoundException)
             {
-                MessageBox.Show(string.Format(CultureInfo.InvariantCulture, "Template not found: {0}", TemplatePath), "Crossing Manager", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                MessageBox.Show(string.Format(CultureInfo.InvariantCulture, "Template not found: {0}", TemplatePath),
+                    "Crossing Manager", MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
             catch (Exception ex)
             {
-                MessageBox.Show(ex.Message, "Crossing Manager", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                MessageBox.Show(ex.Message, "Crossing Manager",
+                    MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
         }
 
         private string BuildLocationText(string dwgRef)
         {
-            var record = _records.FirstOrDefault(r => string.Equals(r.DwgRef, dwgRef, StringComparison.OrdinalIgnoreCase) && !string.IsNullOrWhiteSpace(r.Location));
+            var record = _records.FirstOrDefault(r =>
+                string.Equals(r.DwgRef, dwgRef, StringComparison.OrdinalIgnoreCase) &&
+                !string.IsNullOrWhiteSpace(r.Location));
+
             if (record == null) return string.Empty;
 
-            string formatted;
-            if (_layoutUtils.TryFormatMeridianLocation(record.Location, out formatted))
+            if (_layoutUtils.TryFormatMeridianLocation(record.Location, out var formatted))
                 return formatted;
 
             return record.Location;
@@ -937,7 +1051,9 @@ namespace XingManager
                 dialog.AcceptButton = ok;
                 dialog.CancelButton = cancel;
 
-                return dialog.ShowDialog(this) == DialogResult.OK ? (string)combo.SelectedItem : string.Empty;
+                return dialog.ShowDialog(this) == DialogResult.OK
+                    ? (string)combo.SelectedItem
+                    : string.Empty;
             }
         }
 
@@ -946,7 +1062,8 @@ namespace XingManager
             var record = GetSelectedRecord();
             if (record == null)
             {
-                MessageBox.Show("Select a crossing first.", "Crossing Manager", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                MessageBox.Show("Select a crossing first.", "Crossing Manager",
+                    MessageBoxButtons.OK, MessageBoxIcon.Information);
                 return;
             }
 
@@ -959,12 +1076,8 @@ namespace XingManager
                     var btr = (BlockTableRecord)tr.GetObject(btrId, OpenMode.ForRead);
                     foreach (ObjectId entId in btr)
                     {
-                        var ent = tr.GetObject(entId, OpenMode.ForRead) as Entity;
-                        var table = ent as Table;
-                        if (table == null) continue;
-
-                        if (_tableSync.IdentifyTable(table, tr) != TableSync.XingTableType.LatLong)
-                            continue;
+                        if (!(tr.GetObject(entId, OpenMode.ForRead) is Table table)) continue;
+                        if (_tableSync.IdentifyTable(table, tr) != TableSync.XingTableType.LatLong) continue;
 
                         for (var row = 1; row < table.Rows.Count; row++)
                         {
@@ -975,13 +1088,10 @@ namespace XingManager
                                 break;
                             }
                         }
-
                         if (existing != null) break;
                     }
-
                     if (existing != null) break;
                 }
-
                 tr.Commit();
             }
 
