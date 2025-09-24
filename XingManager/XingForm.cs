@@ -154,14 +154,6 @@ namespace XingManager
 
         private void btnApply_Click(object sender, EventArgs e) => ApplyChangesToDrawing();
 
-        private void btnAdd_Click(object sender, EventArgs e)
-        {
-            var record = new CrossingRecord { Crossing = GenerateNextCrossingName() };
-            _records.Add(record);
-            PromptPlacement(record);
-            _isDirty = true;
-        }
-
         private void btnInsert_Click(object sender, EventArgs e)
         {
             var opts = new PromptIntegerOptions("\nInsert crossing at position:")
@@ -205,9 +197,8 @@ namespace XingManager
             try
             {
                 _repository.DeleteInstances(record.AllInstances);
-                var index = _records.IndexOf(record);
+                _repository.DeleteBlocksByCrossing(record.Crossing);
                 _records.Remove(record);
-                ShiftCrossings(index, -1);
                 _isDirty = true;
             }
             catch (Exception ex)
@@ -890,17 +881,6 @@ namespace XingManager
         {
             if (gridCrossings.CurrentRow == null) return null;
             return gridCrossings.CurrentRow.DataBoundItem as CrossingRecord;
-        }
-
-        private string GenerateNextCrossingName()
-        {
-            var max = 0;
-            foreach (var record in _records)
-            {
-                var token = CrossingRecord.ParseCrossingNumber(record.Crossing);
-                if (token.Number > max) max = token.Number;
-            }
-            return string.Format(CultureInfo.InvariantCulture, "X{0}", max + 1);
         }
 
         private static string GenerateCrossingName(int index)

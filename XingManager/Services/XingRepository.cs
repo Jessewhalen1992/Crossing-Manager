@@ -319,6 +319,62 @@ namespace XingManager.Services
             }
         }
 
+        public void DeleteBlocksByCrossing(string crossing)
+        {
+            if (string.IsNullOrWhiteSpace(crossing))
+                return;
+
+            var targetKey = crossing.Trim().ToUpperInvariant();
+
+            using (_doc.LockDocument())
+            using (var tr = _doc.Database.TransactionManager.StartTransaction())
+            {
+                var db = _doc.Database;
+                var blockTable = (BlockTable)tr.GetObject(db.BlockTableId, OpenMode.ForRead);
+                var blockRefClass = RXClass.GetClass(typeof(BlockReference));
+                var idsToDelete = new List<ObjectId>();
+
+                foreach (ObjectId btrId in blockTable)
+                {
+                    var btr = (BlockTableRecord)tr.GetObject(btrId, OpenMode.ForRead);
+                    if (!btr.IsLayout)
+                        continue;
+
+                    foreach (ObjectId entId in btr)
+                    {
+                        if (!entId.ObjectClass.IsDerivedFrom(blockRefClass))
+                            continue;
+
+                        var br = tr.GetObject(entId, OpenMode.ForRead) as BlockReference;
+                        if (br == null || br.IsErased)
+                            continue;
+
+                        var blockName = GetBlockName(br, tr);
+                        if (!string.Equals(blockName, BlockName, StringComparison.OrdinalIgnoreCase))
+                            continue;
+
+                        var attributes = ReadAttributes(br, tr);
+                        var attValue = GetValue(attributes, "CROSSING");
+                        var attKey = (attValue ?? string.Empty).Trim().ToUpperInvariant();
+                        if (string.IsNullOrEmpty(attKey))
+                            continue;
+
+                        if (string.Equals(attKey, targetKey, StringComparison.Ordinal))
+                            idsToDelete.Add(entId);
+                    }
+                }
+
+                foreach (var id in idsToDelete.Distinct())
+                {
+                    var br = tr.GetObject(id, OpenMode.ForWrite, false, true) as BlockReference;
+                    if (br != null && !br.IsErased)
+                        br.Erase(true);
+                }
+
+                tr.Commit();
+            }
+        }
+
         public bool TryGetLatLong(BlockReference br, Transaction tr, out string lat, out string lng)
         {
             lat = string.Empty;
