@@ -228,92 +228,6 @@ namespace XingManager
                 MessageBox.Show(ex.Message, "Crossing Manager", MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
         }
-        /// <summary>
-        /// Forces a visual regen of every recognized Crossing table (MAIN/PAGE/LATLNG)
-        /// without moving or changing any data. This clears the transient “ghost row”
-        /// artifact you see until you interact with the table.
-        /// </summary>
-
-
-        /// <summary>
-        /// Forces a visual regen of every recognized Crossing table (MAIN/PAGE/LATLNG)
-        /// without moving or changing any data. This clears the transient “ghost row”
-        /// artifact you see until you interact with the table.
-        /// </summary>
-        private void ForceRegenAllCrossingTablesInDwg()
-        {
-            var doc = _doc ?? AcadApp.DocumentManager.MdiActiveDocument;
-            if (doc == null) return;
-
-            using (doc.LockDocument())
-            using (var tr = doc.TransactionManager.StartTransaction())
-            {
-                var bt = (BlockTable)tr.GetObject(doc.Database.BlockTableId, OpenMode.ForRead);
-
-                foreach (ObjectId btrId in bt)
-                {
-                    var btr = (BlockTableRecord)tr.GetObject(btrId, OpenMode.ForRead);
-                    foreach (ObjectId entId in btr)
-                    {
-                        // Only touch TABLE entities we recognize as Crossing tables
-                        var table = tr.GetObject(entId, OpenMode.ForRead) as Table;
-                        if (table == null) continue;
-
-                        var kind = _tableSync.IdentifyTable(table, tr);
-                        if (kind == TableSync.XingTableType.Unknown) continue;
-
-                        ForceRegenTable(table);   // <- local helper below
-                    }
-                }
-
-                tr.Commit();
-            }
-
-            // Belt + suspenders: ask AutoCAD to rebuild the display lists
-            try { (doc.Editor)?.Regen(); }
-            catch
-            {
-                try { doc.SendStringToExecute("._REGEN ", true, false, true); } catch { /* ignore */ }
-            }
-        }
-        /// <summary>
-        /// Forces AutoCAD to rebuild the graphics for a single Table entity.
-        /// No geometry or text is changed; we just mark graphics dirty,
-        /// regenerate the layout, and perform a tiny, reversible nudge.
-        /// </summary>
-        private static void ForceRegenTable(Table table)
-        {
-            if (table == null) return;
-
-            try
-            {
-                table.UpgradeOpen();
-
-                // Make sure any internal layout cache reflects current rows/cols
-                try { table.GenerateLayout(); } catch { /* best effort */ }
-
-                // Mark graphics as needing rebuild
-                try { table.RecordGraphicsModified(true); } catch { /* older APIs still fine */ }
-
-                // Tiny, reversible nudge of the insertion point to ensure a redraw;
-                // using a very small delta to avoid any visible change.
-                try
-                {
-                    var p = table.Position;
-                    var eps = 1e-6; // drawing-units; small enough to be invisible, big enough to trigger regen
-                    table.Position = new Point3d(p.X + eps, p.Y, p.Z);
-                    table.Position = p;
-                }
-                catch
-                {
-                    // If Position isn’t accessible in a given version, the layout+graphics mark above is usually sufficient.
-                }
-            }
-            catch
-            {
-                // Non-fatal: this is purely to clean up a visual artifact.
-            }
-        }
 
         private void btnRenumber_Click(object sender, EventArgs e)
         {
@@ -546,6 +460,9 @@ namespace XingManager
         /// Update recognized crossing tables (MAIN/PAGE/LATLONG) from the current grid.
         /// Never modifies Column 0 (the bubble/X). Only columns B..E are written.
         /// Ends with a hard refresh to avoid the transient “ghost row” look.
+        /// Update recognised crossing tables (MAIN/PAGE/LATLONG) from the current grid.
+        /// Never modifies Column 0 (the bubble/X); only columns B..E are written.
+        /// Ends with a hard refresh to avoid the transient “ghost row” look.
         private void UpdateAllXingTablesFromGrid()
         {
             var doc = _doc ?? AcadApp.DocumentManager.MdiActiveDocument;
@@ -608,7 +525,7 @@ namespace XingManager
                             matched++;
                             bool changed = false;
 
-                            // NEVER write column 0
+                            // NEVER write column 0 (bubble)
                             if (kind == TableSync.XingTableType.Main)
                             {
                                 changed |= SetCellIfChanged(table, row, 1, rec.Owner);
@@ -631,9 +548,11 @@ namespace XingManager
                             if (changed) updated++;
                         }
 
-                         if (updated > 0)
+                        if (updated > 0)
+                        {
+                            try { table.GenerateLayout(); } catch { }
                             ForceRegenTable(table);
-
+                        }
 
                         var handleHex = table.ObjectId.Handle.Value.ToString("X");
                         ed.WriteMessage($"\n[CrossingManager] Table {handleHex}: {kind.ToString().ToUpperInvariant()} matched={matched} updated={updated}");
@@ -642,6 +561,9 @@ namespace XingManager
 
                 tr.Commit();
             }
+
+            try { doc.Editor?.Regen(); } catch { }
+            try { AcadApp.UpdateScreen(); } catch { }
         }
 
         /// Set a table cell's TextString only if it actually changes; returns true if changed.
@@ -988,24 +910,7 @@ namespace XingManager
                     MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
         }
-        /// <summary>
-        /// Remove the row corresponding to the specified crossing key from all recognised tables.
-        /// Does not alter Column A formatting; only deletes entire rows.
-        /// </summary>
-        /// <summary>
-        /// Remove the row corresponding to the specified crossing key from all recognised tables.
-        /// Does not alter Column A formatting; only deletes entire rows.
-        /// </summary>
-        // Replace your existing DeleteRowFromTables() with this version.
-        // It deletes the entire row via Table.DeleteRows(), regenerates the table layout,
-        // and leaves bubble column formatting intact.
-        /// Remove the row corresponding to the specified crossing key from all recognised tables.
-        /// After deletion, force a display regeneration to clear any ghost rows.
-        /// <summary>
-        /// Remove the row corresponding to the specified crossing key from all recognised tables.
-        /// Does not alter Column A formatting; only deletes entire rows.
-        /// </summary>
-        // XingForm.cs (inside DeleteRowFromTables)
+
         private void DeleteRowFromTables(string crossingKey)
         {
             var normalized = NormalizeXKey(crossingKey);
@@ -1016,6 +921,7 @@ namespace XingManager
             using (var tr = doc.TransactionManager.StartTransaction())
             {
                 var bt = (BlockTable)tr.GetObject(doc.Database.BlockTableId, OpenMode.ForRead);
+
                 foreach (ObjectId btrId in bt)
                 {
                     var btr = (BlockTableRecord)tr.GetObject(btrId, OpenMode.ForRead);
@@ -1026,29 +932,42 @@ namespace XingManager
 
                         var kind = _tableSync.IdentifyTable(table, tr);
                         if (kind == TableSync.XingTableType.Unknown) continue;
+
                         table.UpgradeOpen();
 
                         for (int row = 1; row < table.Rows.Count; row++)
                         {
+                            // Column A: attribute-first key; fall back to plain text token.
                             string xRaw = ReadXFromCellAttributeOnly(table, row, tr);
                             if (string.IsNullOrWhiteSpace(xRaw))
                             {
                                 var txt = table.Cells[row, 0]?.TextString ?? string.Empty;
                                 xRaw = ExtractXToken(txt);
                             }
+
                             var key = NormalizeXKey(xRaw);
-                            if (normalized.Equals(key, StringComparison.OrdinalIgnoreCase))
-                            {
-                                table.DeleteRows(row, 1);                   // remove the row
-                                table.GenerateLayout();                     // <‑‑ force table to refresh its internal layout
-                                table.RecordGraphicsModified(true);         // mark graphics dirty so AutoCAD redraws immediately
-                                break;
-                            }
+                            if (!normalized.Equals(key, StringComparison.OrdinalIgnoreCase))
+                                continue;
+
+                            // Delete the entire row (no shifting across columns).
+                            table.DeleteRows(row, 1);
+
+                            // Keep table internals and graphics up to date.
+                            try { table.GenerateLayout(); } catch { }
+                            try { table.RecordGraphicsModified(true); } catch { }
+                            ForceRegenTable(table);
+
+                            break; // done with this table
                         }
                     }
                 }
+
                 tr.Commit();
             }
+
+            // Extra flush
+            try { doc.Editor?.Regen(); } catch { }
+            try { AcadApp.UpdateScreen(); } catch { }
         }
 
         // Modify your btnDelete_Click handler so it doesn’t renumber bubbles
@@ -1076,6 +995,68 @@ namespace XingManager
                 var prefix = ExtractPrefix(record.Crossing);
                 var newNumber = Math.Max(1, token.Number + delta);
                 record.Crossing = string.Format(CultureInfo.InvariantCulture, "{0}{1}", prefix, newNumber);
+            }
+        }
+        /// Force a visual rebuild of every recognised crossing table (MAIN / PAGE / LATLONG).
+        /// <summary>
+        /// Rebuilds the display lists for all recognized Crossing tables (MAIN/PAGE/LATLONG)
+        /// without changing geometry. Uses non-undoable screen refreshes.
+        /// </summary>
+        private void ForceRegenAllCrossingTablesInDwg()
+        {
+            var doc = _doc ?? AcadApp.DocumentManager.MdiActiveDocument;
+            if (doc == null) return;
+
+            using (doc.LockDocument())
+            using (var tr = doc.TransactionManager.StartTransaction())
+            {
+                var bt = (BlockTable)tr.GetObject(doc.Database.BlockTableId, OpenMode.ForRead);
+                foreach (ObjectId btrId in bt)
+                {
+                    var btr = (BlockTableRecord)tr.GetObject(btrId, OpenMode.ForRead);
+                    foreach (ObjectId entId in btr)
+                    {
+                        var table = tr.GetObject(entId, OpenMode.ForRead) as Table;
+                        if (table == null) continue;
+
+                        var kind = _tableSync.IdentifyTable(table, tr);
+                        if (kind == TableSync.XingTableType.Unknown) continue;
+
+                        ForceRegenTable(table);
+                    }
+                }
+                tr.Commit();
+            }
+
+            // Non-undoable repaint paths
+            try { doc.Editor?.Regen(); } catch { /* ignore */ }
+            try { AcadApp.UpdateScreen(); } catch { /* ignore */ }
+            try { doc.SendStringToExecute("._REGENALL ", true, false, true); } catch { /* ignore */ }
+        }
+
+        /// Force AutoCAD to rebuild graphics for a single table by doing a tiny no-op transform.
+        /// This mimics a user "move/unmove" which clears the transient ghost row artifact.
+        /// <summary>
+        /// Force a redraw of a single Table without making any geometric changes.
+        /// This does NOT add anything to the Undo stack.
+        /// </summary>
+        private static void ForceRegenTable(Table table)
+        {
+            if (table == null) return;
+
+            try
+            {
+                table.UpgradeOpen();
+
+                // Make sure internal row/column cache is current
+                try { table.GenerateLayout(); } catch { /* best effort */ }
+
+                // Mark graphics “dirty” so the display list is rebuilt
+                try { table.RecordGraphicsModified(true); } catch { /* older versions: no-op */ }
+            }
+            catch
+            {
+                // purely visual hygiene; ignore failures
             }
         }
 
