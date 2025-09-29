@@ -14,6 +14,12 @@ namespace XingManager.Services
     public class LayoutUtils
     {
         public const string LocationPlaceholder = "_._.1/4 SEC. __, TWP. __, RGE. __, W._M.";
+        public const string PlanHeadingBase = "PLAN SHOWING PIPELINE CROSSING(S) WITHIN";
+        public const string PlanHeadingAdjacentSuffix = " AND ADJACENT TO";
+
+        private static readonly Regex PlanHeadingRegex = new Regex(
+            @"PLAN\s+SHOWING\s+PIPELINE\s+CROSSING\(S\)\s+WITHIN(?:\s+AND\s+ADJACENT\s+TO)?",
+            RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
         public ObjectId CloneLayoutFromTemplate(Document doc, string templatePath, string layoutName, string desiredName, out string actualName)
         {
@@ -179,6 +185,75 @@ namespace XingManager.Services
 
                 tr.Commit();
             }
+        }
+
+        public void UpdatePlanHeadingText(Database db, ObjectId layoutId, bool includeAdjacent)
+        {
+            if (db == null || layoutId.IsNull)
+            {
+                return;
+            }
+
+            var replacement = includeAdjacent
+                ? PlanHeadingBase + PlanHeadingAdjacentSuffix
+                : PlanHeadingBase;
+
+            using (var tr = db.TransactionManager.StartTransaction())
+            {
+                var layout = (Layout)tr.GetObject(layoutId, OpenMode.ForRead);
+                var btr = (BlockTableRecord)tr.GetObject(layout.BlockTableRecordId, OpenMode.ForRead);
+
+                foreach (ObjectId entId in btr)
+                {
+                    var dbText = tr.GetObject(entId, OpenMode.ForRead) as DBText;
+                    if (dbText != null)
+                    {
+                        var text = dbText.TextString ?? string.Empty;
+                        if (TryUpdateHeading(ref text, replacement))
+                        {
+                            dbText.UpgradeOpen();
+                            dbText.TextString = text;
+                        }
+                        continue;
+                    }
+
+                    var mtext = tr.GetObject(entId, OpenMode.ForRead) as MText;
+                    if (mtext != null)
+                    {
+                        var contents = mtext.Text ?? mtext.Contents ?? string.Empty;
+                        if (TryUpdateHeading(ref contents, replacement))
+                        {
+                            mtext.UpgradeOpen();
+                            mtext.Contents = contents;
+                        }
+                    }
+                }
+
+                tr.Commit();
+            }
+        }
+
+        private static bool TryUpdateHeading(ref string text, string replacement)
+        {
+            if (string.IsNullOrEmpty(text))
+            {
+                return false;
+            }
+
+            var match = PlanHeadingRegex.Match(text);
+            if (!match.Success)
+            {
+                return false;
+            }
+
+            var updated = PlanHeadingRegex.Replace(text, replacement);
+            if (string.Equals(updated, text, StringComparison.Ordinal))
+            {
+                return false;
+            }
+
+            text = updated;
+            return true;
         }
 
         private static bool IsPlaceholder(string value)

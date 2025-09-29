@@ -1254,7 +1254,37 @@ namespace XingManager
             CommandEventHandler failed = null;
 
             bool IsRenumberCommand(CommandEventArgs args)
-                => string.Equals(args?.GlobalCommandName, "RNC", StringComparison.OrdinalIgnoreCase);
+            {
+                if (!_isAwaitingRenumber)
+                {
+                    return false;
+                }
+
+                var name = args?.GlobalCommandName;
+                if (string.IsNullOrWhiteSpace(name))
+                {
+                    return true;
+                }
+
+                if (string.Equals(name, "RNC", StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(name, "XINGREN", StringComparison.OrdinalIgnoreCase))
+                {
+                    return true;
+                }
+
+                if (name.IndexOf("RENUMBER", StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    return true;
+                }
+
+                if (name.IndexOf("XING", StringComparison.OrdinalIgnoreCase) >= 0 &&
+                    name.IndexOf("REN", StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    return true;
+                }
+
+                return false;
+            }
 
             void Cleanup()
             {
@@ -1336,6 +1366,19 @@ namespace XingManager
 
         // ===== Page & Lat/Long creation =====
 
+        private sealed class PageGenerationOptions
+        {
+            public PageGenerationOptions(string dwgRef, bool includeAdjacent)
+            {
+                DwgRef = dwgRef;
+                IncludeAdjacent = includeAdjacent;
+            }
+
+            public string DwgRef { get; }
+
+            public bool IncludeAdjacent { get; }
+        }
+
         private void GenerateXingPage()
         {
             var choices = _records
@@ -1352,20 +1395,22 @@ namespace XingManager
                 return;
             }
 
-            var selected = PromptForChoice("Select DWG_REF", choices);
-            if (string.IsNullOrEmpty(selected)) return;
+            var options = PromptForPageOptions("Select DWG_REF", choices);
+            if (options == null || string.IsNullOrEmpty(options.DwgRef)) return;
 
             try
             {
                 string actualName;
                 var layoutId = _layoutUtils.CloneLayoutFromTemplate(
                     _doc, TemplatePath, TemplateLayoutName,
-                    string.Format(CultureInfo.InvariantCulture, "X-{0}", selected),
+                    string.Format(CultureInfo.InvariantCulture, "X-{0}", options.DwgRef),
                     out actualName);
 
                 _layoutUtils.SwitchToLayout(_doc, actualName);
 
-                var locationText = BuildLocationText(selected);
+                _layoutUtils.UpdatePlanHeadingText(_doc.Database, layoutId, options.IncludeAdjacent);
+
+                var locationText = BuildLocationText(options.DwgRef);
                 if (!string.IsNullOrEmpty(locationText))
                     _layoutUtils.ReplacePlaceholderText(_doc.Database, layoutId, locationText);
 
@@ -1377,7 +1422,7 @@ namespace XingManager
                 {
                     var layout = (Layout)tr.GetObject(layoutId, OpenMode.ForRead);
                     var btr = (BlockTableRecord)tr.GetObject(layout.BlockTableRecordId, OpenMode.ForWrite);
-                    _tableSync.CreateAndInsertPageTable(_doc.Database, tr, btr, pointRes.Value, selected, _records);
+                    _tableSync.CreateAndInsertPageTable(_doc.Database, tr, btr, pointRes.Value, options.DwgRef, _records);
                     tr.Commit();
                 }
             }
@@ -1407,31 +1452,65 @@ namespace XingManager
             return record.Location;
         }
 
-        private string PromptForChoice(string title, IList<string> choices)
+        private PageGenerationOptions PromptForPageOptions(string title, IList<string> choices)
         {
             using (var dialog = new Form())
             {
                 dialog.Text = title;
                 dialog.FormBorderStyle = FormBorderStyle.FixedDialog;
                 dialog.StartPosition = FormStartPosition.CenterParent;
-                dialog.Width = 300;
-                dialog.Height = 150;
+                dialog.Width = 360;
+                dialog.Height = 210;
                 dialog.MinimizeBox = false;
                 dialog.MaximizeBox = false;
+
+                var layout = new TableLayoutPanel
+                {
+                    Dock = DockStyle.Fill,
+                    ColumnCount = 1,
+                    RowCount = 3,
+                    Padding = new Padding(10)
+                };
+                layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+                layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+                layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+
+                var label = new Label
+                {
+                    Text = "Select DWG_REF:",
+                    AutoSize = true,
+                    Anchor = AnchorStyles.Left,
+                    Margin = new Padding(3, 0, 3, 6)
+                };
 
                 var combo = new ComboBox
                 {
                     Dock = DockStyle.Top,
-                    DropDownStyle = ComboBoxStyle.DropDownList
+                    DropDownStyle = ComboBoxStyle.DropDownList,
+                    Margin = new Padding(3, 0, 3, 6)
                 };
                 combo.Items.AddRange(choices.Cast<object>().ToArray());
                 if (choices.Count > 0) combo.SelectedIndex = 0;
+
+                var adjacentCheckbox = new CheckBox
+                {
+                    Text = "Include \"AND ADJACENT TO\" in heading",
+                    Checked = true,
+                    AutoSize = true,
+                    Anchor = AnchorStyles.Left,
+                    Margin = new Padding(3, 6, 3, 0)
+                };
+
+                layout.Controls.Add(label, 0, 0);
+                layout.Controls.Add(combo, 0, 1);
+                layout.Controls.Add(adjacentCheckbox, 0, 2);
 
                 var panel = new FlowLayoutPanel
                 {
                     Dock = DockStyle.Bottom,
                     FlowDirection = WinFormsFlowDirection.RightToLeft,
-                    Height = 40
+                    Height = 40,
+                    Padding = new Padding(3, 3, 3, 6)
                 };
 
                 var ok = new Button { Text = "OK", DialogResult = DialogResult.OK, Width = 80 };
@@ -1439,14 +1518,23 @@ namespace XingManager
                 panel.Controls.Add(ok);
                 panel.Controls.Add(cancel);
 
-                dialog.Controls.Add(combo);
+                dialog.Controls.Add(layout);
                 dialog.Controls.Add(panel);
                 dialog.AcceptButton = ok;
                 dialog.CancelButton = cancel;
 
-                return dialog.ShowDialog(this) == DialogResult.OK
-                    ? (string)combo.SelectedItem
-                    : string.Empty;
+                if (dialog.ShowDialog(this) != DialogResult.OK)
+                {
+                    return null;
+                }
+
+                var selected = combo.SelectedItem as string;
+                if (string.IsNullOrWhiteSpace(selected))
+                {
+                    return null;
+                }
+
+                return new PageGenerationOptions(selected, adjacentCheckbox.Checked);
             }
         }
 
