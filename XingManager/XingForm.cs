@@ -154,29 +154,6 @@ namespace XingManager
 
         private void btnApply_Click(object sender, EventArgs e) => ApplyChangesToDrawing();
 
-        private void btnInsert_Click(object sender, EventArgs e)
-        {
-            var opts = new PromptIntegerOptions("\nInsert crossing at position:")
-            {
-                AllowZero = false,
-                AllowNegative = false,
-                LowerLimit = 1,
-                UpperLimit = _records.Count + 1,
-                DefaultValue = _records.Count + 1
-            };
-
-            var res = _doc.Editor.GetInteger(opts);
-            if (res.Status != PromptStatus.OK) return;
-
-            var index = Math.Min(Math.Max(res.Value - 1, 0), _records.Count);
-            ShiftCrossings(index, 1);
-
-            var record = new CrossingRecord { Crossing = GenerateCrossingName(index) };
-            _records.Insert(index, record);
-            PromptPlacement(record);
-            _isDirty = true;
-        }
-
         // DELETE SELECTED: does NOT renumber the remaining crossings.
         // - removes the block instances for the selected record
         // - removes matching rows from all recognized tables (Main/Page/LatLong)
@@ -875,42 +852,6 @@ namespace XingManager
             return string.Empty;
         }
 
-        // ===== Helpers for editing/placement =====
-
-        private void PromptPlacement(CrossingRecord record)
-        {
-            var point = _doc.Editor.GetPoint("\nSpecify insertion point for new crossing:");
-            if (point.Status != PromptStatus.OK)
-            {
-                MessageBox.Show("Crossing created in the list only. Apply will skip until placed.",
-                    "Crossing Manager", MessageBoxButtons.OK, MessageBoxIcon.Information);
-                return;
-            }
-
-            try
-            {
-                var id = _repository.InsertCrossing(record, point.Value);
-                record.AllInstances.Add(id);
-                record.CanonicalInstance = id;
-                _contexts[id] = new DuplicateResolver.InstanceContext
-                {
-                    ObjectId = id,
-                    SpaceName = "Model",
-                    Owner = record.Owner,
-                    Description = record.Description,
-                    Location = record.Location,
-                    DwgRef = record.DwgRef,
-                    Lat = record.Lat,
-                    Long = record.Long
-                };
-            }
-            catch (Exception ex)
-            {
-                MessageBox.Show(ex.Message, "Crossing Manager",
-                    MessageBoxButtons.OK, MessageBoxIcon.Error);
-            }
-        }
-
         private void DeleteRowFromTables(string crossingKey)
         {
             var normalized = NormalizeXKey(crossingKey);
@@ -979,24 +920,6 @@ namespace XingManager
             return gridCrossings.CurrentRow.DataBoundItem as CrossingRecord;
         }
 
-        private static string GenerateCrossingName(int index)
-        {
-            return string.Format(CultureInfo.InvariantCulture, "X{0}", index + 1);
-        }
-
-        private void ShiftCrossings(int startIndex, int delta)
-        {
-            if (delta == 0) return;
-
-            for (var i = startIndex; i < _records.Count; i++)
-            {
-                var record = _records[i];
-                var token = CrossingRecord.ParseCrossingNumber(record.Crossing);
-                var prefix = ExtractPrefix(record.Crossing);
-                var newNumber = Math.Max(1, token.Number + delta);
-                record.Crossing = string.Format(CultureInfo.InvariantCulture, "{0}{1}", prefix, newNumber);
-            }
-        }
         /// Force a visual rebuild of every recognised crossing table (MAIN / PAGE / LATLONG).
         /// <summary>
         /// Rebuilds the display lists for all recognized Crossing tables (MAIN/PAGE/LATLONG)
