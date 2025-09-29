@@ -33,6 +33,7 @@ namespace XingManager
 
         private bool _isDirty;
         private bool _isScanning;
+        private bool _isAwaitingRenumber;
 
         private const string TemplatePath = @"M:\Drafting\_CURRENT TEMPLATES\Compass_Main.dwt";
         private const string TemplateLayoutName = "X";
@@ -101,8 +102,7 @@ namespace XingManager
 
         public void RenumberSequentiallyFromCommand()
         {
-            RenumberSequential();
-            _isDirty = true;
+            StartRenumberCrossingCommand();
         }
 
         // ===== UI wiring =====
@@ -208,8 +208,7 @@ namespace XingManager
 
         private void btnRenumber_Click(object sender, EventArgs e)
         {
-            RenumberSequential();
-            _isDirty = true;
+            StartRenumberCrossingCommand();
         }
 
         // Button: MATCH TABLE  ->  Merge from selected table, then persist to blocks.
@@ -983,22 +982,111 @@ namespace XingManager
             }
         }
 
-        private static string ExtractPrefix(string crossing)
+        private void StartRenumberCrossingCommand()
         {
-            if (string.IsNullOrEmpty(crossing)) return "X";
-            var chars = crossing.TakeWhile(c => !char.IsDigit(c)).ToArray();
-            var prefix = new string(chars);
-            if (string.IsNullOrEmpty(prefix)) prefix = "X";
-            return prefix;
-        }
-
-        private void RenumberSequential()
-        {
-            for (var i = 0; i < _records.Count; i++)
+            var doc = _doc ?? AcadApp.DocumentManager.MdiActiveDocument;
+            if (doc == null)
             {
-                var record = _records[i];
-                var prefix = ExtractPrefix(record.Crossing);
-                record.Crossing = string.Format(CultureInfo.InvariantCulture, "{0}{1}", prefix, i + 1);
+                MessageBox.Show(
+                    "No active drawing is available for renumbering.",
+                    "Crossing Manager",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Warning);
+                return;
+            }
+
+            if (_isAwaitingRenumber)
+            {
+                MessageBox.Show(
+                    "Renumber Crossing is already running. Complete the prompts in AutoCAD.",
+                    "Crossing Manager",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Information);
+                return;
+            }
+
+            _isAwaitingRenumber = true;
+
+            CommandEventHandler ended = null;
+            CommandEventHandler cancelled = null;
+            CommandEventHandler failed = null;
+
+            bool IsRenumberCommand(CommandEventArgs args)
+                => string.Equals(args?.GlobalCommandName, "RNC", StringComparison.OrdinalIgnoreCase);
+
+            void Cleanup()
+            {
+                doc.CommandEnded -= ended;
+                doc.CommandCancelled -= cancelled;
+                if (failed != null)
+                {
+                    try { doc.CommandFailed -= failed; } catch { /* ignore */ }
+                }
+                _isAwaitingRenumber = false;
+            }
+
+            void RescanOnUiThread()
+            {
+                void Rescan() { try { RescanRecords(); } catch { /* best effort */ } }
+
+                if (InvokeRequired)
+                {
+                    try { BeginInvoke((Action)Rescan); }
+                    catch { Rescan(); }
+                }
+                else
+                {
+                    Rescan();
+                }
+            }
+
+            ended = (sender, args) =>
+            {
+                if (!IsRenumberCommand(args)) return;
+
+                Cleanup();
+                RescanOnUiThread();
+            };
+
+            cancelled = (sender, args) =>
+            {
+                if (!IsRenumberCommand(args)) return;
+
+                Cleanup();
+            };
+
+            failed = (sender, args) =>
+            {
+                if (!IsRenumberCommand(args)) return;
+
+                Cleanup();
+                try
+                {
+                    MessageBox.Show(
+                        "Renumber Crossing command failed.",
+                        "Crossing Manager",
+                        MessageBoxButtons.OK,
+                        MessageBoxIcon.Warning);
+                }
+                catch
+                {
+                    // ignored
+                }
+            };
+
+            doc.CommandEnded += ended;
+            doc.CommandCancelled += cancelled;
+            try { doc.CommandFailed += failed; }
+            catch { failed = null; }
+
+            try
+            {
+                doc.SendStringToExecute("RNC\n", true, false, true);
+            }
+            catch (Exception ex)
+            {
+                Cleanup();
+                MessageBox.Show(ex.Message, "Crossing Manager", MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
         }
 
