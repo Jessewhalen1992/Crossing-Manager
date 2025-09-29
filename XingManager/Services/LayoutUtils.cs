@@ -17,6 +17,16 @@ namespace XingManager.Services
         public const string PlanHeadingBase = "PLAN SHOWING PIPELINE CROSSING(S) WITHIN";
         public const string PlanHeadingAdjacentSuffix = " AND ADJACENT TO";
 
+        private static readonly Regex LocationPlaceholderRegex = new Regex(
+            "_\\._\\.1/4\\s+SEC\\.\\s+__,\\s+TWP\\.\\s+__,\\s+RGE\\.\\s+__,\\s+W\\._M\\.",
+            RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+        private const string PlaceholderWs = @"(?:\s+|\\P|\\~)+";
+
+        private static readonly Regex LocationPlaceholderRegexMText = new Regex(
+            $"_\\._\\.1/4{PlaceholderWs}SEC\\.{PlaceholderWs}__,{PlaceholderWs}TWP\\.{PlaceholderWs}__,{PlaceholderWs}RGE\\.{PlaceholderWs}__,{PlaceholderWs}W\\._M\\.",
+            RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
         private static readonly Regex PlanHeadingRegex = new Regex(
             @"PLAN\s+SHOWING\s+PIPELINE\s+CROSSING\(S\)\s+WITHIN(?:\s+AND\s+ADJACENT\s+TO)?",
             RegexOptions.IgnoreCase | RegexOptions.Compiled);
@@ -167,10 +177,10 @@ namespace XingManager.Services
                     if (ent is DBText dbText)
                     {
                         var text = dbText.TextString ?? string.Empty;
-                        if (IsPlaceholderLoose(text))
+                        if (TryReplaceLocationPlaceholder(ref text, replacement))
                         {
                             dbText.UpgradeOpen();
-                            dbText.TextString = replacement;
+                            dbText.TextString = text;
                             changed = true;
                         }
                         continue;
@@ -179,10 +189,19 @@ namespace XingManager.Services
                     // ----- Top-level MTEXT -----
                     if (ent is MText mtext)
                     {
+                        var raw = mtext.Contents ?? string.Empty;
+                        if (TryReplaceLocationPlaceholderInMText(ref raw, replacement))
+                        {
+                            mtext.UpgradeOpen();
+                            mtext.Contents = raw;
+                            changed = true;
+                            continue;
+                        }
+
                         var plain = mtext.Text ?? mtext.Contents ?? string.Empty;
                         if (IsPlaceholderLoose(plain))
                         {
-                            var raw = mtext.Contents ?? string.Empty;
+                            raw = mtext.Contents ?? string.Empty;
                             var prefix = Regex.Match(raw, @"^\s*(?:\\[^;]+;|{[^}]*})*").Value; // keep \H, \f etc.
                             mtext.UpgradeOpen();
                             mtext.Contents = prefix + replacement;
@@ -196,33 +215,40 @@ namespace XingManager.Services
                     {
                         foreach (ObjectId attId in br.AttributeCollection)
                         {
-                            var attRef = tr.GetObject(attId, OpenMode.ForRead) as AttributeReference;
-                            if (attRef == null) continue;
-
-                            // Get plain text from attribute (handles both simple and MText attributes)
-                            string plain = attRef.IsMTextAttribute
-                                ? (attRef.MTextAttribute?.Text ?? attRef.TextString ?? string.Empty)
-                                : (attRef.TextString ?? string.Empty);
-
-                            if (!IsPlaceholderLoose(plain)) continue;
-
-                            attRef.UpgradeOpen();
+                            if (!(tr.GetObject(attId, OpenMode.ForRead) is AttributeReference attRef)) continue;
 
                             if (attRef.IsMTextAttribute && attRef.MTextAttribute != null)
                             {
-                                // Preserve any inline formatting (\H, \f, etc.)
                                 var raw = attRef.MTextAttribute.Contents ?? attRef.TextString ?? string.Empty;
-                                var prefix = Regex.Match(raw, @"^\s*(?:\\[^;]+;|{[^}]*})*").Value;
-                                attRef.MTextAttribute.Contents = prefix + replacement;
-                                // keep TextString in sync
-                                attRef.TextString = attRef.MTextAttribute.Text;
-                            }
-                            else
-                            {
-                                attRef.TextString = replacement;
+                                if (TryReplaceLocationPlaceholderInMText(ref raw, replacement))
+                                {
+                                    attRef.UpgradeOpen();
+                                    attRef.MTextAttribute.Contents = raw;
+                                    attRef.TextString = attRef.MTextAttribute.Text;
+                                    changed = true;
+                                    continue;
+                                }
+
+                                var plainMText = attRef.MTextAttribute.Text ?? attRef.TextString ?? string.Empty;
+                                if (IsPlaceholderLoose(plainMText))
+                                {
+                                    var prefix = Regex.Match(attRef.MTextAttribute.Contents ?? string.Empty, @"^\s*(?:\\[^;]+;|{[^}]*})*").Value;
+                                    attRef.UpgradeOpen();
+                                    attRef.MTextAttribute.Contents = prefix + replacement;
+                                    attRef.TextString = attRef.MTextAttribute.Text;
+                                    changed = true;
+                                }
+
+                                continue;
                             }
 
-                            changed = true;
+                            var text = attRef.TextString ?? string.Empty;
+                            if (TryReplaceLocationPlaceholder(ref text, replacement))
+                            {
+                                attRef.UpgradeOpen();
+                                attRef.TextString = text;
+                                changed = true;
+                            }
                         }
                     }
                 }
@@ -332,6 +358,46 @@ namespace XingManager.Services
                 .Trim();
             s = Regex.Replace(s, @"\s+", " "); // collapse whitespace
             return string.Equals(s, LocationPlaceholder, StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static bool TryReplaceLocationPlaceholder(ref string text, string replacement)
+        {
+            if (string.IsNullOrEmpty(text))
+            {
+                return false;
+            }
+
+            var updated = LocationPlaceholderRegex.Replace(text, replacement);
+            if (!string.Equals(updated, text, StringComparison.Ordinal))
+            {
+                text = updated;
+                return true;
+            }
+
+            if (IsPlaceholderLoose(text))
+            {
+                text = replacement;
+                return true;
+            }
+
+            return false;
+        }
+
+        private static bool TryReplaceLocationPlaceholderInMText(ref string contents, string replacement)
+        {
+            if (string.IsNullOrEmpty(contents))
+            {
+                return false;
+            }
+
+            var updated = LocationPlaceholderRegexMText.Replace(contents, replacement);
+            if (!string.Equals(updated, contents, StringComparison.Ordinal))
+            {
+                contents = updated;
+                return true;
+            }
+
+            return false;
         }
 
         public bool TryFormatMeridianLocation(string raw, out string formatted)
