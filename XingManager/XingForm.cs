@@ -1401,22 +1401,35 @@ namespace XingManager
             try
             {
                 string actualName;
-                var layoutId = _layoutUtils.CloneLayoutFromTemplate(
-                    _doc, TemplatePath, TemplateLayoutName,
-                    string.Format(CultureInfo.InvariantCulture, "X-{0}", options.DwgRef),
-                    out actualName);
+                ObjectId layoutId;
 
-                _layoutUtils.SwitchToLayout(_doc, actualName);
+                // --- lock for all DB changes here ---
+                using (_doc.LockDocument())
+                {
+                    layoutId = _layoutUtils.CloneLayoutFromTemplate(
+                        _doc,
+                        TemplatePath,
+                        TemplateLayoutName,
+                        string.Format(CultureInfo.InvariantCulture, "XING #{0}", options.DwgRef),
+                        out actualName);
 
-                _layoutUtils.UpdatePlanHeadingText(_doc.Database, layoutId, options.IncludeAdjacent);
+                    // Update heading + location while still locked
+                    _layoutUtils.UpdatePlanHeadingText(_doc.Database, layoutId, options.IncludeAdjacent);
 
-                var locationText = BuildLocationText(options.DwgRef);
-                if (!string.IsNullOrEmpty(locationText))
-                    _layoutUtils.ReplacePlaceholderText(_doc.Database, layoutId, locationText);
+                    var locationText = BuildLocationText(options.DwgRef);
+                    if (!string.IsNullOrEmpty(locationText))
+                        _layoutUtils.ReplacePlaceholderText(_doc.Database, layoutId, locationText);
 
+                    // Safe to switch layouts while locked
+                    _layoutUtils.SwitchToLayout(_doc, actualName);
+                }
+                // --- end lock ---
+
+                // Get insertion point (no lock needed)
                 var pointRes = _doc.Editor.GetPoint("\nSpecify insertion point for Crossing Page Table:");
                 if (pointRes.Status != PromptStatus.OK) return;
 
+                // Lock again only for the table creation
                 using (_doc.LockDocument())
                 using (var tr = _doc.Database.TransactionManager.StartTransaction())
                 {
@@ -1428,8 +1441,8 @@ namespace XingManager
             }
             catch (FileNotFoundException)
             {
-                MessageBox.Show(string.Format(CultureInfo.InvariantCulture, "Template not found: {0}", TemplatePath),
-                    "Crossing Manager", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                MessageBox.Show($"Template not found: {TemplatePath}", "Crossing Manager",
+                    MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
             catch (Exception ex)
             {

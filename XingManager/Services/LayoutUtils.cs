@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Globalization;
 using System.IO;
 using System.Linq;
@@ -156,43 +156,88 @@ namespace XingManager.Services
             {
                 var layout = (Layout)tr.GetObject(layoutId, OpenMode.ForRead);
                 var btr = (BlockTableRecord)tr.GetObject(layout.BlockTableRecordId, OpenMode.ForRead);
+
+                bool changed = false;
+
                 foreach (ObjectId entId in btr)
                 {
-                    var dbText = tr.GetObject(entId, OpenMode.ForRead) as DBText;
-                    if (dbText != null)
+                    var ent = tr.GetObject(entId, OpenMode.ForRead);
+
+                    // ----- Top-level DBTEXT -----
+                    if (ent is DBText dbText)
                     {
                         var text = dbText.TextString ?? string.Empty;
-                        if (IsPlaceholder(text))
+                        if (IsPlaceholderLoose(text))
                         {
                             dbText.UpgradeOpen();
                             dbText.TextString = replacement;
+                            changed = true;
                         }
-
                         continue;
                     }
 
-                    var mtext = tr.GetObject(entId, OpenMode.ForRead) as MText;
-                    if (mtext != null)
+                    // ----- Top-level MTEXT -----
+                    if (ent is MText mtext)
                     {
-                        var contents = mtext.Text ?? mtext.Contents;
-                        if (IsPlaceholder(contents))
+                        var plain = mtext.Text ?? mtext.Contents ?? string.Empty;
+                        if (IsPlaceholderLoose(plain))
                         {
+                            var raw = mtext.Contents ?? string.Empty;
+                            var prefix = Regex.Match(raw, @"^\s*(?:\\[^;]+;|{[^}]*})*").Value; // keep \H, \f etc.
                             mtext.UpgradeOpen();
-                            mtext.Contents = replacement;
+                            mtext.Contents = prefix + replacement;
+                            changed = true;
+                        }
+                        continue;
+                    }
+
+                    // ----- Attributes on a title block -----
+                    if (ent is BlockReference br && br.AttributeCollection != null)
+                    {
+                        foreach (ObjectId attId in br.AttributeCollection)
+                        {
+                            var attRef = tr.GetObject(attId, OpenMode.ForRead) as AttributeReference;
+                            if (attRef == null) continue;
+
+                            // Get plain text from attribute (handles both simple and MText attributes)
+                            string plain = attRef.IsMTextAttribute
+                                ? (attRef.MTextAttribute?.Text ?? attRef.TextString ?? string.Empty)
+                                : (attRef.TextString ?? string.Empty);
+
+                            if (!IsPlaceholderLoose(plain)) continue;
+
+                            attRef.UpgradeOpen();
+
+                            if (attRef.IsMTextAttribute && attRef.MTextAttribute != null)
+                            {
+                                // Preserve any inline formatting (\H, \f, etc.)
+                                var raw = attRef.MTextAttribute.Contents ?? attRef.TextString ?? string.Empty;
+                                var prefix = Regex.Match(raw, @"^\s*(?:\\[^;]+;|{[^}]*})*").Value;
+                                attRef.MTextAttribute.Contents = prefix + replacement;
+                                // keep TextString in sync
+                                attRef.TextString = attRef.MTextAttribute.Text;
+                            }
+                            else
+                            {
+                                attRef.TextString = replacement;
+                            }
+
+                            changed = true;
                         }
                     }
                 }
 
                 tr.Commit();
+                if (changed)
+                {
+                    try { Application.UpdateScreen(); } catch { }
+                }
             }
         }
 
         public void UpdatePlanHeadingText(Database db, ObjectId layoutId, bool includeAdjacent)
         {
-            if (db == null || layoutId.IsNull)
-            {
-                return;
-            }
+            if (db == null || layoutId.IsNull) return;
 
             var replacement = includeAdjacent
                 ? PlanHeadingBase + PlanHeadingAdjacentSuffix
@@ -205,32 +250,56 @@ namespace XingManager.Services
 
                 foreach (ObjectId entId in btr)
                 {
-                    var dbText = tr.GetObject(entId, OpenMode.ForRead) as DBText;
-                    if (dbText != null)
+                    // DBTEXT: safe to replace via TextString (no inline formatting)
+                    if (tr.GetObject(entId, OpenMode.ForRead) is DBText dbText)
                     {
-                        var text = dbText.TextString ?? string.Empty;
-                        if (TryUpdateHeading(ref text, replacement))
+                        var txt = dbText.TextString ?? string.Empty;
+                        if (TryUpdateHeading(ref txt, replacement))
                         {
                             dbText.UpgradeOpen();
-                            dbText.TextString = text;
+                            dbText.TextString = txt;
                         }
                         continue;
                     }
 
-                    var mtext = tr.GetObject(entId, OpenMode.ForRead) as MText;
-                    if (mtext != null)
+                    // MTEXT: operate on Contents (raw, with \H, \f etc.) so we don't lose formatting
+                    if (tr.GetObject(entId, OpenMode.ForRead) is MText mtext)
                     {
-                        var contents = mtext.Text ?? mtext.Contents ?? string.Empty;
-                        if (TryUpdateHeading(ref contents, replacement))
+                        var raw = mtext.Contents ?? string.Empty;
+                        if (TryUpdateHeadingInMText(ref raw, replacement))
                         {
                             mtext.UpgradeOpen();
-                            mtext.Contents = contents;
+                            mtext.Contents = raw;   // formatting preserved
                         }
                     }
                 }
 
                 tr.Commit();
             }
+        }
+
+
+        // Variant that also treats MTEXT non‑breaking spaces (\~) as whitespace
+        private static readonly string Ws = @"(?:\s+|\\~)+";
+        private static readonly Regex PlanHeadingRegexMText = new Regex(
+            $"PLAN{Ws}SHOWING{Ws}PIPELINE{Ws}CROSSING\\(S\\){Ws}WITHIN(?:{Ws}AND{Ws}ADJACENT{Ws}TO)?",
+            RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+        private static bool TryUpdateHeadingInMText(ref string contents, string replacement)
+        {
+            if (string.IsNullOrEmpty(contents)) return false;
+
+            // 1) Try straight replace in the raw contents (keeps leading \H, \f, etc.)
+            var updated = PlanHeadingRegex.Replace(contents, replacement);
+
+            // 2) If not found, try the MTEXT‑aware variant that understands \~
+            if (updated == contents)
+                updated = PlanHeadingRegexMText.Replace(contents, replacement);
+
+            if (updated == contents) return false;
+
+            contents = updated;
+            return true;
         }
 
         private static bool TryUpdateHeading(ref string text, string replacement)
@@ -256,9 +325,13 @@ namespace XingManager.Services
             return true;
         }
 
-        private static bool IsPlaceholder(string value)
+        private static bool IsPlaceholderLoose(string value)
         {
-            return string.Equals((value ?? string.Empty).Trim(), LocationPlaceholder, StringComparison.OrdinalIgnoreCase);
+            var s = (value ?? string.Empty)
+                .Replace('\u00A0', ' ')        // NBSP -> space
+                .Trim();
+            s = Regex.Replace(s, @"\s+", " "); // collapse whitespace
+            return string.Equals(s, LocationPlaceholder, StringComparison.OrdinalIgnoreCase);
         }
 
         public bool TryFormatMeridianLocation(string raw, out string formatted)
