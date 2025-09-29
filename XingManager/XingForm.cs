@@ -105,6 +105,8 @@ namespace XingManager
             StartRenumberCrossingCommand();
         }
 
+        public void AddRncPolylineFromCommand() => AddRncPolyline();
+
         // ===== UI wiring =====
 
         private void ConfigureGrid()
@@ -209,6 +211,11 @@ namespace XingManager
         private void btnRenumber_Click(object sender, EventArgs e)
         {
             StartRenumberCrossingCommand();
+        }
+
+        private void btnAddRncPolyline_Click(object sender, EventArgs e)
+        {
+            AddRncPolyline();
         }
 
         // Button: MATCH TABLE  ->  Merge from selected table, then persist to blocks.
@@ -811,6 +818,66 @@ namespace XingManager
             return ObjectId.Null;
         }
 
+        private static string GetBlockEffectiveName(BlockReference br, Transaction tr)
+        {
+            if (br == null || tr == null) return string.Empty;
+
+            try
+            {
+                var btr = (BlockTableRecord)tr.GetObject(br.DynamicBlockTableRecord, OpenMode.ForRead);
+                return btr?.Name ?? string.Empty;
+            }
+            catch
+            {
+                return string.Empty;
+            }
+        }
+
+        private static Dictionary<string, string> ReadAttributes(BlockReference br, Transaction tr)
+        {
+            var values = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            if (br?.AttributeCollection == null || tr == null) return values;
+
+            foreach (ObjectId attId in br.AttributeCollection)
+            {
+                if (!attId.IsValid) continue;
+
+                AttributeReference attRef = null;
+                try { attRef = tr.GetObject(attId, OpenMode.ForRead) as AttributeReference; }
+                catch { attRef = null; }
+
+                if (attRef == null) continue;
+
+                values[attRef.Tag] = attRef.TextString;
+            }
+
+            return values;
+        }
+
+        private static string GetAttributeValue(IDictionary<string, string> attributes, string key)
+        {
+            if (attributes == null || string.IsNullOrEmpty(key)) return string.Empty;
+            return attributes.TryGetValue(key, out var value) ? value : string.Empty;
+        }
+
+        private static void EnsureLayerExists(Transaction tr, Database db, string layerName)
+        {
+            if (tr == null || db == null || string.IsNullOrWhiteSpace(layerName)) return;
+
+            var lt = (LayerTable)tr.GetObject(db.LayerTableId, OpenMode.ForRead);
+            if (lt.Has(layerName)) return;
+
+            lt.UpgradeOpen();
+
+            var ltr = new LayerTableRecord
+            {
+                Name = layerName
+            };
+
+            lt.Add(ltr);
+            tr.AddNewlyCreatedDBObject(ltr, true);
+        }
+
         private static string NormalizeXKey(string s)
         {
             if (string.IsNullOrWhiteSpace(s)) return string.Empty;
@@ -979,6 +1046,181 @@ namespace XingManager
             catch
             {
                 // purely visual hygiene; ignore failures
+            }
+        }
+
+        private void AddRncPolyline()
+        {
+            var doc = _doc ?? AcadApp.DocumentManager.MdiActiveDocument;
+            if (doc == null)
+            {
+                MessageBox.Show(
+                    "No active drawing is available for creating a polyline.",
+                    "Crossing Manager",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Warning);
+                return;
+            }
+
+            var ed = doc.Editor;
+            if (ed == null)
+            {
+                MessageBox.Show(
+                    "The active drawing does not have an editor available.",
+                    "Crossing Manager",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Warning);
+                return;
+            }
+
+            var polylinePrompt = new PromptEntityOptions("\nSelect boundary polyline:")
+            {
+                AllowNone = false
+            };
+            polylinePrompt.SetRejectMessage("\nEntity must be a polyline.");
+            polylinePrompt.AddAllowedClass(typeof(Polyline), exactMatch: false);
+
+            var boundaryResult = ed.GetEntity(polylinePrompt);
+            if (boundaryResult.Status != PromptStatus.OK)
+            {
+                return;
+            }
+
+            bool created = false;
+            bool insufficient = false;
+            string boundaryError = null;
+
+            using (doc.LockDocument())
+            using (var tr = doc.TransactionManager.StartTransaction())
+            {
+                var boundary = tr.GetObject(boundaryResult.ObjectId, OpenMode.ForRead) as Polyline;
+                if (boundary == null)
+                {
+                    boundaryError = "Selected entity is not a supported polyline.";
+                }
+                else if (!boundary.Closed)
+                {
+                    boundaryError = "Selected polyline must be closed to define a boundary.";
+                }
+                else
+                {
+                    var window = new Point3dCollection();
+                    for (int i = 0; i < boundary.NumberOfVertices; i++)
+                    {
+                        window.Add(boundary.GetPoint3dAt(i));
+                    }
+
+                    if (window.Count < 3)
+                    {
+                        boundaryError = "Selected polyline does not contain enough vertices to define an area.";
+                    }
+                    else
+                    {
+                        var tolerance = new Tolerance(1e-6, 1e-6);
+                        var first = window[0];
+                        var last = window[window.Count - 1];
+                        if (!first.IsEqualTo(last, tolerance))
+                        {
+                            window.Add(first);
+                        }
+
+                        var selection = ed.SelectWindowPolygon(window);
+                        if (selection.Status == PromptStatus.Cancel)
+                        {
+                            return;
+                        }
+
+                        if (selection.Status != PromptStatus.OK || selection.Value.Count == 0)
+                        {
+                            insufficient = true;
+                        }
+                        else
+                        {
+                            var candidates = new List<(string Crossing, Point3d Position)>();
+
+                            foreach (SelectedObject sel in selection.Value)
+                            {
+                                if (sel == null) continue;
+                                if (sel.ObjectId == boundaryResult.ObjectId) continue;
+
+                                var br = tr.GetObject(sel.ObjectId, OpenMode.ForRead) as BlockReference;
+                                if (br == null) continue;
+
+                                var effectiveName = GetBlockEffectiveName(br, tr);
+                                if (!string.Equals(effectiveName, XingRepository.BlockName, StringComparison.OrdinalIgnoreCase))
+                                {
+                                    continue;
+                                }
+
+                                var attributes = ReadAttributes(br, tr);
+                                var crossingValue = GetAttributeValue(attributes, "CROSSING");
+                                if (string.IsNullOrWhiteSpace(crossingValue))
+                                {
+                                    continue;
+                                }
+
+                                candidates.Add((crossingValue.Trim(), br.Position));
+                            }
+
+                            if (candidates.Count < 2)
+                            {
+                                insufficient = true;
+                            }
+                            else
+                            {
+                                candidates.Sort((left, right) => CrossingRecord.CompareCrossingKeys(left.Crossing, right.Crossing));
+
+                                EnsureLayerExists(tr, doc.Database, "DEFPOINTS");
+
+                                var owner = (BlockTableRecord)tr.GetObject(boundary.OwnerId, OpenMode.ForWrite);
+
+                                var polyline = new Polyline();
+                                polyline.SetDatabaseDefaults();
+                                polyline.Layer = "DEFPOINTS";
+
+                                var elevation = candidates[0].Position.Z;
+                                polyline.Elevation = elevation;
+
+                                for (int i = 0; i < candidates.Count; i++)
+                                {
+                                    var pt = candidates[i].Position;
+                                    polyline.AddVertexAt(i, new Point2d(pt.X, pt.Y), 0.0, 0.0, 0.0);
+                                }
+
+                                owner.AppendEntity(polyline);
+                                tr.AddNewlyCreatedDBObject(polyline, true);
+
+                                tr.Commit();
+                                created = true;
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (!string.IsNullOrEmpty(boundaryError))
+            {
+                MessageBox.Show(
+                    boundaryError,
+                    "Crossing Manager",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Warning);
+                return;
+            }
+
+            if (insufficient)
+            {
+                MessageBox.Show(
+                    "Select at least two xing2 blocks with a CROSSING attribute inside the boundary polyline to create the polyline.",
+                    "Crossing Manager",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Information);
+                return;
+            }
+
+            if (created)
+            {
+                try { doc.Editor?.Regen(); } catch { }
             }
         }
 
