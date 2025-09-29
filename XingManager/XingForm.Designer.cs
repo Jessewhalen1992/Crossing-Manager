@@ -8,6 +8,7 @@ namespace XingManager
         private System.Windows.Forms.Button btnApply;
         private System.Windows.Forms.Button btnDelete;
         private System.Windows.Forms.Button btnRenumber;
+        private System.Windows.Forms.Button btnAddRncPolyline;
         private System.Windows.Forms.Button btnGeneratePage;
         private System.Windows.Forms.Button btnLatLong;
         private System.Windows.Forms.Button btnMatchTable;
@@ -31,6 +32,7 @@ namespace XingManager
             this.btnApply = new System.Windows.Forms.Button();
             this.btnDelete = new System.Windows.Forms.Button();
             this.btnRenumber = new System.Windows.Forms.Button();
+            this.btnAddRncPolyline = new System.Windows.Forms.Button();
             this.btnGeneratePage = new System.Windows.Forms.Button();
             this.btnLatLong = new System.Windows.Forms.Button();
             this.btnMatchTable = new System.Windows.Forms.Button();
@@ -97,39 +99,49 @@ namespace XingManager
             this.btnRenumber.UseVisualStyleBackColor = true;
             this.btnRenumber.Click += new System.EventHandler(this.btnRenumber_Click);
             //
+            // btnAddRncPolyline
+            //
+            this.btnAddRncPolyline.Location = new System.Drawing.Point(397, 3);
+            this.btnAddRncPolyline.Name = "btnAddRncPolyline";
+            this.btnAddRncPolyline.Size = new System.Drawing.Size(90, 25);
+            this.btnAddRncPolyline.TabIndex = 4;
+            this.btnAddRncPolyline.Text = "Add RNC PL";
+            this.btnAddRncPolyline.UseVisualStyleBackColor = true;
+            this.btnAddRncPolyline.Click += new System.EventHandler(this.btnAddRncPolyline_Click);
+            //
             // btnGeneratePage
             //
-            this.btnGeneratePage.Location = new System.Drawing.Point(397, 3);
+            this.btnGeneratePage.Location = new System.Drawing.Point(493, 3);
             this.btnGeneratePage.Name = "btnGeneratePage";
             this.btnGeneratePage.Size = new System.Drawing.Size(120, 25);
-            this.btnGeneratePage.TabIndex = 4;
+            this.btnGeneratePage.TabIndex = 5;
             this.btnGeneratePage.Text = "Generate XING PAGE";
             this.btnGeneratePage.UseVisualStyleBackColor = true;
             this.btnGeneratePage.Click += new System.EventHandler(this.btnGeneratePage_Click);
             //
             // btnLatLong
             //
-            this.btnLatLong.Location = new System.Drawing.Point(523, 3);
+            this.btnLatLong.Location = new System.Drawing.Point(619, 3);
             this.btnLatLong.Name = "btnLatLong";
             this.btnLatLong.Size = new System.Drawing.Size(120, 25);
-            this.btnLatLong.TabIndex = 5;
+            this.btnLatLong.TabIndex = 6;
             this.btnLatLong.Text = "Create LAT/LONG";
             this.btnLatLong.UseVisualStyleBackColor = true;
             this.btnLatLong.Click += new System.EventHandler(this.btnLatLong_Click);
             //
             // btnMatchTable
             //
-            this.btnMatchTable.Location = new System.Drawing.Point(649, 3);
+            this.btnMatchTable.Location = new System.Drawing.Point(745, 3);
             this.btnMatchTable.Name = "btnMatchTable";
             this.btnMatchTable.Size = new System.Drawing.Size(120, 25);
-            this.btnMatchTable.TabIndex = 6;
+            this.btnMatchTable.TabIndex = 7;
             this.btnMatchTable.Text = "Match Table";
             this.btnMatchTable.UseVisualStyleBackColor = true;
             this.btnMatchTable.Click += new System.EventHandler(this.btnMatchTable_Click);
             //
             // btnExport
             //
-            this.btnExport.Location = new System.Drawing.Point(871, 3);
+            this.btnExport.Location = new System.Drawing.Point(967, 3);
             this.btnExport.Name = "btnExport";
             this.btnExport.Size = new System.Drawing.Size(75, 25);
             this.btnExport.TabIndex = 8;
@@ -155,6 +167,7 @@ namespace XingManager
             this.buttonPanel.Controls.Add(this.btnApply);
             this.buttonPanel.Controls.Add(this.btnDelete);
             this.buttonPanel.Controls.Add(this.btnRenumber);
+            this.buttonPanel.Controls.Add(this.btnAddRncPolyline);
             this.buttonPanel.Controls.Add(this.btnGeneratePage);
             this.buttonPanel.Controls.Add(this.btnLatLong);
             this.buttonPanel.Controls.Add(this.btnMatchTable);

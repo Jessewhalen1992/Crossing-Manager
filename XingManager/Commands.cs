@@ -67,5 +67,18 @@ namespace XingManager
             var form = app.GetOrCreateForm();
             form?.RenumberSequentiallyFromCommand();
         }
+
+        [CommandMethod("XINGRNCPL")]
+        public void CreateRncPolyline()
+        {
+            var app = XingManagerApp.Instance;
+            if (app == null)
+            {
+                return;
+            }
+
+            var form = app.GetOrCreateForm();
+            form?.AddRncPolylineFromCommand();
+        }
     }
 }
