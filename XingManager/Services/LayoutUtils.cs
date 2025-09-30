@@ -385,12 +385,35 @@ namespace XingManager.Services
 
         private static bool TryReplaceLocationPlaceholderInMText(ref string contents, string replacement)
         {
-            if (string.IsNullOrEmpty(contents))
+            if (string.IsNullOrEmpty(contents)) return false;
+
+            // If the normalized raw contents exactly equals the placeholder,
+            // replace the WHOLE thing while preserving leading/trailing formatting.
+            if (RawMTextEqualsPlaceholder(contents))
             {
-                return false;
+                var prefix = LeadingFmt.Match(contents).Value;
+                var suffix = TrailingFmt.Match(contents).Value;
+                contents = prefix + replacement + suffix;
+                return true;
             }
 
-            var updated = LocationPlaceholderRegexMText.Replace(contents, replacement);
+            // Fallback: try a tolerant raw replace that also recognizes stacked fraction \S1/4;
+            const string WS = @"(?:\s+|\\P|\\~)+";
+            const string F = @"(?:\\[A-Za-z][^;]*;|{[^}]*})*";      // any inline format tokens
+            const string FR = @"(?:1/4|\\S1[/#]4;)";                 // literal 1/4 or stacked fraction
+
+            var placeholderRaw = new Regex(
+                $"{F}_\\.{F}_\\.{F}{FR}{WS}SEC\\.{WS}__,{WS}TWP\\.{WS}__,{WS}RGE\\.{WS}__,{WS}W\\.{F}_M\\.{F}",
+                RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+            var updated = placeholderRaw.Replace(contents, m =>
+            {
+                // Try to keep whatever leading/trailing format was on the match
+                var lead = LeadingFmt.Match(m.Value).Value;
+                var tail = TrailingFmt.Match(m.Value).Value;
+                return lead + replacement + tail;
+            });
+
             if (!string.Equals(updated, contents, StringComparison.Ordinal))
             {
                 contents = updated;
@@ -399,6 +422,57 @@ namespace XingManager.Services
 
             return false;
         }
+        // Strip inline MTEXT codes into comparable plain text.
+        // - converts \S1/4; or \S1#4; to "1/4"
+        // - drops \H, \f, \A, \Q, \W, \L, \O, etc.
+        // - treats \P (newline) and \~ (nbsp) as spaces
+        private static string NormalizeMTextForComparison(string raw)
+        {
+            if (string.IsNullOrEmpty(raw)) return string.Empty;
+
+            var s = raw;
+
+            // 1) Expand stacked fractions: \S1/4; or \S1#4;
+            s = Regex.Replace(s, @"\\S([^;]+);", m =>
+            {
+                var frac = m.Groups[1].Value.Replace('#', '/');
+                return frac;
+            }, RegexOptions.IgnoreCase);
+
+            // 2) Replace \P (paragraph) and \~ (NBSP) with space
+            s = Regex.Replace(s, @"\\P|\\~", " ", RegexOptions.IgnoreCase);
+
+            // 3) Drop all other inline formatting codes like \H2.5x;, \fArial|b0|i0;, \A1;, etc.
+            s = Regex.Replace(s, @"\\[A-Za-z][^;]*;", string.Empty);
+
+            // 4) Drop braces used to group overrides
+            s = s.Replace("{", string.Empty).Replace("}", string.Empty);
+
+            // 5) Normalize whitespace and NBSP
+            s = s.Replace('\u00A0', ' ');
+            s = Regex.Replace(s, @"\s+", " ").Trim();
+
+            return s;
+        }
+
+        private static string NormalizeForComparison(string value)
+        {
+            var s = (value ?? string.Empty).Replace('\u00A0', ' ');
+            s = Regex.Replace(s, @"\s+", " ").Trim();
+            return s;
+        }
+
+        // Returns true if raw MTEXT contents equals the placeholder once normalized.
+        private static bool RawMTextEqualsPlaceholder(string rawContents)
+        {
+            var left = NormalizeMTextForComparison(rawContents);
+            var right = NormalizeForComparison(LocationPlaceholder);
+            return string.Equals(left, right, StringComparison.OrdinalIgnoreCase);
+        }
+
+        // Capture leading/trailing formatting runs so we can preserve them.
+        private static readonly Regex LeadingFmt = new Regex(@"^\s*(?:\\[A-Za-z][^;]*;|{[^}]*})*", RegexOptions.Compiled);
+        private static readonly Regex TrailingFmt = new Regex(@"(?:\\[A-Za-z][^;]*;|{[^}]*})*\s*$", RegexOptions.Compiled);
 
         public bool TryFormatMeridianLocation(string raw, out string formatted)
         {

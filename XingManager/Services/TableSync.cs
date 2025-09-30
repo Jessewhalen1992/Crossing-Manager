@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.Globalization;
@@ -64,10 +64,14 @@ namespace XingManager.Services
             _factory = factory ?? throw new ArgumentNullException("factory");
         }
 
+        // =====================================================================
+        // Update existing tables in the drawing
+        // =====================================================================
+
         public void UpdateAllTables(Document doc, IList<CrossingRecord> records)
         {
-            if (doc == null) throw new ArgumentNullException("doc");
-            if (records == null) throw new ArgumentNullException("records");
+            if (doc == null) throw new ArgumentNullException(nameof(doc));
+            if (records == null) throw new ArgumentNullException(nameof(records));
 
             var db = doc.Database;
             _ed = doc.Editor;
@@ -82,8 +86,7 @@ namespace XingManager.Services
                     var btr = (BlockTableRecord)tr.GetObject(btrId, OpenMode.ForRead);
                     foreach (ObjectId entId in btr)
                     {
-                        var ent = tr.GetObject(entId, OpenMode.ForRead) as Entity;
-                        var table = ent as Table;
+                        var table = tr.GetObject(entId, OpenMode.ForRead) as Table;
                         if (table == null) continue;
 
                         var type = IdentifyTable(table, tr);
@@ -122,7 +125,7 @@ namespace XingManager.Services
                             _factory.TagTable(tr, table, typeLabel);
                             Log(string.Format(CultureInfo.InvariantCulture, "Table {0}: {1} matched={2} updated={3}", entId.Handle, typeLabel, matched, updated));
                         }
-                        catch (System.Exception ex)
+                        catch (Exception ex)
                         {
                             Log(string.Format(CultureInfo.InvariantCulture, "Failed to update table {0}: {1}", entId.Handle, ex.Message));
                         }
@@ -133,16 +136,135 @@ namespace XingManager.Services
             }
         }
 
-        public Table CreateAndInsertPageTable(Database db, Transaction tr, BlockTableRecord space, Point3d insertPoint, string dwgRef, IEnumerable<CrossingRecord> records)
+        // =====================================================================
+        // PAGE TABLE CREATION (no extra title row, header bold, height=10)
+        // =====================================================================
+
+        public void CreateAndInsertPageTable(
+            Database db,
+            Transaction tr,
+            BlockTableRecord ownerBtr,
+            Point3d insertPoint,
+            string dwgRef,
+            IList<CrossingRecord> all)
         {
-            var table = _factory.CreateCrossingPageTable(db, tr, dwgRef, records);
-            table.Position = insertPoint;
-            space.UpgradeOpen();
-            space.AppendEntity(table);
-            tr.AddNewlyCreatedDBObject(table, true);
-            _factory.TagTable(tr, table, XingTableType.Page.ToString().ToUpperInvariant());
-            return table;
+            // ---- fixed layout you asked for ----
+            const double TextH = 10.0;
+            const double RowH = 25.0;
+            const double W0 = 43.5;   // XING col
+            const double W1 = 144.5;  // OWNER col
+            const double W2 = 393.5;  // DESCRIPTION col
+
+            // 1) Filter + order rows for this DWG_REF
+            var rows = (all ?? new List<CrossingRecord>())
+                .Where(r => string.Equals(r.DwgRef ?? "", dwgRef ?? "", StringComparison.OrdinalIgnoreCase))
+                .OrderBy(r => r, Comparer<CrossingRecord>.Create(CrossingRecord.CompareByCrossing))
+                .ToList();
+
+            // 2) Create table, position, style
+            var t = new Table();
+            t.SetDatabaseDefaults();
+            t.Position = insertPoint;
+
+            var tsDict = (DBDictionary)tr.GetObject(db.TableStyleDictionaryId, OpenMode.ForRead);
+            if (tsDict.Contains("Standard"))
+                t.TableStyle = tsDict.GetAt("Standard");
+
+            // Build with: 1 title + 1 header + N data (we'll delete the title row to avoid the extra line)
+            int headerRow = 1;
+            int dataStart = 2;
+            t.SetSize(2 + rows.Count, 3);
+
+            // Column widths
+            if (t.Columns.Count >= 3)
+            {
+                t.Columns[0].Width = W0;
+                t.Columns[1].Width = W1;
+                t.Columns[2].Width = W2;
+            }
+
+            // Row heights (uniform 25)
+            for (int r = 0; r < t.Rows.Count; r++)
+                t.Rows[r].Height = RowH;
+
+            // 3) Header labels (no inline \b; we'll bold via a style)
+            t.Cells[headerRow, 0].TextString = "XING";
+            t.Cells[headerRow, 1].TextString = "OWNER";
+            t.Cells[headerRow, 2].TextString = "DESCRIPTION";
+
+            // Create/get a bold text style for headers
+            var boldStyleId = EnsureBoldTextStyle(db, tr, "XING_BOLD", "Standard");
+
+            // Apply header formatting: bold style, height, middle-center
+            for (int c = 0; c < 3; c++)
+            {
+                var cell = t.Cells[headerRow, c];
+                cell.TextHeight = TextH;
+                cell.Alignment = CellAlignment.MiddleCenter;
+                cell.TextStyleId = boldStyleId;
+            }
+
+            // 4) Pick a bubble block for the XING column
+            var bubbleBtrId = TryFindPrototypeBubbleBlockIdFromExistingTables(db, tr);
+            if (bubbleBtrId.IsNull)
+                bubbleBtrId = TryFindBubbleBlockByName(db, tr, new[] { "XING_CELL", "XING_TABLE_CELL", "X_BUBBLE", "XING2", "XING" });
+
+            // 5) Fill data rows
+            for (int i = 0; i < rows.Count; i++)
+            {
+                var rec = rows[i];
+                int row = dataStart + i;
+
+                // Center + text height for all cells in this row
+                for (int c = 0; c < 3; c++)
+                {
+                    var cell = t.Cells[row, c];
+                    cell.Alignment = CellAlignment.MiddleCenter;
+                    cell.TextHeight = TextH;
+                }
+
+                // Col 0 = bubble block (preferred) or plain text fallback
+                var xVal = NormalizeXKey(rec.Crossing);
+                bool placed = false;
+                if (!bubbleBtrId.IsNull)
+                {
+                    placed = TrySetCellToBlockWithAttribute(t, row, 0, tr, bubbleBtrId, xVal);
+                    if (placed)
+                        TrySetCellBlockScale(t, row, 0, 1.0);   // force block scale = 1.0
+                }
+                if (!placed)
+                    t.Cells[row, 0].TextString = xVal;
+
+                // Col 1/2 = Owner / Description
+                t.Cells[row, 1].TextString = rec.Owner ?? string.Empty;
+                t.Cells[row, 2].TextString = rec.Description ?? string.Empty;
+            }
+
+            // 6) Remove the Title row so there’s no extra thin row at the top
+            try { t.DeleteRows(0, 1); } catch { /* ignore if not supported */ }
+
+            // After deletion, header is now row 0; ensure its formatting
+            if (t.Rows.Count > 0)
+            {
+                t.Rows[0].Height = RowH;
+                for (int c = 0; c < 3; c++)
+                {
+                    var cell = t.Cells[0, c];
+                    cell.Alignment = CellAlignment.MiddleCenter;
+                    cell.TextHeight = TextH;
+                    cell.TextStyleId = boldStyleId;
+                }
+            }
+
+            // 7) Commit entity
+            ownerBtr.AppendEntity(t);
+            tr.AddNewlyCreatedDBObject(t, true);
+            try { t.GenerateLayout(); } catch { }
         }
+
+        // =====================================================================
+        // LAT/LONG TABLE CREATION (kept so XingForm compiles)
+        // =====================================================================
 
         public Table CreateAndInsertLatLongTable(Database db, Transaction tr, BlockTableRecord space, Point3d insertPoint, CrossingRecord record)
         {
@@ -154,6 +276,10 @@ namespace XingManager.Services
             _factory.TagTable(tr, table, XingTableType.LatLong.ToString().ToUpperInvariant());
             return table;
         }
+
+        // =====================================================================
+        // Identify an existing table by content/shape
+        // =====================================================================
 
         public XingTableType IdentifyTable(Table table, Transaction tr)
         {
@@ -196,26 +322,855 @@ namespace XingManager.Services
             return XingTableType.Unknown;
         }
 
-        private static int CountXKeys(Table t, int keyCol)
+        // =====================================================================
+        // Updaters for Main / Page / LatLong tables
+        // =====================================================================
+
+        private void UpdateMainTable(Table table, IDictionary<string, CrossingRecord> byKey, out int matched, out int updated)
         {
-            var rows = t?.Rows.Count ?? 0;
-            var count = 0;
-            for (var r = 0; r < rows; r++)
+            matched = 0;
+            updated = 0;
+            if (table == null) return;
+
+            var columnCount = table.Columns.Count;
+            var records = byKey?.Values ?? Enumerable.Empty<CrossingRecord>();
+
+            for (var row = 0; row < table.Rows.Count; row++)
             {
-                var key = NormalizeKeyForLookup(ResolveCrossingKey(t, r, keyCol));
-                if (!string.IsNullOrEmpty(key) && key[0] == 'X' && key.Length > 1 && key.Skip(1).All(char.IsDigit))
+                var rawKey = ResolveCrossingKey(table, row, 0);
+                var key = NormalizeKeyForLookup(rawKey);
+                CrossingRecord record = null;
+
+                if (!string.IsNullOrEmpty(key) && byKey != null)
                 {
-                    count++;
+                    if (!byKey.TryGetValue(key, out record))
+                    {
+                        record = byKey.Values.FirstOrDefault(r => CrossingRecord.CompareCrossingKeys(r.Crossing, key) == 0);
+                    }
+                }
+
+                if (record == null) record = FindRecordByMainColumns(table, row, records);
+
+                if (record == null)
+                {
+                    Log(string.Format(CultureInfo.InvariantCulture, "Row {0} -> NO MATCH (key='{1}')", row, rawKey));
+                    continue;
+                }
+
+                var logKey = !string.IsNullOrEmpty(key) ? key : (rawKey ?? string.Empty);
+                matched++;
+
+                var desiredCrossing = (record.Crossing ?? string.Empty).Trim();
+                var desiredOwner = record.Owner ?? string.Empty;
+                var desiredDescription = record.Description ?? string.Empty;
+                var desiredLocation = record.Location ?? string.Empty;
+                var desiredDwgRef = record.DwgRef ?? string.Empty;
+
+                var rowUpdated = false;
+
+                if (columnCount > 0 && ValueDiffers(rawKey, desiredCrossing)) rowUpdated = true;
+                if (columnCount > 1 && ValueDiffers(ReadCellText(table, row, 1), desiredOwner)) rowUpdated = true;
+                if (columnCount > 2 && ValueDiffers(ReadCellText(table, row, 2), desiredDescription)) rowUpdated = true;
+                if (columnCount > 3 && ValueDiffers(ReadCellText(table, row, 3), desiredLocation)) rowUpdated = true;
+                if (columnCount > 4 && ValueDiffers(ReadCellText(table, row, 4), desiredDwgRef)) rowUpdated = true;
+
+                if (columnCount > 0) SetCellCrossingValue(table, row, 0, desiredCrossing);
+
+                Cell ownerCell = null;
+                if (columnCount > 1) { try { ownerCell = table.Cells[row, 1]; } catch { } SetCellValue(ownerCell, desiredOwner); }
+
+                Cell descriptionCell = null;
+                if (columnCount > 2) { try { descriptionCell = table.Cells[row, 2]; } catch { } SetCellValue(descriptionCell, desiredDescription); }
+
+                Cell locationCell = null;
+                if (columnCount > 3) { try { locationCell = table.Cells[row, 3]; } catch { } SetCellValue(locationCell, desiredLocation); }
+
+                Cell dwgRefCell = null;
+                if (columnCount > 4) { try { dwgRefCell = table.Cells[row, 4]; } catch { } SetCellValue(dwgRefCell, desiredDwgRef); }
+
+                if (rowUpdated)
+                {
+                    updated++;
+                    Log(string.Format(CultureInfo.InvariantCulture, "Row {0} -> UPDATED (key='{1}')", row, logKey));
                 }
             }
 
-            return count;
+            RefreshTable(table);
+        }
+
+        private void UpdatePageTable(Table table, IDictionary<string, CrossingRecord> byKey, out int matched, out int updated)
+        {
+            matched = 0;
+            updated = 0;
+            if (table == null) return;
+
+            var columnCount = table.Columns.Count;
+            var records = byKey?.Values ?? Enumerable.Empty<CrossingRecord>();
+
+            for (var row = 0; row < table.Rows.Count; row++)
+            {
+                var rawKey = ResolveCrossingKey(table, row, 0);
+                var key = NormalizeKeyForLookup(rawKey);
+                CrossingRecord record = null;
+
+                if (!string.IsNullOrEmpty(key) && byKey != null)
+                {
+                    if (!byKey.TryGetValue(key, out record))
+                    {
+                        record = byKey.Values.FirstOrDefault(r => CrossingRecord.CompareCrossingKeys(r.Crossing, key) == 0);
+                    }
+                }
+
+                if (record == null) record = FindRecordByPageColumns(table, row, records);
+
+                if (record == null)
+                {
+                    Log(string.Format(CultureInfo.InvariantCulture, "Row {0} -> NO MATCH (key='{1}')", row, rawKey));
+                    continue;
+                }
+
+                var logKey = !string.IsNullOrEmpty(key) ? key : (rawKey ?? string.Empty);
+                matched++;
+
+                var desiredCrossing = (record.Crossing ?? string.Empty).Trim();
+                var desiredOwner = record.Owner ?? string.Empty;
+                var desiredDescription = record.Description ?? string.Empty;
+
+                var rowUpdated = false;
+
+                if (columnCount > 0 && ValueDiffers(rawKey, desiredCrossing)) rowUpdated = true;
+                if (columnCount > 1 && ValueDiffers(ReadCellText(table, row, 1), desiredOwner)) rowUpdated = true;
+                if (columnCount > 2 && ValueDiffers(ReadCellText(table, row, 2), desiredDescription)) rowUpdated = true;
+
+                if (columnCount > 0) SetCellCrossingValue(table, row, 0, desiredCrossing);
+
+                Cell ownerCell = null;
+                if (columnCount > 1) { try { ownerCell = table.Cells[row, 1]; } catch { } SetCellValue(ownerCell, desiredOwner); }
+
+                Cell descriptionCell = null;
+                if (columnCount > 2) { try { descriptionCell = table.Cells[row, 2]; } catch { } SetCellValue(descriptionCell, desiredDescription); }
+
+                if (rowUpdated)
+                {
+                    updated++;
+                    Log(string.Format(CultureInfo.InvariantCulture, "Row {0} -> UPDATED (key='{1}')", row, logKey));
+                }
+            }
+
+            RefreshTable(table);
+        }
+
+        private void UpdateLatLongTable(Table table, IDictionary<string, CrossingRecord> byKey, out int matched, out int updated)
+        {
+            matched = 0;
+            updated = 0;
+            if (table == null) return;
+
+            var columnCount = table.Columns.Count;
+            var records = byKey?.Values ?? Enumerable.Empty<CrossingRecord>();
+
+            for (var row = 0; row < table.Rows.Count; row++)
+            {
+                var rawKey = ResolveCrossingKey(table, row, 0);
+                var key = NormalizeKeyForLookup(rawKey);
+                CrossingRecord record = null;
+
+                if (!string.IsNullOrEmpty(key) && byKey != null)
+                {
+                    if (!byKey.TryGetValue(key, out record))
+                    {
+                        record = byKey.Values.FirstOrDefault(r => CrossingRecord.CompareCrossingKeys(r.Crossing, key) == 0);
+                    }
+                }
+
+                if (record == null) record = FindRecordByLatLongColumns(table, row, records);
+
+                if (record == null)
+                {
+                    Log(string.Format(CultureInfo.InvariantCulture, "Row {0} -> NO MATCH (key='{1}')", row, rawKey));
+                    continue;
+                }
+
+                var logKey = !string.IsNullOrEmpty(key) ? key : (rawKey ?? string.Empty);
+                matched++;
+
+                var desiredCrossing = (record.Crossing ?? string.Empty).Trim();
+                var desiredDescription = record.Description ?? string.Empty;
+                var desiredLat = record.Lat ?? string.Empty;
+                var desiredLong = record.Long ?? string.Empty;
+
+                var rowUpdated = false;
+
+                if (columnCount > 0 && ValueDiffers(rawKey, desiredCrossing)) rowUpdated = true;
+                if (columnCount > 1 && ValueDiffers(ReadCellText(table, row, 1), desiredDescription)) rowUpdated = true;
+                if (columnCount > 2 && ValueDiffers(ReadCellText(table, row, 2), desiredLat)) rowUpdated = true;
+                if (columnCount > 3 && ValueDiffers(ReadCellText(table, row, 3), desiredLong)) rowUpdated = true;
+
+                if (columnCount > 0) SetCellCrossingValue(table, row, 0, desiredCrossing);
+
+                Cell descriptionCell = null;
+                if (columnCount > 1) { try { descriptionCell = table.Cells[row, 1]; } catch { } SetCellValue(descriptionCell, desiredDescription); }
+
+                Cell latCell = null;
+                if (columnCount > 2) { try { latCell = table.Cells[row, 2]; } catch { } SetCellValue(latCell, desiredLat); }
+
+                Cell longCell = null;
+                if (columnCount > 3) { try { longCell = table.Cells[row, 3]; } catch { } SetCellValue(longCell, desiredLong); }
+
+                if (rowUpdated)
+                {
+                    updated++;
+                    Log(string.Format(CultureInfo.InvariantCulture, "Row {0} -> UPDATED (key='{1}')", row, logKey));
+                }
+            }
+
+            RefreshTable(table);
+        }
+
+        // =====================================================================
+        // Small helpers
+        // =====================================================================
+
+        private static bool ValueDiffers(string existing, string desired)
+        {
+            var left = (existing ?? string.Empty).Trim();
+            var right = (desired ?? string.Empty).Trim();
+            return !string.Equals(left, right, StringComparison.Ordinal);
+        }
+
+        private static string ReadCellText(Table table, int row, int column)
+        {
+            if (table == null || row < 0 || column < 0) return string.Empty;
+            if (row >= table.Rows.Count || column >= table.Columns.Count) return string.Empty;
+            try
+            {
+                var cell = table.Cells[row, column];
+                return ReadCellText(cell);
+            }
+            catch { return string.Empty; }
+        }
+        // Create (or return) a bold text style. Inherits face/charset from a base style if present.
+        // Create (or return) a bold text style. Portable across AutoCAD versions.
+        private static ObjectId EnsureBoldTextStyle(Database db, Transaction tr, string styleName, string baseStyleName)
+        {
+            var tst = (TextStyleTable)tr.GetObject(db.TextStyleTableId, OpenMode.ForRead);
+            if (tst.Has(styleName)) return tst[styleName];
+
+            // Defaults
+            string face = "Arial";
+            bool italic = false;
+
+            // Try to inherit face/italic from a base style if present (properties differ by version)
+            if (tst.Has(baseStyleName))
+            {
+                try
+                {
+                    var baseRec = (TextStyleTableRecord)tr.GetObject(tst[baseStyleName], OpenMode.ForRead);
+                    var f = baseRec.Font; // Autodesk.AutoCAD.GraphicsInterface.FontDescriptor
+
+                    var ft = f.GetType();
+                    var pTypeface = ft.GetProperty("TypeFace") ?? ft.GetProperty("Typeface"); // different versions
+                    var pItalic = ft.GetProperty("Italic");
+
+                    if (pTypeface != null)
+                    {
+                        var v = pTypeface.GetValue(f, null) as string;
+                        if (!string.IsNullOrWhiteSpace(v)) face = v;
+                    }
+                    if (pItalic != null)
+                    {
+                        var v = pItalic.GetValue(f, null);
+                        if (v is bool b) italic = b;
+                    }
+                }
+                catch { /* fallback to defaults */ }
+            }
+
+            var rec = new TextStyleTableRecord { Name = styleName };
+
+            // Portable ctor (charset=0, pitchAndFamily=0)
+            rec.Font = new Autodesk.AutoCAD.GraphicsInterface.FontDescriptor(face, /*bold*/ true, italic, 0, 0);
+
+            tst.UpgradeOpen();
+            var id = tst.Add(rec);
+            tr.AddNewlyCreatedDBObject(rec, true);
+            return id;
+        }
+
+        private static bool IsCoordinateValue(string text, double min, double max)
+        {
+            if (string.IsNullOrWhiteSpace(text)) return false;
+            if (!double.TryParse(text.Trim(), NumberStyles.Float, CultureInfo.InvariantCulture, out var value)) return false;
+            return value >= min && value <= max;
+        }
+
+        private static string ReadCellText(Cell cell)
+        {
+            if (cell == null) return string.Empty;
+            try { return cell.TextString ?? string.Empty; } catch { return string.Empty; }
+        }
+
+        // Returns cleaned text runs from the cell's contents
+        private static IEnumerable<string> EnumerateCellContentText(Cell cell)
+        {
+            if (cell == null) yield break;
+
+            var enumerable = GetCellContents(cell);
+            if (enumerable == null) yield break;
+
+            foreach (var item in enumerable)
+            {
+                if (item == null) continue;
+
+                var textProp = item.GetType().GetProperty("TextString", BindingFlags.Public | BindingFlags.Instance);
+                if (textProp != null)
+                {
+                    string text = null;
+                    try { text = textProp.GetValue(item, null) as string; }
+                    catch { text = null; }
+
+                    if (!string.IsNullOrWhiteSpace(text))
+                        yield return StripMTextFormatting(text).Trim();
+                }
+            }
+        }
+
+        // Returns raw content objects (for block BTR id probing, etc.)
+        private static IEnumerable<object> EnumerateCellContentObjects(Cell cell)
+        {
+            if (cell == null) yield break;
+            var contentsProp = cell.GetType().GetProperty("Contents", BindingFlags.Public | BindingFlags.Instance);
+            System.Collections.IEnumerable seq = null;
+            try { seq = contentsProp?.GetValue(cell, null) as System.Collections.IEnumerable; } catch { }
+            if (seq == null) yield break;
+            foreach (var item in seq) if (item != null) yield return item;
+        }
+
+        private static bool CellHasBlockContent(Cell cell)
+        {
+            if (cell == null) return false;
+            try
+            {
+                var contentsProp = cell.GetType().GetProperty("Contents", BindingFlags.Public | BindingFlags.Instance);
+                var contents = contentsProp?.GetValue(cell, null) as IEnumerable;
+                if (contents == null) return false;
+
+                foreach (var item in contents)
+                {
+                    var ctProp = item.GetType().GetProperty("ContentTypes", BindingFlags.Public | BindingFlags.Instance);
+                    var ctVal = ctProp?.GetValue(item, null)?.ToString() ?? string.Empty;
+                    if (ctVal.IndexOf("Block", StringComparison.OrdinalIgnoreCase) >= 0)
+                        return true;
+                }
+            }
+            catch { }
+            return false;
+        }
+
+        private static string BuildHeaderLog(Table table)
+        {
+            if (table == null) return "headers=[]";
+            var rowCount = table.Rows.Count;
+            var columnCount = table.Columns.Count;
+            if (rowCount == 0 || columnCount <= 0) return "headers=[]";
+
+            var headers = new List<string>(columnCount);
+            for (var col = 0; col < columnCount; col++)
+            {
+                string text;
+                try { text = table.Cells[0, col].TextString ?? string.Empty; } catch { text = string.Empty; }
+                headers.Add(text.Trim());
+            }
+            return "headers=[" + string.Join("|", headers) + "]";
+        }
+
+        // ---- TABLE -> reflection helpers for block attribute value ----
+
+        private static string TryGetBlockAttributeValue(Table table, int row, int col, string tag)
+        {
+            if (table == null || string.IsNullOrEmpty(tag)) return string.Empty;
+
+            const string methodName = "GetBlockAttributeValue";
+            var type = table.GetType();
+            var methods = type.GetMethods().Where(m => string.Equals(m.Name, methodName, StringComparison.Ordinal));
+
+            foreach (var method in methods)
+            {
+                var p = method.GetParameters();
+
+                // (int row, int col, string tag, [optional ...])
+                if (p.Length >= 3 &&
+                    p[0].ParameterType != typeof(string) &&
+                    p[1].ParameterType != typeof(string) &&
+                    typeof(string).IsAssignableFrom(p[2].ParameterType))
+                {
+                    var args = new object[p.Length];
+                    if (!TryConvertParameter(row, p[0], out args[0]) ||
+                        !TryConvertParameter(col, p[1], out args[1]) ||
+                        !TryConvertParameter(tag, p[2], out args[2]))
+                        continue;
+
+                    for (int i = 3; i < p.Length; i++) args[i] = p[i].IsOptional ? Type.Missing : null;
+                    try
+                    {
+                        var result = method.Invoke(table, args);
+                        var text = Convert.ToString(result, CultureInfo.InvariantCulture);
+                        if (!string.IsNullOrWhiteSpace(text)) return text;
+                    }
+                    catch { }
+                }
+
+                // (int row, int col, int contentIndex, string tag, [optional ...])
+                if (p.Length >= 4 &&
+                    p[0].ParameterType != typeof(string) &&
+                    p[1].ParameterType != typeof(string) &&
+                    p[2].ParameterType != typeof(string) &&
+                    typeof(string).IsAssignableFrom(p[3].ParameterType))
+                {
+                    var anyIndex = false;
+                    foreach (var contentIndex in EnumerateCellContentIndexes(table, row, col))
+                    {
+                        anyIndex = true;
+                        var args = new object[p.Length];
+                        if (!TryConvertParameter(row, p[0], out args[0]) ||
+                            !TryConvertParameter(col, p[1], out args[1]) ||
+                            !TryConvertParameter(contentIndex, p[2], out args[2]) ||
+                            !TryConvertParameter(tag, p[3], out args[3]))
+                            continue;
+
+                        for (int i = 4; i < p.Length; i++) args[i] = p[i].IsOptional ? Type.Missing : null;
+                        try
+                        {
+                            var result = method.Invoke(table, args);
+                            var text = Convert.ToString(result, CultureInfo.InvariantCulture);
+                            if (!string.IsNullOrWhiteSpace(text)) return text;
+                        }
+                        catch { }
+                    }
+
+                    if (!anyIndex)
+                    {
+                        var args = new object[p.Length];
+                        if (!TryConvertParameter(row, p[0], out args[0]) ||
+                            !TryConvertParameter(col, p[1], out args[1]) ||
+                            !TryConvertParameter(0, p[2], out args[2]) ||
+                            !TryConvertParameter(tag, p[3], out args[3]))
+                            continue;
+
+                        for (int i = 4; i < p.Length; i++) args[i] = p[i].IsOptional ? Type.Missing : null;
+                        try
+                        {
+                            var result = method.Invoke(table, args);
+                            var text = Convert.ToString(result, CultureInfo.InvariantCulture);
+                            if (!string.IsNullOrWhiteSpace(text)) return text;
+                        }
+                        catch { }
+                    }
+                }
+            }
+            return string.Empty;
+        }
+
+        private static bool TrySetBlockAttributeValue(Table table, int row, int col, string tag, string value)
+        {
+            if (table == null || string.IsNullOrEmpty(tag)) return false;
+
+            const string methodName = "SetBlockAttributeValue";
+            var type = table.GetType();
+            var methods = type.GetMethods().Where(m => string.Equals(m.Name, methodName, StringComparison.Ordinal));
+
+            foreach (var method in methods)
+            {
+                var p = method.GetParameters();
+
+                // (int row, int col, string tag, string value, [optional ...])
+                if (p.Length >= 4 &&
+                    p[0].ParameterType != typeof(string) &&
+                    p[1].ParameterType != typeof(string) &&
+                    typeof(string).IsAssignableFrom(p[2].ParameterType) &&
+                    typeof(string).IsAssignableFrom(p[3].ParameterType))
+                {
+                    var args = new object[p.Length];
+                    if (!TryConvertParameter(row, p[0], out args[0]) ||
+                        !TryConvertParameter(col, p[1], out args[1]) ||
+                        !TryConvertParameter(tag, p[2], out args[2]) ||
+                        !TryConvertParameter(value ?? string.Empty, p[3], out args[3]))
+                        continue;
+
+                    for (int i = 4; i < p.Length; i++) args[i] = p[i].IsOptional ? Type.Missing : null;
+                    try { method.Invoke(table, args); return true; } catch { }
+                }
+
+                // (int row, int col, int contentIndex, string tag, string value, [optional ...])
+                if (p.Length >= 5 &&
+                    p[0].ParameterType != typeof(string) &&
+                    p[1].ParameterType != typeof(string) &&
+                    p[2].ParameterType != typeof(string) &&
+                    typeof(string).IsAssignableFrom(p[3].ParameterType) &&
+                    typeof(string).IsAssignableFrom(p[4].ParameterType))
+                {
+                    var anyIndex = false;
+                    foreach (var contentIndex in EnumerateCellContentIndexes(table, row, col))
+                    {
+                        anyIndex = true;
+                        var args = new object[p.Length];
+                        if (!TryConvertParameter(row, p[0], out args[0]) ||
+                            !TryConvertParameter(col, p[1], out args[1]) ||
+                            !TryConvertParameter(contentIndex, p[2], out args[2]) ||
+                            !TryConvertParameter(tag, p[3], out args[3]) ||
+                            !TryConvertParameter(value ?? string.Empty, p[4], out args[4]))
+                            continue;
+
+                        for (int i = 5; i < p.Length; i++) args[i] = p[i].IsOptional ? Type.Missing : null;
+                        try { method.Invoke(table, args); return true; } catch { }
+                    }
+
+                    if (!anyIndex)
+                    {
+                        var args = new object[p.Length];
+                        if (!TryConvertParameter(row, p[0], out args[0]) ||
+                            !TryConvertParameter(col, p[1], out args[1]) ||
+                            !TryConvertParameter(0, p[2], out args[2]) ||
+                            !TryConvertParameter(tag, p[3], out args[3]) ||
+                            !TryConvertParameter(value ?? string.Empty, p[4], out args[4]))
+                            continue;
+
+                        for (int i = 5; i < p.Length; i++) args[i] = p[i].IsOptional ? Type.Missing : null;
+                        try { method.Invoke(table, args); return true; } catch { }
+                    }
+                }
+            }
+
+            return false;
+        }
+
+        private static IEnumerable<int> EnumerateCellContentIndexes(Table table, int row, int col)
+        {
+            var cell = GetTableCell(table, row, col);
+            if (cell == null) yield break;
+
+            var enumerable = GetCellContents(cell);
+            if (enumerable == null) yield break;
+
+            var index = 0;
+            foreach (var _ in enumerable) { yield return index++; }
+        }
+
+        private static string NormalizeXKey(string s)
+        {
+            if (string.IsNullOrWhiteSpace(s)) return string.Empty;
+            var up = Regex.Replace(s.ToUpperInvariant(), @"\s+", "");
+            var m = Regex.Match(up, @"^X0*(\d+)$");
+            if (m.Success) return "X" + m.Groups[1].Value;
+            m = Regex.Match(up, @"^0*(\d+)$");
+            if (m.Success) return "X" + m.Groups[1].Value;
+            return up;
+        }
+
+        // Try to reuse the exact bubble block used in any existing Main/Page table in the DWG
+        private ObjectId TryFindPrototypeBubbleBlockIdFromExistingTables(Database db, Transaction tr)
+        {
+            var bt = (BlockTable)tr.GetObject(db.BlockTableId, OpenMode.ForRead);
+
+            foreach (ObjectId btrId in bt)
+            {
+                var btr = (BlockTableRecord)tr.GetObject(btrId, OpenMode.ForRead);
+                foreach (ObjectId id in btr)
+                {
+                    if (!(tr.GetObject(id, OpenMode.ForRead) is Table table)) continue;
+
+                    var kind = IdentifyTable(table, tr);
+                    if (kind != XingTableType.Main && kind != XingTableType.Page) continue;
+
+                    // Compute data start row by header detection (works across versions)
+                    int dataRow = 0;
+                    if (kind == XingTableType.Main)
+                        dataRow = GetDataStartRow(table, 5, IsMainHeader);
+                    else
+                        dataRow = GetDataStartRow(table, 3, IsPageHeader);
+                    if (dataRow <= 0) dataRow = 1; // fallback
+
+                    if (table.Rows.Count <= dataRow || table.Columns.Count == 0) continue;
+
+                    Cell cell = null;
+                    try { cell = table.Cells[dataRow, 0]; } catch { }
+                    if (cell == null) continue;
+
+                    foreach (var content in EnumerateCellContentObjects(cell))
+                    {
+                        var prop = content.GetType().GetProperty("BlockTableRecordId");
+                        if (prop != null)
+                        {
+                            try
+                            {
+                                var val = prop.GetValue(content, null);
+                                if (val is ObjectId oid && !oid.IsNull) return oid;
+                            }
+                            catch { }
+                        }
+                    }
+                }
+            }
+            return ObjectId.Null;
+        }
+
+        private static ObjectId TryFindBubbleBlockByName(Database db, Transaction tr, IEnumerable<string> candidateNames)
+        {
+            var bt = (BlockTable)tr.GetObject(db.BlockTableId, OpenMode.ForRead);
+            foreach (var name in candidateNames)
+            {
+                if (bt.Has(name)) return bt[name];
+            }
+            return ObjectId.Null;
+        }
+
+        // Put a block in a cell and set its attribute value to e.g. "X1" (supports multiple API versions)
+        // Put a block in a cell and set its attribute to e.g. "X1".
+        // Ensures autoscale is OFF and final scale == 1.0
+        private static bool TrySetCellToBlockWithAttribute(
+            Table table, int row, int col, Transaction tr, ObjectId btrId, string xValue)
+        {
+            if (table == null || row < 0 || col < 0 || btrId.IsNull) return false;
+
+            Cell cell = null;
+            try { cell = table.Cells[row, col]; } catch { }
+            if (cell == null) return false;
+
+            bool placed = false;
+
+            // Try on the cell itself, then on its content items
+            if (TryOnTarget(cell)) placed = true;
+            if (!placed)
+            {
+                foreach (var content in EnumerateCellContentObjects(cell))
+                {
+                    if (TryOnTarget(content)) { placed = true; break; }
+                }
+            }
+
+            if (placed)
+            {
+                // Force scale to 1 after placement (table‑level API if available, else per‑content)
+                TrySetCellBlockScale(table, row, col, 1.0);
+            }
+
+            return placed;
+
+            bool TryOnTarget(object target)
+            {
+                if (target == null) return false;
+                var typ = target.GetType();
+
+                // Preferred API: SetBlockTableRecordId(ObjectId, bool adjustCell)
+                var miSet = typ.GetMethod("SetBlockTableRecordId", new[] { typeof(ObjectId), typeof(bool) });
+                if (miSet != null)
+                {
+                    try
+                    {
+                        // DO NOT autosize the cell—keeps block at native scale
+                        miSet.Invoke(target, new object[] { btrId, /*adjustCell*/ false });
+                    }
+                    catch { return false; }
+
+                    TryDisableAutoScale(target);                  // make sure autoscale is OFF
+                    return TrySetAttribute(target, btrId, xValue, tr);
+                }
+
+                // Fallback: property BlockTableRecordId
+                var pi = typ.GetProperty("BlockTableRecordId");
+                if (pi != null && pi.CanWrite)
+                {
+                    try { pi.SetValue(target, btrId, null); } catch { return false; }
+                    TryDisableAutoScale(target);
+                    return TrySetAttribute(target, btrId, xValue, tr);
+                }
+
+                return false;
+            }
+
+            bool TrySetAttribute(object target, ObjectId bid, string val, Transaction t)
+            {
+                // By tag
+                var miByTag = target.GetType().GetMethod("SetBlockAttributeValue", new[] { typeof(string), typeof(string) });
+                if (miByTag != null)
+                {
+                    foreach (var tag in CrossingAttributeTags)
+                    {
+                        try { miByTag.Invoke(target, new object[] { tag, val }); return true; } catch { }
+                    }
+                }
+
+                // By AttributeDefinition id
+                var miById = target.GetType().GetMethod("SetBlockAttributeValue", new[] { typeof(ObjectId), typeof(string) });
+                if (miById != null)
+                {
+                    var btr = (BlockTableRecord)t.GetObject(bid, OpenMode.ForRead);
+                    foreach (ObjectId id in btr)
+                    {
+                        var ad = t.GetObject(id, OpenMode.ForRead) as AttributeDefinition;
+                        if (ad == null) continue;
+                        try { miById.Invoke(target, new object[] { ad.ObjectId, val }); return true; } catch { }
+                    }
+                }
+
+                return false;
+            }
+        }
+
+        // Turn OFF auto‑scale/auto‑fit flags that shrink the block (varies by release)
+        private static void TryDisableAutoScale(object target)
+        {
+            if (target == null) return;
+
+            // Properties we’ve seen across versions
+            var pAuto = target.GetType().GetProperty("AutoScale")
+                     ?? target.GetType().GetProperty("IsAutoScale")
+                     ?? target.GetType().GetProperty("AutoFit");
+            if (pAuto != null && pAuto.CanWrite) { try { pAuto.SetValue(target, false, null); } catch { } }
+
+            // Methods we’ve seen across versions
+            var mAuto = target.GetType().GetMethod("SetAutoScale", new[] { typeof(bool) })
+                     ?? target.GetType().GetMethod("SetAutoFit", new[] { typeof(bool) });
+            if (mAuto != null) { try { mAuto.Invoke(target, new object[] { false }); } catch { } }
+        }
+
+        // Try to set the block scale in the cell to a fixed value (table‑level API first)
+        private static bool TrySetScaleOnTarget(object target, double sc)
+        {
+            if (target == null) return false;
+
+            // Common property names for a single uniform scale
+            var p = target.GetType().GetProperty("BlockScale") ?? target.GetType().GetProperty("Scale");
+            if (p != null && p.CanWrite)
+            {
+                try { p.SetValue(target, sc, null); return true; } catch { }
+            }
+
+            // Try per-axis scale properties
+            var px = target.GetType().GetProperty("ScaleX") ?? target.GetType().GetProperty("XScale");
+            var py = target.GetType().GetProperty("ScaleY") ?? target.GetType().GetProperty("YScale");
+            var pz = target.GetType().GetProperty("ScaleZ") ?? target.GetType().GetProperty("ZScale");
+
+            bool ok = false;
+            if (px != null && px.CanWrite) { try { px.SetValue(target, sc, null); ok = true; } catch { } }
+            if (py != null && py.CanWrite) { try { py.SetValue(target, sc, null); ok = true; } catch { } }
+            if (pz != null && pz.CanWrite) { try { pz.SetValue(target, sc, null); ok = true; } catch { } }
+
+            return ok;
+        }
+
+        // Prefer table-level SetBlockTableRecordId if the API exposes it (not required here, but handy)
+        private static bool TrySetCellBlockTableRecordId(Table table, int row, int col, ObjectId btrId)
+        {
+            if (table == null || btrId.IsNull) return false;
+
+            foreach (var m in table.GetType().GetMethods().Where(x => x.Name == "SetBlockTableRecordId"))
+            {
+                var p = m.GetParameters();
+
+                // (int row, int col, ObjectId btr, bool adjustCell)
+                if (p.Length == 4 &&
+                    p[0].ParameterType == typeof(int) &&
+                    p[1].ParameterType == typeof(int) &&
+                    p[2].ParameterType == typeof(ObjectId) &&
+                    p[3].ParameterType == typeof(bool))
+                {
+                    try { m.Invoke(table, new object[] { row, col, btrId, true }); return true; } catch { }
+                }
+
+                // (int row, int col, int contentIndex, ObjectId btr, bool adjustCell)
+                if (p.Length == 5 &&
+                    p[0].ParameterType == typeof(int) &&
+                    p[1].ParameterType == typeof(int) &&
+                    p[2].ParameterType == typeof(int) &&
+                    p[3].ParameterType == typeof(ObjectId) &&
+                    p[4].ParameterType == typeof(bool))
+                {
+                    try { m.Invoke(table, new object[] { row, col, 0, btrId, true }); return true; } catch { }
+                }
+            }
+
+            return false;
+        }
+
+        private static Cell GetTableCell(Table table, int row, int col)
+        {
+            if (table == null) return null;
+
+            try { return table.Cells[row, col]; }
+            catch { return null; }
+        }
+
+        private static IEnumerable GetCellContents(Cell cell)
+        {
+            if (cell == null) return null;
+
+            var contentsProperty = cell.GetType().GetProperty("Contents", BindingFlags.Public | BindingFlags.Instance);
+            if (contentsProperty == null) return null;
+
+            try { return contentsProperty.GetValue(cell, null) as IEnumerable; }
+            catch { return null; }
+        }
+
+        private static bool TryConvertParameter(object value, ParameterInfo parameter, out object converted)
+        {
+            var targetType = parameter.ParameterType;
+            var underlying = Nullable.GetUnderlyingType(targetType) ?? targetType;
+
+            try
+            {
+                if (value == null)
+                {
+                    if (!underlying.IsValueType || underlying == typeof(string))
+                    {
+                        converted = null;
+                        return true;
+                    }
+                    converted = Activator.CreateInstance(underlying);
+                    return true;
+                }
+
+                if (underlying.IsInstanceOfType(value))
+                {
+                    converted = value;
+                    return true;
+                }
+
+                converted = Convert.ChangeType(value, underlying, CultureInfo.InvariantCulture);
+                return true;
+            }
+            catch
+            {
+                converted = null;
+                return false;
+            }
+        }
+
+        private static void RefreshTable(Table table)
+        {
+            if (table == null) return;
+
+            var recompute = table.GetType().GetMethod("RecomputeTableBlock", new[] { typeof(bool) });
+            if (recompute != null)
+            {
+                try
+                {
+                    recompute.Invoke(table, new object[] { true });
+                    return;
+                }
+                catch { }
+            }
+
+            try { table.GenerateLayout(); } catch { }
         }
 
         private void Log(string msg)
         {
             try { _ed?.WriteMessage("\n[CrossingManager] " + msg); } catch { }
         }
+        // Helper extracted so it compiles on C# 7.3 (no static local functions)
+
+        // ---------- header detection helpers ----------
 
         private static bool IsMainHeader(List<string> headers)
         {
@@ -283,47 +1238,6 @@ namespace XingManager.Services
             return false;
         }
 
-        private static bool LooksLikeLatLongTable(Table table)
-        {
-            if (table == null) return false;
-
-            var rowCount = table.Rows.Count;
-            if (rowCount <= 0 || table.Columns.Count != 4) return false;
-
-            var rowsToScan = Math.Min(rowCount, MaxHeaderRowsToScan);
-            var candidates = 0;
-
-            for (var row = 0; row < rowsToScan; row++)
-            {
-                var latText = ReadCellText(table, row, 2);
-                var longText = ReadCellText(table, row, 3);
-
-                if (IsCoordinateValue(latText, -90.0, 90.0) && IsCoordinateValue(longText, -180.0, 180.0))
-                {
-                    var crossing = ReadCellText(table, row, 0);
-                    if (string.IsNullOrWhiteSpace(crossing)) return false;
-                    candidates++;
-                    continue;
-                }
-
-                if (string.IsNullOrWhiteSpace(latText) && string.IsNullOrWhiteSpace(longText))
-                {
-                    continue;
-                }
-
-                var normalizedLat = NormalizeHeader(latText, 2);
-                var normalizedLong = NormalizeHeader(longText, 3);
-                if (normalizedLat.StartsWith("LAT", StringComparison.Ordinal) && normalizedLong.StartsWith("LONG", StringComparison.Ordinal))
-                {
-                    continue;
-                }
-
-                return false;
-            }
-
-            return candidates > 0;
-        }
-
         private static List<string> ReadHeaders(Table table, int columns, int rowIndex)
         {
             var list = new List<string>(columns);
@@ -349,7 +1263,8 @@ namespace XingManager.Services
             var builder = new StringBuilder(header.Length);
             foreach (var ch in header)
             {
-                if (char.IsWhiteSpace(ch) || ch == '.' || ch == ',' || ch == '#' || ch == '_' || ch == '-' || ch == '/' || ch == '(' || ch == ')' || ch == '%' || ch == '|')
+                if (char.IsWhiteSpace(ch) || ch == '.' || ch == ',' || ch == '#' || ch == '_' ||
+                    ch == '-' || ch == '/' || ch == '(' || ch == ')' || ch == '%' || ch == '|')
                     continue;
                 builder.Append(char.ToUpperInvariant(ch));
             }
@@ -369,6 +1284,78 @@ namespace XingManager.Services
             var withoutResidual = MTextResidualCommandRegex.Replace(withoutCommands, string.Empty);
             var withoutSpecial = MTextSpecialCodeRegex.Replace(withoutResidual, string.Empty);
             return withoutSpecial.Replace("{", string.Empty).Replace("}", string.Empty);
+        }
+
+        // ---------- Matching helpers used by updaters ----------
+
+        private static bool LooksLikeLatLongTable(Table table)
+        {
+            if (table == null) return false;
+
+            var rowCount = table.Rows.Count;
+            if (rowCount <= 0 || table.Columns.Count != 4) return false;
+
+            var rowsToScan = Math.Min(rowCount, MaxHeaderRowsToScan);
+            var candidates = 0;
+
+            for (var row = 0; row < rowsToScan; row++)
+            {
+                var latText = ReadCellText(table, row, 2);
+                var longText = ReadCellText(table, row, 3);
+
+                if (IsCoordinateValue(latText, -90.0, 90.0) && IsCoordinateValue(longText, -180.0, 180.0))
+                {
+                    var crossing = ReadCellText(table, row, 0);
+                    if (string.IsNullOrWhiteSpace(crossing)) return false;
+                    candidates++;
+                    continue;
+                }
+
+                if (string.IsNullOrWhiteSpace(latText) && string.IsNullOrWhiteSpace(longText))
+                    continue;
+
+                var normalizedLat = NormalizeHeader(latText, 2);
+                var normalizedLong = NormalizeHeader(longText, 3);
+                if (normalizedLat.StartsWith("LAT", StringComparison.Ordinal) &&
+                    normalizedLong.StartsWith("LONG", StringComparison.Ordinal))
+                {
+                    continue;
+                }
+
+                return false;
+            }
+
+            return candidates > 0;
+        }
+
+        private static void SetCellCrossingValue(Table t, int row, int col, string crossingText)
+        {
+            if (t == null) return;
+
+            // 1) Try to set the block attribute by any of our known tags
+            foreach (var tag in CrossingAttributeTags)
+            {
+                if (TrySetBlockAttributeValue(t, row, col, tag, crossingText))
+                    return;
+            }
+
+            // 2) If the cell currently hosts a block, do NOT overwrite it with text.
+            Cell cell = null;
+            try { cell = t.Cells[row, col]; } catch { cell = null; }
+            if (CellHasBlockContent(cell)) return;
+
+            // 3) Fallback to plain text when no block
+            try
+            {
+                if (cell != null) cell.TextString = crossingText ?? string.Empty;
+            }
+            catch { }
+        }
+
+        private static void SetCellValue(Cell cell, string value)
+        {
+            if (cell == null) return;
+            cell.TextString = value ?? string.Empty;
         }
 
         internal static string ResolveCrossingKey(Table table, int row, int col)
@@ -395,8 +1382,8 @@ namespace XingManager.Services
             foreach (var tag in CrossingAttributeTags)
             {
                 var blockValue = TryGetBlockAttributeValue(table, row, col, tag);
-                var cleanedBlockValue = CleanCellText(blockValue);
-                if (!string.IsNullOrWhiteSpace(cleanedBlockValue)) return cleanedBlockValue;
+                var cleanedBlockText = CleanCellText(blockValue);
+                if (!string.IsNullOrWhiteSpace(cleanedBlockText)) return cleanedBlockText;
             }
 
             var attrProperty = cell?.GetType().GetProperty("BlockAttributeValue", BindingFlags.Public | BindingFlags.Instance);
@@ -405,15 +1392,15 @@ namespace XingManager.Services
                 try
                 {
                     var attrValue = attrProperty.GetValue(cell, null) as string;
-                    var cleanedAttrValue = CleanCellText(attrValue);
-                    if (!string.IsNullOrWhiteSpace(cleanedAttrValue)) return cleanedAttrValue;
+                    var cleanedAttrText = CleanCellText(attrValue);
+                    if (!string.IsNullOrWhiteSpace(cleanedAttrText)) return cleanedAttrText;
                 }
                 catch { }
             }
 
-            foreach (var content in EnumerateCellContents(cell))
+            foreach (var textRun in EnumerateCellContentText(cell))
             {
-                var cleanedContent = CleanCellText(content);
+                var cleanedContent = CleanCellText(textRun);
                 if (!string.IsNullOrWhiteSpace(cleanedContent)) return cleanedContent;
             }
 
@@ -432,9 +1419,50 @@ namespace XingManager.Services
             return StripMTextFormatting(s).Trim();
         }
 
-        private static string ReadNorm(Table t, int row, int col)
+        private static string ReadNorm(Table t, int row, int col) => Norm(ReadCellText(t, row, col));
+        // Try to set the scale of a block hosted in a table cell to a specific value (e.g., 1.0)
+        private static bool TrySetCellBlockScale(Table table, int row, int col, double scale)
         {
-            return Norm(ReadCellText(t, row, col));
+            if (table == null) return false;
+
+            // Preferred: table-level API (varies by release)
+            foreach (var m in table.GetType().GetMethods().Where(x => x.Name == "SetBlockScale"))
+            {
+                var p = m.GetParameters();
+
+                // (int row, int col, double scale)
+                if (p.Length == 3 &&
+                    p[0].ParameterType == typeof(int) &&
+                    p[1].ParameterType == typeof(int) &&
+                    p[2].ParameterType == typeof(double))
+                {
+                    try { m.Invoke(table, new object[] { row, col, scale }); return true; } catch { }
+                }
+
+                // (int row, int col, int contentIndex, double scale)
+                if (p.Length == 4 &&
+                    p[0].ParameterType == typeof(int) &&
+                    p[1].ParameterType == typeof(int) &&
+                    p[2].ParameterType == typeof(int) &&
+                    p[3].ParameterType == typeof(double))
+                {
+                    try { m.Invoke(table, new object[] { row, col, 0, scale }); return true; } catch { }
+                }
+            }
+
+            // Fallback: set on the cell or its content objects
+            Cell cell = null;
+            try { cell = table.Cells[row, col]; } catch { }
+            if (cell != null)
+            {
+                if (TrySetScaleOnTarget(cell, scale)) return true;
+
+                // Enumerate cell contents (you already have EnumerateCellContentObjects in this file)
+                foreach (var item in EnumerateCellContentObjects(cell))
+                    if (TrySetScaleOnTarget(item, scale)) return true;
+            }
+
+            return false;
         }
 
         private static CrossingRecord FindRecordByMainColumns(Table t, int row, IEnumerable<CrossingRecord> records)
@@ -508,708 +1536,13 @@ namespace XingManager.Services
             }
 
             var collapsed = sb.ToString();
-            var match = System.Text.RegularExpressions.Regex.Match(collapsed, @"^X0*(\d+)$");
+            var match = Regex.Match(collapsed, @"^X0*(\d+)$");
             if (!match.Success) return string.Empty;
 
             var digits = match.Groups[1].Value.TrimStart('0');
             if (digits.Length == 0) digits = "0";
 
             return "X" + digits;
-        }
-
-        private static void SetCellCrossingValue(Table t, int row, int col, string crossingText)
-        {
-            if (t == null) return;
-
-            // 1) Try to set the block attribute by any of our known tags
-            //    (this covers LABEL, X_NO, NUMBER, etc., not just CROSSING)
-            foreach (var tag in CrossingAttributeTags)
-            {
-                if (TrySetBlockAttributeValue(t, row, col, tag, crossingText))
-                    return;
-            }
-
-            // 2) If the cell currently hosts a block, do NOT overwrite it with text.
-            Cell cell = null;
-            try { cell = t.Cells[row, col]; } catch { cell = null; }
-
-            if (CellHasBlockContent(cell))
-            {
-                // We couldn't set an attribute; leave the block intact.
-                // (Optional: add a log if you want to see which rows failed.)
-                return;
-            }
-
-            // 3) Only fall back to plain text when the cell is not a block cell
-            try
-            {
-                if (cell != null) cell.TextString = crossingText ?? string.Empty;
-            }
-            catch { }
-        }
-
-        private static void SetCellValue(Cell cell, string value)
-        {
-            if (cell == null) return;
-            cell.TextString = value ?? string.Empty;
-        }
-
-        private void UpdateMainTable(Table table, IDictionary<string, CrossingRecord> byKey, out int matched, out int updated)
-        {
-            matched = 0;
-            updated = 0;
-            if (table == null) return;
-
-            var columnCount = table.Columns.Count;
-            var records = byKey?.Values ?? Enumerable.Empty<CrossingRecord>();
-
-            for (var row = 0; row < table.Rows.Count; row++)
-            {
-                var rawKey = ResolveCrossingKey(table, row, 0);
-                var key = NormalizeKeyForLookup(rawKey);
-                CrossingRecord record = null;
-
-                if (!string.IsNullOrEmpty(key) && byKey != null)
-                {
-                    if (!byKey.TryGetValue(key, out record))
-                    {
-                        record = byKey.Values.FirstOrDefault(r => CrossingRecord.CompareCrossingKeys(r.Crossing, key) == 0);
-                    }
-                }
-
-                if (record == null)
-                {
-                    record = FindRecordByMainColumns(table, row, records);
-                }
-
-                if (record == null)
-                {
-                    Log(string.Format(CultureInfo.InvariantCulture, "Row {0} -> NO MATCH (key='{1}')", row, rawKey));
-                    continue;
-                }
-
-                var logKey = !string.IsNullOrEmpty(key) ? key : (rawKey ?? string.Empty);
-                matched++;
-
-                var desiredCrossing = (record.Crossing ?? string.Empty).Trim();
-                var desiredOwner = record.Owner ?? string.Empty;
-                var desiredDescription = record.Description ?? string.Empty;
-                var desiredLocation = record.Location ?? string.Empty;
-                var desiredDwgRef = record.DwgRef ?? string.Empty;
-
-                var rowUpdated = false;
-
-                if (columnCount > 0 && ValueDiffers(rawKey, desiredCrossing)) rowUpdated = true;
-                if (columnCount > 1 && ValueDiffers(ReadCellText(table, row, 1), desiredOwner)) rowUpdated = true;
-                if (columnCount > 2 && ValueDiffers(ReadCellText(table, row, 2), desiredDescription)) rowUpdated = true;
-                if (columnCount > 3 && ValueDiffers(ReadCellText(table, row, 3), desiredLocation)) rowUpdated = true;
-                if (columnCount > 4 && ValueDiffers(ReadCellText(table, row, 4), desiredDwgRef)) rowUpdated = true;
-
-                if (columnCount > 0) SetCellCrossingValue(table, row, 0, desiredCrossing);
-
-                Cell ownerCell = null;
-                if (columnCount > 1)
-                {
-                    try { ownerCell = table.Cells[row, 1]; } catch { ownerCell = null; }
-                    SetCellValue(ownerCell, desiredOwner);
-                }
-
-                Cell descriptionCell = null;
-                if (columnCount > 2)
-                {
-                    try { descriptionCell = table.Cells[row, 2]; } catch { descriptionCell = null; }
-                    SetCellValue(descriptionCell, desiredDescription);
-                }
-
-                Cell locationCell = null;
-                if (columnCount > 3)
-                {
-                    try { locationCell = table.Cells[row, 3]; } catch { locationCell = null; }
-                    SetCellValue(locationCell, desiredLocation);
-                }
-
-                Cell dwgRefCell = null;
-                if (columnCount > 4)
-                {
-                    try { dwgRefCell = table.Cells[row, 4]; } catch { dwgRefCell = null; }
-                    SetCellValue(dwgRefCell, desiredDwgRef);
-                }
-
-                if (rowUpdated)
-                {
-                    updated++;
-                    Log(string.Format(CultureInfo.InvariantCulture, "Row {0} -> UPDATED (key='{1}')", row, logKey));
-                }
-            }
-
-            RefreshTable(table);
-        }
-
-        private void UpdatePageTable(Table table, IDictionary<string, CrossingRecord> byKey, out int matched, out int updated)
-        {
-            matched = 0;
-            updated = 0;
-            if (table == null) return;
-
-            var columnCount = table.Columns.Count;
-            var records = byKey?.Values ?? Enumerable.Empty<CrossingRecord>();
-
-            for (var row = 0; row < table.Rows.Count; row++)
-            {
-                var rawKey = ResolveCrossingKey(table, row, 0);
-                var key = NormalizeKeyForLookup(rawKey);
-                CrossingRecord record = null;
-
-                if (!string.IsNullOrEmpty(key) && byKey != null)
-                {
-                    if (!byKey.TryGetValue(key, out record))
-                    {
-                        record = byKey.Values.FirstOrDefault(r => CrossingRecord.CompareCrossingKeys(r.Crossing, key) == 0);
-                    }
-                }
-
-                if (record == null)
-                {
-                    record = FindRecordByPageColumns(table, row, records);
-                }
-
-                if (record == null)
-                {
-                    Log(string.Format(CultureInfo.InvariantCulture, "Row {0} -> NO MATCH (key='{1}')", row, rawKey));
-                    continue;
-                }
-
-                var logKey = !string.IsNullOrEmpty(key) ? key : (rawKey ?? string.Empty);
-                matched++;
-
-                var desiredCrossing = (record.Crossing ?? string.Empty).Trim();
-                var desiredOwner = record.Owner ?? string.Empty;
-                var desiredDescription = record.Description ?? string.Empty;
-
-                var rowUpdated = false;
-
-                if (columnCount > 0 && ValueDiffers(rawKey, desiredCrossing)) rowUpdated = true;
-                if (columnCount > 1 && ValueDiffers(ReadCellText(table, row, 1), desiredOwner)) rowUpdated = true;
-                if (columnCount > 2 && ValueDiffers(ReadCellText(table, row, 2), desiredDescription)) rowUpdated = true;
-
-                if (columnCount > 0) SetCellCrossingValue(table, row, 0, desiredCrossing);
-
-                Cell ownerCell = null;
-                if (columnCount > 1)
-                {
-                    try { ownerCell = table.Cells[row, 1]; } catch { ownerCell = null; }
-                    SetCellValue(ownerCell, desiredOwner);
-                }
-
-                Cell descriptionCell = null;
-                if (columnCount > 2)
-                {
-                    try { descriptionCell = table.Cells[row, 2]; } catch { descriptionCell = null; }
-                    SetCellValue(descriptionCell, desiredDescription);
-                }
-
-                if (rowUpdated)
-                {
-                    updated++;
-                    Log(string.Format(CultureInfo.InvariantCulture, "Row {0} -> UPDATED (key='{1}')", row, logKey));
-                }
-            }
-
-            RefreshTable(table);
-        }
-
-        private void UpdateLatLongTable(Table table, IDictionary<string, CrossingRecord> byKey, out int matched, out int updated)
-        {
-            matched = 0;
-            updated = 0;
-            if (table == null) return;
-
-            var columnCount = table.Columns.Count;
-            var records = byKey?.Values ?? Enumerable.Empty<CrossingRecord>();
-
-            for (var row = 0; row < table.Rows.Count; row++)
-            {
-                var rawKey = ResolveCrossingKey(table, row, 0);
-                var key = NormalizeKeyForLookup(rawKey);
-                CrossingRecord record = null;
-
-                if (!string.IsNullOrEmpty(key) && byKey != null)
-                {
-                    if (!byKey.TryGetValue(key, out record))
-                    {
-                        record = byKey.Values.FirstOrDefault(r => CrossingRecord.CompareCrossingKeys(r.Crossing, key) == 0);
-                    }
-                }
-
-                if (record == null)
-                {
-                    record = FindRecordByLatLongColumns(table, row, records);
-                }
-
-                if (record == null)
-                {
-                    Log(string.Format(CultureInfo.InvariantCulture, "Row {0} -> NO MATCH (key='{1}')", row, rawKey));
-                    continue;
-                }
-
-                var logKey = !string.IsNullOrEmpty(key) ? key : (rawKey ?? string.Empty);
-                matched++;
-
-                var desiredCrossing = (record.Crossing ?? string.Empty).Trim();
-                var desiredDescription = record.Description ?? string.Empty;
-                var desiredLat = record.Lat ?? string.Empty;
-                var desiredLong = record.Long ?? string.Empty;
-
-                var rowUpdated = false;
-
-                if (columnCount > 0 && ValueDiffers(rawKey, desiredCrossing)) rowUpdated = true;
-                if (columnCount > 1 && ValueDiffers(ReadCellText(table, row, 1), desiredDescription)) rowUpdated = true;
-                if (columnCount > 2 && ValueDiffers(ReadCellText(table, row, 2), desiredLat)) rowUpdated = true;
-                if (columnCount > 3 && ValueDiffers(ReadCellText(table, row, 3), desiredLong)) rowUpdated = true;
-
-                if (columnCount > 0) SetCellCrossingValue(table, row, 0, desiredCrossing);
-
-                Cell descriptionCell = null;
-                if (columnCount > 1)
-                {
-                    try { descriptionCell = table.Cells[row, 1]; } catch { descriptionCell = null; }
-                    SetCellValue(descriptionCell, desiredDescription);
-                }
-
-                Cell latCell = null;
-                if (columnCount > 2)
-                {
-                    try { latCell = table.Cells[row, 2]; } catch { latCell = null; }
-                    SetCellValue(latCell, desiredLat);
-                }
-
-                Cell longCell = null;
-                if (columnCount > 3)
-                {
-                    try { longCell = table.Cells[row, 3]; } catch { longCell = null; }
-                    SetCellValue(longCell, desiredLong);
-                }
-
-                if (rowUpdated)
-                {
-                    updated++;
-                    Log(string.Format(CultureInfo.InvariantCulture, "Row {0} -> UPDATED (key='{1}')", row, logKey));
-                }
-            }
-
-            RefreshTable(table);
-        }
-
-        private static bool ValueDiffers(string existing, string desired)
-        {
-            var left = (existing ?? string.Empty).Trim();
-            var right = (desired ?? string.Empty).Trim();
-            return !string.Equals(left, right, StringComparison.Ordinal);
-        }
-
-        private static string ReadCellText(Table table, int row, int column)
-        {
-            if (table == null || row < 0 || column < 0) return string.Empty;
-            if (row >= table.Rows.Count || column >= table.Columns.Count) return string.Empty;
-            try
-            {
-                var cell = table.Cells[row, column];
-                return ReadCellText(cell);
-            }
-            catch { return string.Empty; }
-        }
-
-        private static bool IsCoordinateValue(string text, double min, double max)
-        {
-            if (string.IsNullOrWhiteSpace(text)) return false;
-            double value;
-            if (!double.TryParse(text.Trim(), NumberStyles.Float, CultureInfo.InvariantCulture, out value)) return false;
-            return value >= min && value <= max;
-        }
-
-        private static string ReadCellText(Cell cell)
-        {
-            if (cell == null) return string.Empty;
-            try { return cell.TextString ?? string.Empty; } catch { return string.Empty; }
-        }
-
-        private static IEnumerable<string> EnumerateCellContents(Cell cell)
-        {
-            if (cell == null)
-            {
-                yield break;
-            }
-
-            var enumerable = GetCellContents(cell);
-            if (enumerable == null)
-            {
-                yield break;
-            }
-
-            foreach (var item in enumerable)
-            {
-                if (item == null)
-                {
-                    continue;
-                }
-
-                var textProp = item.GetType().GetProperty("TextString", BindingFlags.Public | BindingFlags.Instance);
-                if (textProp != null)
-                {
-                    string text = null;
-                    try
-                    {
-                        text = textProp.GetValue(item, null) as string;
-                    }
-                    catch
-                    {
-                        text = null;
-                    }
-
-                    if (!string.IsNullOrWhiteSpace(text))
-                    {
-                        yield return StripMTextFormatting(text).Trim();
-                        continue;
-                    }
-                }
-
-                // IMPORTANT: do not yield item.ToString(); it returns type names (garbage for matching).
-            }
-        }
-
-        private static bool IsIntLike(Type t)
-        {
-            return t == typeof(short) || t == typeof(int) || t == typeof(long) ||
-                   t == typeof(ushort) || t == typeof(uint) || t == typeof(ulong);
-        }
-        private static bool CellHasBlockContent(Cell cell)
-        {
-            if (cell == null) return false;
-            try
-            {
-                var contentsProp = cell.GetType().GetProperty("Contents", BindingFlags.Public | BindingFlags.Instance);
-                var contents = contentsProp?.GetValue(cell, null) as IEnumerable;
-                if (contents == null) return false;
-
-                foreach (var item in contents)
-                {
-                    var ctProp = item.GetType().GetProperty("ContentTypes", BindingFlags.Public | BindingFlags.Instance);
-                    var ctVal = ctProp?.GetValue(item, null)?.ToString() ?? string.Empty;
-                    if (ctVal.IndexOf("Block", StringComparison.OrdinalIgnoreCase) >= 0)
-                        return true;
-                }
-            }
-            catch { }
-            return false;
-        }
-
-        private static string BuildHeaderLog(Table table)
-        {
-            if (table == null) return "headers=[]";
-            var rowCount = table.Rows.Count;
-            var columnCount = table.Columns.Count;
-            if (rowCount == 0 || columnCount <= 0) return "headers=[]";
-
-            var headers = new List<string>(columnCount);
-            for (var col = 0; col < columnCount; col++)
-            {
-                string text;
-                try { text = table.Cells[0, col].TextString ?? string.Empty; } catch { text = string.Empty; }
-                headers.Add(text.Trim());
-            }
-            return "headers=[" + string.Join("|", headers) + "]";
-        }
-
-        private static string TryGetBlockAttributeValue(Table table, int row, int col, string tag)
-        {
-            if (table == null || string.IsNullOrEmpty(tag))
-            {
-                return string.Empty;
-            }
-
-            const string methodName = "GetBlockAttributeValue";
-            var type = table.GetType();
-            var methods = type.GetMethods().Where(m => string.Equals(m.Name, methodName, StringComparison.Ordinal));
-
-            foreach (var method in methods)
-            {
-                var p = method.GetParameters();
-
-                // Signature: (int row, int col, string tag, [optional ...])
-                if (p.Length >= 3 &&
-                    p[0].ParameterType != typeof(string) &&
-                    p[1].ParameterType != typeof(string) &&
-                    typeof(string).IsAssignableFrom(p[2].ParameterType))
-                {
-                    var args = new object[p.Length];
-                    if (!TryConvertParameter(row, p[0], out args[0]) ||
-                        !TryConvertParameter(col, p[1], out args[1]) ||
-                        !TryConvertParameter(tag, p[2], out args[2]))
-                        continue;
-
-                    for (int i = 3; i < p.Length; i++) args[i] = p[i].IsOptional ? Type.Missing : null;
-                    try
-                    {
-                        var result = method.Invoke(table, args);
-                        var text = Convert.ToString(result, CultureInfo.InvariantCulture);
-                        if (!string.IsNullOrWhiteSpace(text)) return text;
-                    }
-                    catch { }
-                }
-
-                // Signature: (int row, int col, int contentIndex, string tag, [optional ...])
-                if (p.Length >= 4 &&
-                    p[0].ParameterType != typeof(string) &&
-                    p[1].ParameterType != typeof(string) &&
-                    p[2].ParameterType != typeof(string) &&
-                    typeof(string).IsAssignableFrom(p[3].ParameterType))
-                {
-                    var anyIndex = false;
-                    foreach (var contentIndex in EnumerateCellContentIndexes(table, row, col))
-                    {
-                        anyIndex = true;
-                        var args = new object[p.Length];
-                        if (!TryConvertParameter(row, p[0], out args[0]) ||
-                            !TryConvertParameter(col, p[1], out args[1]) ||
-                            !TryConvertParameter(contentIndex, p[2], out args[2]) ||
-                            !TryConvertParameter(tag, p[3], out args[3]))
-                            continue;
-
-                        for (int i = 4; i < p.Length; i++) args[i] = p[i].IsOptional ? Type.Missing : null;
-                        try
-                        {
-                            var result = method.Invoke(table, args);
-                            var text = Convert.ToString(result, CultureInfo.InvariantCulture);
-                            if (!string.IsNullOrWhiteSpace(text)) return text;
-                        }
-                        catch { }
-                    }
-
-                    if (!anyIndex)
-                    {
-                        var args = new object[p.Length];
-                        if (!TryConvertParameter(row, p[0], out args[0]) ||
-                            !TryConvertParameter(col, p[1], out args[1]) ||
-                            !TryConvertParameter(0, p[2], out args[2]) ||
-                            !TryConvertParameter(tag, p[3], out args[3]))
-                            continue;
-
-                        for (int i = 4; i < p.Length; i++) args[i] = p[i].IsOptional ? Type.Missing : null;
-                        try
-                        {
-                            var result = method.Invoke(table, args);
-                            var text = Convert.ToString(result, CultureInfo.InvariantCulture);
-                            if (!string.IsNullOrWhiteSpace(text)) return text;
-                        }
-                        catch { }
-                    }
-                }
-            }
-            return string.Empty;
-        }
-
-        private static bool TrySetBlockAttributeValue(Table table, int row, int col, string tag, string value)
-        {
-            if (table == null || string.IsNullOrEmpty(tag))
-            {
-                return false;
-            }
-
-            const string methodName = "SetBlockAttributeValue";
-            var type = table.GetType();
-            var methods = type.GetMethods().Where(m => string.Equals(m.Name, methodName, StringComparison.Ordinal));
-
-            foreach (var method in methods)
-            {
-                var p = method.GetParameters();
-
-                // Signature: (int row, int col, string tag, string value, [optional ...])
-                if (p.Length >= 4 &&
-                    p[0].ParameterType != typeof(string) &&
-                    p[1].ParameterType != typeof(string) &&
-                    typeof(string).IsAssignableFrom(p[2].ParameterType) &&
-                    typeof(string).IsAssignableFrom(p[3].ParameterType))
-                {
-                    var args = new object[p.Length];
-                    if (!TryConvertParameter(row, p[0], out args[0]) ||
-                        !TryConvertParameter(col, p[1], out args[1]) ||
-                        !TryConvertParameter(tag, p[2], out args[2]) ||
-                        !TryConvertParameter(value ?? string.Empty, p[3], out args[3]))
-                        continue;
-
-                    for (int i = 4; i < p.Length; i++) args[i] = p[i].IsOptional ? Type.Missing : null;
-                    try
-                    {
-                        method.Invoke(table, args);
-                        return true;
-                    }
-                    catch { }
-                }
-
-                // Signature: (int row, int col, int contentIndex, string tag, string value, [optional ...])
-                if (p.Length >= 5 &&
-                    p[0].ParameterType != typeof(string) &&
-                    p[1].ParameterType != typeof(string) &&
-                    p[2].ParameterType != typeof(string) &&
-                    typeof(string).IsAssignableFrom(p[3].ParameterType) &&
-                    typeof(string).IsAssignableFrom(p[4].ParameterType))
-                {
-                    var anyIndex = false;
-                    foreach (var contentIndex in EnumerateCellContentIndexes(table, row, col))
-                    {
-                        anyIndex = true;
-                        var args = new object[p.Length];
-                        if (!TryConvertParameter(row, p[0], out args[0]) ||
-                            !TryConvertParameter(col, p[1], out args[1]) ||
-                            !TryConvertParameter(contentIndex, p[2], out args[2]) ||
-                            !TryConvertParameter(tag, p[3], out args[3]) ||
-                            !TryConvertParameter(value ?? string.Empty, p[4], out args[4]))
-                            continue;
-
-                        for (int i = 5; i < p.Length; i++) args[i] = p[i].IsOptional ? Type.Missing : null;
-                        try
-                        {
-                            method.Invoke(table, args);
-                            return true;
-                        }
-                        catch { }
-                    }
-
-                    if (!anyIndex)
-                    {
-                        var args = new object[p.Length];
-                        if (!TryConvertParameter(row, p[0], out args[0]) ||
-                            !TryConvertParameter(col, p[1], out args[1]) ||
-                            !TryConvertParameter(0, p[2], out args[2]) ||
-                            !TryConvertParameter(tag, p[3], out args[3]) ||
-                            !TryConvertParameter(value ?? string.Empty, p[4], out args[4]))
-                            continue;
-
-                        for (int i = 5; i < p.Length; i++) args[i] = p[i].IsOptional ? Type.Missing : null;
-                        try
-                        {
-                            method.Invoke(table, args);
-                            return true;
-                        }
-                        catch { }
-                    }
-                }
-            }
-
-            return false;
-        }
-
-        private static IEnumerable<int> EnumerateCellContentIndexes(Table table, int row, int col)
-        {
-            var cell = GetTableCell(table, row, col);
-            if (cell == null)
-            {
-                yield break;
-            }
-
-            var enumerable = GetCellContents(cell);
-            if (enumerable == null)
-            {
-                yield break;
-            }
-
-            var index = 0;
-            foreach (var _ in enumerable)
-            {
-                yield return index++;
-            }
-        }
-
-        private static Cell GetTableCell(Table table, int row, int col)
-        {
-            if (table == null)
-            {
-                return null;
-            }
-
-            try
-            {
-                return table.Cells[row, col];
-            }
-            catch
-            {
-                return null;
-            }
-        }
-
-        private static IEnumerable GetCellContents(Cell cell)
-        {
-            if (cell == null)
-            {
-                return null;
-            }
-
-            var contentsProperty = cell.GetType().GetProperty("Contents", BindingFlags.Public | BindingFlags.Instance);
-            if (contentsProperty == null)
-            {
-                return null;
-            }
-
-            try
-            {
-                return contentsProperty.GetValue(cell, null) as IEnumerable;
-            }
-            catch
-            {
-                return null;
-            }
-        }
-
-        private static bool TryConvertParameter(object value, ParameterInfo parameter, out object converted)
-        {
-            var targetType = parameter.ParameterType;
-            var underlying = Nullable.GetUnderlyingType(targetType) ?? targetType;
-
-            try
-            {
-                if (value == null)
-                {
-                    if (!underlying.IsValueType || underlying == typeof(string))
-                    {
-                        converted = null;
-                        return true;
-                    }
-                    converted = Activator.CreateInstance(underlying);
-                    return true;
-                }
-
-                if (underlying.IsInstanceOfType(value))
-                {
-                    converted = value;
-                    return true;
-                }
-
-                converted = Convert.ChangeType(value, underlying, CultureInfo.InvariantCulture);
-                return true;
-            }
-            catch
-            {
-                converted = null;
-                return false;
-            }
-        }
-
-        private static void RefreshTable(Table table)
-        {
-            if (table == null) return;
-
-            var recompute = table.GetType().GetMethod("RecomputeTableBlock", new[] { typeof(bool) });
-            if (recompute != null)
-            {
-                try
-                {
-                    recompute.Invoke(table, new object[] { true });
-                    return;
-                }
-                catch { }
-            }
-
-            try { table.GenerateLayout(); } catch { }
         }
     }
 }
