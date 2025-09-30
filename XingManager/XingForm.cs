@@ -78,6 +78,8 @@ namespace XingManager
 
         public void GenerateXingPageFromCommand() => GenerateXingPage();
 
+        public void GenerateAllXingPagesFromCommand() => GenerateAllXingPages();
+
         public void CreateLatLongRowFromCommand() => CreateOrUpdateLatLongTable();
 
         private void OnCommandMatchTableDone(object sender, CommandEventArgs e)
@@ -155,6 +157,8 @@ namespace XingManager
         private void btnRescan_Click(object sender, EventArgs e) => RescanRecords();
 
         private void btnApply_Click(object sender, EventArgs e) => ApplyChangesToDrawing();
+
+        private void btnGenerateAllPages_Click(object sender, EventArgs e) => GenerateAllXingPages();
 
         // DELETE SELECTED: does NOT renumber the remaining crossings.
         // - removes the block instances for the selected record
@@ -1366,6 +1370,13 @@ namespace XingManager
 
         // ===== Page & Lat/Long creation =====
 
+        private sealed class AllPagesOption
+        {
+            public string DwgRef;
+            public bool IncludeAdjacent;
+            public string SelectedLocation;
+        }
+
         private sealed class PageGenerationOptions
         {
             public PageGenerationOptions(string dwgRef, bool includeAdjacent)
@@ -1377,6 +1388,254 @@ namespace XingManager
             public string DwgRef { get; }
 
             public bool IncludeAdjacent { get; }
+        }
+
+        private void GenerateAllXingPages()
+        {
+            var refs = _records
+                .Select(r => r.DwgRef ?? string.Empty)
+                .Where(s => !string.IsNullOrWhiteSpace(s))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .OrderBy(s => s, StringComparer.OrdinalIgnoreCase)
+                .ToList();
+
+            if (refs.Count == 0)
+            {
+                MessageBox.Show("No DWG_REF values available.", "Crossing Manager",
+                    MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+
+            // Build per‑DWG_REF list of distinct LOCATIONs
+            var locMap = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
+            foreach (var dr in refs)
+            {
+                var locs = _records
+                    .Where(r => string.Equals(r.DwgRef ?? string.Empty, dr, StringComparison.OrdinalIgnoreCase))
+                    .Select(r => r.Location ?? string.Empty)
+                    .Where(s => !string.IsNullOrWhiteSpace(s))
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .OrderBy(s => s, StringComparer.OrdinalIgnoreCase)
+                    .ToList();
+                locMap[dr] = locs;
+            }
+
+            // Dialog: per DWG_REF -> IncludeAdjacent + LOCATION (if multiple)
+            var options = PromptForAllPagesOptions(refs, locMap);
+            if (options == null || options.Count == 0) return;
+
+            try
+            {
+                using (_doc.LockDocument())
+                {
+                    foreach (var opt in options)
+                    {
+                        // 1) Clone layout
+                        string actualName;
+                        var layoutId = _layoutUtils.CloneLayoutFromTemplate(
+                            _doc,
+                            TemplatePath,
+                            TemplateLayoutName,
+                            string.Format(CultureInfo.InvariantCulture, "XING #{0}", opt.DwgRef),
+                            out actualName);
+
+                        // 2) Heading
+                        _layoutUtils.UpdatePlanHeadingText(_doc.Database, layoutId, opt.IncludeAdjacent);
+
+                        // 3) LOCATION placeholder
+                        var loc = opt.SelectedLocation ?? string.Empty;
+                        if (!string.IsNullOrWhiteSpace(loc))
+                        {
+                            if (_layoutUtils.TryFormatMeridianLocation(loc, out var formatted))
+                                loc = formatted;
+
+                            _layoutUtils.ReplacePlaceholderText(_doc.Database, layoutId, loc);
+                        }
+
+                        // 4) Centered insertion of PAGE table
+                        //    Compute center of layout, ask TableSync for table size, then offset to LL insert point.
+                        Point3d center;
+                        using (var tr = _doc.Database.TransactionManager.StartTransaction())
+                        {
+                            center = GetLayoutCenter(layoutId, tr);
+                            tr.Commit();
+                        }
+
+                        var dataRowCount = _records.Count(r =>
+                            string.Equals(r.DwgRef ?? string.Empty, opt.DwgRef, StringComparison.OrdinalIgnoreCase));
+
+                        double totalW, totalH;
+                        _tableSync.GetPageTableSize(dataRowCount, out totalW, out totalH);
+
+                        var insert = new Point3d(center.X - totalW / 2.0, center.Y - totalH / 2.0, 0.0);
+
+                        using (var tr = _doc.Database.TransactionManager.StartTransaction())
+                        {
+                            var layout = (Layout)tr.GetObject(layoutId, OpenMode.ForRead);
+                            var btr = (BlockTableRecord)tr.GetObject(layout.BlockTableRecordId, OpenMode.ForWrite);
+
+                            _tableSync.CreateAndInsertPageTable(_doc.Database, tr, btr, insert, opt.DwgRef, _records);
+
+                            tr.Commit();
+                        }
+
+                        // Optional: switch to the new layout to confirm creation
+                        _layoutUtils.SwitchToLayout(_doc, actualName);
+                    }
+                }
+            }
+            catch (FileNotFoundException)
+            {
+                MessageBox.Show($"Template not found: {TemplatePath}", "Crossing Manager",
+                    MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(ex.Message, "Crossing Manager",
+                    MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        }
+
+        private List<AllPagesOption> PromptForAllPagesOptions(IList<string> dwgRefs, IDictionary<string, List<string>> locMap)
+        {
+            using (var dialog = new Form())
+            {
+                dialog.Text = "Generate All XING Pages";
+                dialog.FormBorderStyle = FormBorderStyle.FixedDialog;
+                dialog.StartPosition = FormStartPosition.CenterParent;
+                dialog.Width = 780;
+                dialog.Height = 420;
+                dialog.MinimizeBox = false;
+                dialog.MaximizeBox = false;
+
+                var label = new Label
+                {
+                    Text = "Per DWG_REF: choose whether to include \"AND ADJACENT TO\" in the heading and (if needed) a LOCATION for the title block.",
+                    Dock = DockStyle.Top,
+                    AutoSize = true,
+                    Padding = new Padding(12, 12, 12, 8)
+                };
+
+                var grid = new DataGridView
+                {
+                    Dock = DockStyle.Fill,
+                    AllowUserToAddRows = false,
+                    AllowUserToDeleteRows = false,
+                    AutoGenerateColumns = false,
+                    RowHeadersVisible = false,
+                    SelectionMode = DataGridViewSelectionMode.FullRowSelect,
+                    MultiSelect = false
+                };
+
+                var colRef = new DataGridViewTextBoxColumn
+                {
+                    HeaderText = "DWG_REF",
+                    DataPropertyName = "DwgRef",
+                    ReadOnly = true,
+                    Width = 160
+                };
+                var colAdj = new DataGridViewCheckBoxColumn
+                {
+                    HeaderText = "Include \"AND ADJACENT TO\"",
+                    DataPropertyName = "IncludeAdjacent",
+                    Width = 220
+                };
+                var colLoc = new DataGridViewComboBoxColumn
+                {
+                    HeaderText = "LOCATION (if multiple)",
+                    DataPropertyName = "SelectedLocation",
+                    Width = 360
+                };
+
+                grid.Columns.Add(colRef);
+                grid.Columns.Add(colAdj);
+                grid.Columns.Add(colLoc);
+
+                var union = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { string.Empty };
+                foreach (var locs in locMap.Values)
+                {
+                    foreach (var loc in locs)
+                    {
+                        if (!string.IsNullOrWhiteSpace(loc))
+                        {
+                            union.Add(loc);
+                        }
+                    }
+                }
+
+                var orderedUnion = union
+                    .Where(s => !string.IsNullOrWhiteSpace(s))
+                    .OrderBy(s => s, StringComparer.OrdinalIgnoreCase)
+                    .ToList();
+
+                if (union.Contains(string.Empty))
+                    colLoc.Items.Add(string.Empty);
+
+                foreach (var loc in orderedUnion)
+                    colLoc.Items.Add(loc);
+
+                var binding = new BindingList<AllPagesOption>();
+                foreach (var dr in dwgRefs)
+                {
+                    var locs = locMap.ContainsKey(dr) ? locMap[dr] : new List<string>();
+                    var opt = new AllPagesOption
+                    {
+                        DwgRef = dr,
+                        IncludeAdjacent = true,
+                        SelectedLocation = (locs.Count > 0 ? locs[0] : string.Empty)
+                    };
+                    binding.Add(opt);
+                }
+                grid.DataSource = binding;
+
+                // Populate the LOCATION dropdown per row right before editing
+                grid.CellBeginEdit += (s, e) =>
+                {
+                    if (e.RowIndex < 0) return;
+                    if (!(grid.Columns[e.ColumnIndex] is DataGridViewComboBoxColumn)) return;
+
+                    var opt = binding[e.RowIndex];
+                    var dr = opt.DwgRef;
+                    var items = locMap.ContainsKey(dr) ? locMap[dr] : new List<string>();
+
+                    grid.BeginInvoke(new Action(() =>
+                    {
+                        var editor = grid.EditingControl as DataGridViewComboBoxEditingControl;
+                        if (editor != null)
+                        {
+                            editor.Items.Clear();
+                            if (items.Count == 0) editor.Items.Add(string.Empty);
+                            else foreach (var it in items) editor.Items.Add(it);
+                        }
+                    }));
+                };
+
+                grid.DataError += (s, e) => { e.ThrowException = false; };
+
+                var panel = new FlowLayoutPanel
+                {
+                    Dock = DockStyle.Bottom,
+                    FlowDirection = FlowDirection.RightToLeft,
+                    Height = 44,
+                    Padding = new Padding(8)
+                };
+
+                var ok = new Button { Text = "Create Pages", DialogResult = DialogResult.OK, Width = 120 };
+                var cancel = new Button { Text = "Cancel", DialogResult = DialogResult.Cancel, Width = 100 };
+                panel.Controls.Add(ok);
+                panel.Controls.Add(cancel);
+
+                dialog.Controls.Add(grid);
+                dialog.Controls.Add(label);
+                dialog.Controls.Add(panel);
+                dialog.AcceptButton = ok;
+                dialog.CancelButton = cancel;
+
+                if (dialog.ShowDialog(this) != DialogResult.OK)
+                    return null;
+
+                return binding.ToList();
+            }
         }
 
         private void GenerateXingPage()
@@ -1453,16 +1712,125 @@ namespace XingManager
 
         private string BuildLocationText(string dwgRef)
         {
-            var record = _records.FirstOrDefault(r =>
-                string.Equals(r.DwgRef, dwgRef, StringComparison.OrdinalIgnoreCase) &&
-                !string.IsNullOrWhiteSpace(r.Location));
+            if (string.IsNullOrWhiteSpace(dwgRef)) return string.Empty;
 
-            if (record == null) return string.Empty;
+            var locs = _records
+                .Where(r => string.Equals(r.DwgRef ?? string.Empty, dwgRef, StringComparison.OrdinalIgnoreCase))
+                .Select(r => r.Location ?? string.Empty)
+                .Where(s => !string.IsNullOrWhiteSpace(s))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
 
-            if (_layoutUtils.TryFormatMeridianLocation(record.Location, out var formatted))
+            if (locs.Count == 0) return string.Empty;
+
+            string selected;
+            if (locs.Count == 1)
+            {
+                selected = locs[0];
+            }
+            else
+            {
+                selected = PromptForLocationChoice(dwgRef, locs);
+                if (string.IsNullOrWhiteSpace(selected)) return string.Empty;
+            }
+
+            if (_layoutUtils.TryFormatMeridianLocation(selected, out var formatted))
                 return formatted;
 
-            return record.Location;
+            return selected;
+        }
+
+        private string PromptForLocationChoice(string dwgRef, IList<string> locations)
+        {
+            using (var dialog = new Form())
+            {
+                dialog.Text = $"Select LOCATION for DWG_REF {dwgRef}";
+                dialog.FormBorderStyle = FormBorderStyle.FixedDialog;
+                dialog.StartPosition = FormStartPosition.CenterParent;
+                dialog.Width = 520;
+                dialog.Height = 180;
+                dialog.MinimizeBox = false;
+                dialog.MaximizeBox = false;
+
+                var layout = new TableLayoutPanel
+                {
+                    Dock = DockStyle.Fill,
+                    ColumnCount = 1,
+                    RowCount = 2,
+                    Padding = new Padding(12)
+                };
+                layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+                layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+
+                var label = new Label
+                {
+                    Text = "Multiple LOCATION values found. Choose one for the title block:",
+                    AutoSize = true,
+                    Margin = new Padding(3, 0, 3, 8)
+                };
+
+                var combo = new ComboBox
+                {
+                    Dock = DockStyle.Top,
+                    DropDownStyle = ComboBoxStyle.DropDownList,
+                    Margin = new Padding(3, 0, 3, 6)
+                };
+                foreach (var s in locations) combo.Items.Add(s);
+                if (locations.Count > 0) combo.SelectedIndex = 0;
+
+                layout.Controls.Add(label, 0, 0);
+                layout.Controls.Add(combo, 0, 1);
+
+                var panel = new FlowLayoutPanel
+                {
+                    Dock = DockStyle.Bottom,
+                    FlowDirection = FlowDirection.RightToLeft,
+                    Height = 40,
+                    Padding = new Padding(3, 3, 3, 6)
+                };
+
+                var ok = new Button { Text = "OK", DialogResult = DialogResult.OK, Width = 80 };
+                var cancel = new Button { Text = "Cancel", DialogResult = DialogResult.Cancel, Width = 80 };
+                panel.Controls.Add(ok);
+                panel.Controls.Add(cancel);
+
+                dialog.Controls.Add(layout);
+                dialog.Controls.Add(panel);
+                dialog.AcceptButton = ok;
+                dialog.CancelButton = cancel;
+
+                var result = dialog.ShowDialog(this);
+                if (result != DialogResult.OK) return null;
+
+                return combo.SelectedItem as string;
+            }
+        }
+
+        // 1) Try Layout.Limits; 2) fall back to paperspace BTR extents; 3) (0,0).
+        private static Point3d GetLayoutCenter(ObjectId layoutId, Transaction tr)
+        {
+            var layout = (Layout)tr.GetObject(layoutId, OpenMode.ForRead);
+            var min = layout.LimitsMin;
+            var max = layout.LimitsMax;
+
+            if (!(min.IsEqualTo(Point2d.Origin) && max.IsEqualTo(Point2d.Origin)))
+            {
+                return new Point3d((min.X + max.X) / 2.0, (min.Y + max.Y) / 2.0, 0.0);
+            }
+
+            var btr = (BlockTableRecord)tr.GetObject(layout.BlockTableRecordId, OpenMode.ForRead);
+            try
+            {
+                var ext = btr.GeometricExtents;
+                return new Point3d(
+                    (ext.MinPoint.X + ext.MaxPoint.X) / 2.0,
+                    (ext.MinPoint.Y + ext.MaxPoint.Y) / 2.0,
+                    0.0);
+            }
+            catch
+            {
+                return Point3d.Origin;
+            }
         }
 
         private PageGenerationOptions PromptForPageOptions(string title, IList<string> choices)
