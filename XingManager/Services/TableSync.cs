@@ -140,6 +140,21 @@ namespace XingManager.Services
         // PAGE TABLE CREATION (no extra title row, header bold, height=10)
         // =====================================================================
 
+        // Returns the total width/height of a Page table for a given number of data rows.
+        // Widths: 43.5, 144.5, 393.5; Row height: 25; Header rows: exactly 1.
+        public void GetPageTableSize(int dataRowCount, out double totalWidth, out double totalHeight)
+        {
+            // Keep these in sync with CreateAndInsertPageTable
+            const double W0 = 43.5;
+            const double W1 = 144.5;
+            const double W2 = 393.5;
+            const double RowH = 25.0;
+            const int HeaderRows = 1;
+
+            totalWidth = W0 + W1 + W2;
+            totalHeight = (HeaderRows + Math.Max(0, dataRowCount)) * RowH;
+        }
+
         public void CreateAndInsertPageTable(
             Database db,
             Transaction tr,
