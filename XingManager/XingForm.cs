@@ -1615,7 +1615,7 @@ namespace XingManager
                 var panel = new FlowLayoutPanel
                 {
                     Dock = DockStyle.Bottom,
-                    FlowDirection = FlowDirection.RightToLeft,
+                    FlowDirection = WinFormsFlowDirection.RightToLeft,
                     Height = 44,
                     Padding = new Padding(8)
                 };
@@ -1784,7 +1784,7 @@ namespace XingManager
                 var panel = new FlowLayoutPanel
                 {
                     Dock = DockStyle.Bottom,
-                    FlowDirection = FlowDirection.RightToLeft,
+                    FlowDirection = WinFormsFlowDirection.RightToLeft,
                     Height = 40,
                     Padding = new Padding(3, 3, 3, 6)
                 };
@@ -1807,30 +1807,53 @@ namespace XingManager
         }
 
         // 1) Try Layout.Limits; 2) fall back to paperspace BTR extents; 3) (0,0).
+        // Compute the visual center of a layout by unioning the extents of all
+        // visible entities on its paperspace BlockTableRecord.
+        // No use of Layout.Limits* or BlockTableRecord.GeometricExtents (not available in all versions).
         private static Point3d GetLayoutCenter(ObjectId layoutId, Transaction tr)
         {
             var layout = (Layout)tr.GetObject(layoutId, OpenMode.ForRead);
-            var min = layout.LimitsMin;
-            var max = layout.LimitsMax;
+            var btr = (BlockTableRecord)tr.GetObject(layout.BlockTableRecordId, OpenMode.ForRead);
 
-            if (!(min.IsEqualTo(Point2d.Origin) && max.IsEqualTo(Point2d.Origin)))
+            bool haveExtents = false;
+            Extents3d ex = new Extents3d();
+
+            foreach (ObjectId id in btr)
             {
-                return new Point3d((min.X + max.X) / 2.0, (min.Y + max.Y) / 2.0, 0.0);
+                // Only entities have GeometricExtents
+                var ent = tr.GetObject(id, OpenMode.ForRead) as Entity;
+                if (ent == null) continue;
+
+                try
+                {
+                    var e = ent.GeometricExtents;       // available on Entity across versions
+                    if (!haveExtents)
+                    {
+                        ex = e;
+                        haveExtents = true;
+                    }
+                    else
+                    {
+                        ex.AddPoint(e.MinPoint);
+                        ex.AddPoint(e.MaxPoint);
+                    }
+                }
+                catch
+                {
+                    // Some entities may not report extents in every state; ignore and continue
+                }
             }
 
-            var btr = (BlockTableRecord)tr.GetObject(layout.BlockTableRecordId, OpenMode.ForRead);
-            try
+            if (haveExtents)
             {
-                var ext = btr.GeometricExtents;
                 return new Point3d(
-                    (ext.MinPoint.X + ext.MaxPoint.X) / 2.0,
-                    (ext.MinPoint.Y + ext.MaxPoint.Y) / 2.0,
+                    (ex.MinPoint.X + ex.MaxPoint.X) * 0.5,
+                    (ex.MinPoint.Y + ex.MaxPoint.Y) * 0.5,
                     0.0);
             }
-            catch
-            {
-                return Point3d.Origin;
-            }
+
+            // Fallback if the layout is empty (or all entities had no extents)
+            return Point3d.Origin;
         }
 
         private PageGenerationOptions PromptForPageOptions(string title, IList<string> choices)
