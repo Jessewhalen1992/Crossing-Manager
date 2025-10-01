@@ -134,44 +134,6 @@ namespace XingManager.Services
             return table;
         }
 
-        public Table CreateLatLongTable(Database db, Transaction tr, CrossingRecord record)
-        {
-            if (record == null)
-            {
-                throw new ArgumentNullException("record");
-            }
-
-            var table = new Table
-            {
-                TableStyle = EnsureTableStyle(db, tr),
-                LayerId = LayerUtils.EnsureLayer(db, tr, LayerName)
-            };
-
-            table.NumRows = 2;
-            table.NumColumns = 4;
-            table.SetRowHeight(25.0);
-            table.Columns[0].Width = 40.0;
-            table.Columns[1].Width = 150.0;
-            table.Columns[2].Width = 90.0;
-            table.Columns[3].Width = 90.0;
-
-            var textStyleId = db.Textstyle;
-            const double textHeight = 10.0;
-            var headers = new[] { "XING", "DESCRIPTION", "LAT", "LONG" };
-            for (var col = 0; col < headers.Length; col++)
-            {
-                SetCellText(table, 0, col, headers[col], textHeight, textStyleId);
-            }
-
-            SetCellText(table, 1, 0, record.Crossing, textHeight, textStyleId);
-            SetCellText(table, 1, 1, record.Description, textHeight, textStyleId);
-            SetCellText(table, 1, 2, record.Lat, textHeight, textStyleId);
-            SetCellText(table, 1, 3, record.Long, textHeight, textStyleId);
-
-            table.GenerateLayout();
-            return table;
-        }
-
         public void TagTable(Transaction tr, Table table, string tableType)
         {
             if (table == null)
