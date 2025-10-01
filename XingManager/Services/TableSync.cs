@@ -698,6 +698,12 @@ namespace XingManager.Services
             }
             catch { return string.Empty; }
         }
+
+        internal static string ReadCellTextSafe(Table table, int row, int column) => ReadCellText(table, row, column);
+
+        internal static string NormalizeText(string value) => Norm(value);
+
+        internal static int FindLatLongDataStartRow(Table table) => GetDataStartRow(table, 4, IsLatLongHeader);
         // Create (or return) a bold text style. Inherits face/charset from a base style if present.
         // Create (or return) a bold text style. Portable across AutoCAD versions.
         private static ObjectId EnsureBoldTextStyle(Database db, Transaction tr, string styleName, string baseStyleName)
