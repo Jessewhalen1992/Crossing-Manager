@@ -1730,14 +1730,14 @@ namespace XingManager
 
         private void GenerateAllLatLongTables()
         {
-            var latGroups = _records
+            var latRecords = _records
                 .Where(HasLatLongData)
                 .Where(r => !string.IsNullOrWhiteSpace(r.DwgRef))
-                .GroupBy(r => r.DwgRef ?? string.Empty, StringComparer.OrdinalIgnoreCase)
-                .OrderBy(g => g.Key, DwgRefComparer)
+                .OrderBy(r => r.DwgRef ?? string.Empty, DwgRefComparer)
+                .ThenBy(r => r, Comparer<CrossingRecord>.Create(CrossingRecord.CompareByCrossing))
                 .ToList();
 
-            if (latGroups.Count == 0)
+            if (latRecords.Count == 0)
             {
                 MessageBox.Show("No LAT/LONG data available to create tables.", "Crossing Manager",
                     MessageBoxButtons.OK, MessageBoxIcon.Information);
@@ -1752,56 +1752,41 @@ namespace XingManager
                 return;
             }
 
-            foreach (var group in latGroups)
+            var pointRes = editor.GetPoint("\nSpecify insertion point for combined LAT/LONG table:");
+            if (pointRes.Status != PromptStatus.OK)
+                return;
+
+            using (_doc.LockDocument())
+            using (var tr = _doc.Database.TransactionManager.StartTransaction())
             {
-                var dwgRef = group.Key?.Trim() ?? string.Empty;
-                if (string.IsNullOrEmpty(dwgRef))
-                    continue;
-
-                var prompt = string.Format(CultureInfo.InvariantCulture,
-                    "\nSpecify insertion point for LAT/LONG table ({0}):", dwgRef);
-                var pointRes = editor.GetPoint(prompt);
-                if (pointRes.Status == PromptStatus.Cancel)
-                    break;
-                if (pointRes.Status != PromptStatus.OK)
-                    continue;
-
-                using (_doc.LockDocument())
-                using (var tr = _doc.Database.TransactionManager.StartTransaction())
+                BlockTableRecord btr = null;
+                try
                 {
-                    BlockTableRecord btr = null;
-                    try
+                    var layoutManager = LayoutManager.Current;
+                    if (layoutManager != null)
                     {
-                        var layoutManager = LayoutManager.Current;
-                        if (layoutManager != null)
+                        var layoutDict = (DBDictionary)tr.GetObject(_doc.Database.LayoutDictionaryId, OpenMode.ForRead);
+                        if (layoutDict.Contains(layoutManager.CurrentLayout))
                         {
-                            var layoutDict = (DBDictionary)tr.GetObject(_doc.Database.LayoutDictionaryId, OpenMode.ForRead);
-                            if (layoutDict.Contains(layoutManager.CurrentLayout))
-                            {
-                                var layoutId = layoutDict.GetAt(layoutManager.CurrentLayout);
-                                var layout = (Layout)tr.GetObject(layoutId, OpenMode.ForRead);
-                                btr = (BlockTableRecord)tr.GetObject(layout.BlockTableRecordId, OpenMode.ForWrite);
-                            }
+                            var layoutId = layoutDict.GetAt(layoutManager.CurrentLayout);
+                            var layout = (Layout)tr.GetObject(layoutId, OpenMode.ForRead);
+                            btr = (BlockTableRecord)tr.GetObject(layout.BlockTableRecordId, OpenMode.ForWrite);
                         }
                     }
-                    catch
-                    {
-                        btr = null;
-                    }
-
-                    if (btr == null)
-                    {
-                        btr = (BlockTableRecord)tr.GetObject(_doc.Database.CurrentSpaceId, OpenMode.ForWrite);
-                    }
-
-                    var ordered = group
-                        .OrderBy(r => r, Comparer<CrossingRecord>.Create(CrossingRecord.CompareByCrossing))
-                        .ToList();
-
-                    _tableSync.CreateAndInsertLatLongTable(_doc.Database, tr, btr, pointRes.Value, ordered);
-
-                    tr.Commit();
                 }
+                catch
+                {
+                    btr = null;
+                }
+
+                if (btr == null)
+                {
+                    btr = (BlockTableRecord)tr.GetObject(_doc.Database.CurrentSpaceId, OpenMode.ForWrite);
+                }
+
+                _tableSync.CreateAndInsertLatLongTable(_doc.Database, tr, btr, pointRes.Value, latRecords);
+
+                tr.Commit();
             }
         }
 
