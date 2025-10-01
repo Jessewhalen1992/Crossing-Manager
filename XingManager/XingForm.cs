@@ -1530,7 +1530,10 @@ namespace XingManager
             if (options == null || options.Count == 0) return;
 
             options = options
-                .OrderBy(o => o?.DwgRef ?? string.Empty, DwgRefComparer)
+                .OrderBy(
+                    o => GetEarliestCrossingForDwgRef(o?.DwgRef ?? string.Empty),
+                    Comparer<string>.Create(CrossingRecord.CompareCrossingKeys))
+                .ThenBy(o => o?.DwgRef ?? string.Empty, DwgRefComparer)
                 .ToList();
 
             const double TableVerticalGap = 10.0;
@@ -1625,6 +1628,29 @@ namespace XingManager
                 MessageBox.Show(ex.Message, "Crossing Manager",
                     MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
+        }
+
+        private string GetEarliestCrossingForDwgRef(string dwgRef)
+        {
+            if (string.IsNullOrWhiteSpace(dwgRef))
+                return string.Empty;
+
+            string best = null;
+
+            foreach (var record in _records)
+            {
+                if (!string.Equals(record?.DwgRef ?? string.Empty, dwgRef, StringComparison.OrdinalIgnoreCase))
+                    continue;
+
+                var crossing = record?.Crossing;
+                if (string.IsNullOrWhiteSpace(crossing))
+                    continue;
+
+                if (best == null || CrossingRecord.CompareCrossingKeys(crossing, best) < 0)
+                    best = crossing;
+            }
+
+            return best ?? string.Empty;
         }
 
         private void GenerateAllLatLongTables()

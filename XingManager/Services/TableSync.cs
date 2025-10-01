@@ -377,7 +377,7 @@ namespace XingManager.Services
             table.MergeCells(CellRange.Create(table, titleRow, 0, titleRow, 3));
             var titleCell = table.Cells[titleRow, 0];
             titleCell.TextString = "WATER CROSSING INFORMATION";
-            titleCell.Alignment = CellAlignment.MiddleCenter;
+            titleCell.Alignment = CellAlignment.MiddleLeft;
             titleCell.TextHeight = TitleTextHeight;
             titleCell.TextStyleId = boldStyleId;
             var textColorProp = titleCell.GetType().GetProperty("TextColor", BindingFlags.Public | BindingFlags.Instance);
