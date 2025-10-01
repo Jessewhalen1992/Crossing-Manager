@@ -260,6 +260,8 @@ namespace XingManager
 
         private void btnLatLong_Click(object sender, EventArgs e) => CreateOrUpdateLatLongTable();
 
+        private void btnAddLatLong_Click(object sender, EventArgs e) => AddLatLongFromDrawing();
+
         private void btnExport_Click(object sender, EventArgs e)
         {
             using (var dialog = new SaveFileDialog())
@@ -2066,6 +2068,186 @@ namespace XingManager
                 _tableSync.CreateAndInsertLatLongTable(_doc.Database, tr, btr, pointRes.Value, record);
                 tr.Commit();
             }
+        }
+
+        private void AddLatLongFromDrawing()
+        {
+            var record = GetSelectedRecord();
+            if (record == null)
+            {
+                MessageBox.Show("Select a crossing first.", "Crossing Manager",
+                    MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+
+            var editor = _doc.Editor;
+            if (editor == null)
+            {
+                MessageBox.Show("Unable to access the AutoCAD editor.", "Crossing Manager",
+                    MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return;
+            }
+
+            EnsureModelSpaceActive();
+
+            var zone = PromptForUtmZone(editor);
+            if (!zone.HasValue)
+            {
+                return;
+            }
+
+            var point = PromptForPoint(editor, zone.Value);
+            if (!point.HasValue)
+            {
+                return;
+            }
+
+            try
+            {
+                var latLong = ConvertUtmToLatLong(zone.Value, point.Value);
+                var latString = latLong.lat.ToString("F6", CultureInfo.InvariantCulture);
+                var longString = latLong.lon.ToString("F6", CultureInfo.InvariantCulture);
+
+                record.Lat = latString;
+                record.Long = longString;
+                gridCrossings.Refresh();
+                _isDirty = true;
+
+                MessageBox.Show(
+                    string.Format(CultureInfo.InvariantCulture,
+                        "Latitude: {0}\nLongitude: {1}", latString, longString),
+                    "Crossing Manager", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(ex.Message, "Crossing Manager", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        }
+
+        private void EnsureModelSpaceActive()
+        {
+            try
+            {
+                using (_doc.LockDocument())
+                {
+                    var layoutManager = LayoutManager.Current;
+                    if (layoutManager != null &&
+                        !string.Equals(layoutManager.CurrentLayout, "Model", StringComparison.OrdinalIgnoreCase))
+                    {
+                        layoutManager.CurrentLayout = "Model";
+                    }
+                }
+            }
+            catch
+            {
+                // Best effort: ignore layout switching failures.
+            }
+        }
+
+        private static int? PromptForUtmZone(Editor editor)
+        {
+            var options = new PromptIntegerOptions("\nEnter UTM zone (11 or 12):")
+            {
+                AllowNone = false,
+                AllowNegative = false,
+                AllowZero = false,
+                LowerLimit = 11,
+                UpperLimit = 12
+            };
+
+            var result = editor.GetInteger(options);
+            if (result.Status != PromptStatus.OK)
+            {
+                return null;
+            }
+
+            if (result.Value != 11 && result.Value != 12)
+            {
+                editor.WriteMessage("\n** Invalid zone – enter 11 or 12. **");
+                return null;
+            }
+
+            return result.Value;
+        }
+
+        private static Point3d? PromptForPoint(Editor editor, int zone)
+        {
+            var prompt = string.Format(CultureInfo.InvariantCulture, "\nSelect point in UTM83-{0}:", zone);
+            var pointOptions = new PromptPointOptions(prompt)
+            {
+                AllowNone = false
+            };
+
+            var pointResult = editor.GetPoint(pointOptions);
+            if (pointResult.Status != PromptStatus.OK)
+            {
+                return null;
+            }
+
+            return pointResult.Value;
+        }
+
+        private static (double lat, double lon) ConvertUtmToLatLong(int zone, Point3d point)
+        {
+            if (zone != 11 && zone != 12)
+            {
+                throw new ArgumentOutOfRangeException(nameof(zone), "Zone must be 11 or 12.");
+            }
+
+            const double k0 = 0.9996;
+            const double a = 6378137.0; // GRS80/WGS84 semi-major axis
+            const double eccSquared = 0.00669438; // GRS80/WGS84 eccentricity squared
+
+            double x = point.X - 500000.0;
+            double y = point.Y;
+
+            double eccPrimeSquared = eccSquared / (1 - eccSquared);
+            double eccSquared2 = eccSquared * eccSquared;
+            double eccSquared3 = eccSquared2 * eccSquared;
+            double eccSquared4 = eccSquared3 * eccSquared;
+
+            double e1 = (1 - Math.Sqrt(1 - eccSquared)) / (1 + Math.Sqrt(1 - eccSquared));
+            double e1Squared = e1 * e1;
+            double e1Cubed = e1Squared * e1;
+            double e1Fourth = e1Cubed * e1;
+
+            double mu = y / (k0 * a * (1 - eccSquared / 4 - 3 * eccSquared2 / 64 - 5 * eccSquared3 / 256));
+            double phi1Rad = mu
+                + (3 * e1 / 2 - 27 * e1Cubed / 32) * Math.Sin(2 * mu)
+                + (21 * e1Squared / 16 - 55 * e1Fourth / 32) * Math.Sin(4 * mu)
+                + (151 * e1Cubed / 96) * Math.Sin(6 * mu)
+                + (1097 * e1Fourth / 512) * Math.Sin(8 * mu);
+
+            double sinPhi1 = Math.Sin(phi1Rad);
+            double cosPhi1 = Math.Cos(phi1Rad);
+            double tanPhi1 = Math.Tan(phi1Rad);
+
+            double n1 = a / Math.Sqrt(1 - eccSquared * sinPhi1 * sinPhi1);
+            double t1 = tanPhi1 * tanPhi1;
+            double c1 = eccPrimeSquared * cosPhi1 * cosPhi1;
+            double r1 = a * (1 - eccSquared) / Math.Pow(1 - eccSquared * sinPhi1 * sinPhi1, 1.5);
+            double d = x / (n1 * k0);
+
+            double d2 = d * d;
+            double d3 = d2 * d;
+            double d4 = d2 * d2;
+            double d5 = d4 * d;
+            double d6 = d5 * d;
+            double c1Squared = c1 * c1;
+            double t1Squared = t1 * t1;
+
+            double latRad = phi1Rad - (n1 * tanPhi1 / r1) *
+                (d2 / 2 - (5 + 3 * t1 + 10 * c1 - 4 * c1Squared - 9 * eccPrimeSquared) * d4 / 24
+                 + (61 + 90 * t1 + 298 * c1 + 45 * t1Squared - 252 * eccPrimeSquared - 3 * c1Squared) * d6 / 720);
+
+            double lonRad = (d - (1 + 2 * t1 + c1) * d3 / 6
+                + (5 - 2 * c1 + 28 * t1 - 3 * c1Squared + 8 * eccPrimeSquared + 24 * t1Squared) * d5 / 120) / cosPhi1;
+
+            double longOrigin = (zone - 1) * 6 - 180 + 3;
+            double lat = latRad * (180.0 / Math.PI);
+            double lon = longOrigin + lonRad * (180.0 / Math.PI);
+
+            return (lat, lon);
         }
     }
 }
