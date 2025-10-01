@@ -38,7 +38,7 @@ namespace XingManager
 
         private const string TemplatePath = @"M:\Drafting\_CURRENT TEMPLATES\Compass_Main.dwt";
         private const string DefaultTemplateLayoutName = "X";
-        private const string HydroTemplateLayoutName = "H20-PROFILE";
+        private const string HydroTemplateLayoutName = "H2O-PROFILE";
         private static readonly string[] HydroKeywords = { "Watercourse", "Creek", "River" };
         private const string CreateAllPagesDisplayText = "Create ALL XING pages...";
         private static readonly IComparer<string> DwgRefComparer = new NaturalDwgRefComparer();
