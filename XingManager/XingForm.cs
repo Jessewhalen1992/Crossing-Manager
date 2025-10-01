@@ -37,7 +37,9 @@ namespace XingManager
         private bool _isAwaitingRenumber;
 
         private const string TemplatePath = @"M:\Drafting\_CURRENT TEMPLATES\Compass_Main.dwt";
-        private const string TemplateLayoutName = "X";
+        private const string DefaultTemplateLayoutName = "X";
+        private const string HydroTemplateLayoutName = "H20-PROFILE";
+        private static readonly string[] HydroKeywords = { "Watercourse", "Creek", "River" };
         private const string CreateAllPagesDisplayText = "Create ALL XING pages...";
         private static readonly IComparer<string> DwgRefComparer = new NaturalDwgRefComparer();
 
@@ -1549,7 +1551,7 @@ namespace XingManager
                         var layoutId = _layoutUtils.CloneLayoutFromTemplate(
                             _doc,
                             TemplatePath,
-                            TemplateLayoutName,
+                            GetTemplateLayoutNameForDwgRef(opt.DwgRef),
                             string.Format(CultureInfo.InvariantCulture, "XING #{0}", opt.DwgRef),
                             out actualName);
 
@@ -1628,6 +1630,30 @@ namespace XingManager
                 MessageBox.Show(ex.Message, "Crossing Manager",
                     MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
+        }
+
+        private string GetTemplateLayoutNameForDwgRef(string dwgRef)
+        {
+            if (string.IsNullOrWhiteSpace(dwgRef))
+                return DefaultTemplateLayoutName;
+
+            foreach (var record in _records)
+            {
+                if (!string.Equals(record?.DwgRef ?? string.Empty, dwgRef, StringComparison.OrdinalIgnoreCase))
+                    continue;
+
+                var description = record?.Description;
+                if (string.IsNullOrWhiteSpace(description))
+                    continue;
+
+                if (HydroKeywords.Any(keyword =>
+                        description.IndexOf(keyword, StringComparison.OrdinalIgnoreCase) >= 0))
+                {
+                    return HydroTemplateLayoutName;
+                }
+            }
+
+            return DefaultTemplateLayoutName;
         }
 
         private string GetEarliestCrossingForDwgRef(string dwgRef)
@@ -1945,7 +1971,7 @@ namespace XingManager
                     layoutId = _layoutUtils.CloneLayoutFromTemplate(
                         _doc,
                         TemplatePath,
-                        TemplateLayoutName,
+                        GetTemplateLayoutNameForDwgRef(options.DwgRef),
                         string.Format(CultureInfo.InvariantCulture, "XING #{0}", options.DwgRef),
                         out actualName);
 
