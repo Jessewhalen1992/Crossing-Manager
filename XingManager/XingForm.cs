@@ -35,6 +35,7 @@ namespace XingManager
         private bool _isDirty;
         private bool _isScanning;
         private bool _isAwaitingRenumber;
+        private int? _currentUtmZone;
 
         private const string TemplatePath = @"M:\Drafting\_CURRENT TEMPLATES\Compass_Main.dwt";
         private const string DefaultTemplateLayoutName = "X";
@@ -2404,10 +2405,15 @@ namespace XingManager
 
             EnsureModelSpaceActive();
 
-            var zone = PromptForUtmZone(editor);
+            var zone = _currentUtmZone ?? PromptForUtmZone(editor);
             if (!zone.HasValue)
             {
                 return;
+            }
+
+            if (!_currentUtmZone.HasValue)
+            {
+                _currentUtmZone = zone;
             }
 
             var point = PromptForPoint(editor, zone.Value);
