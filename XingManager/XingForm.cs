@@ -2321,8 +2321,25 @@ namespace XingManager
 
         private static bool HasLatLongData(CrossingRecord record)
         {
-            if (record == null) return false;
-            return !string.IsNullOrWhiteSpace(record.Lat) || !string.IsNullOrWhiteSpace(record.Long);
+            if (record == null)
+            {
+                return false;
+            }
+
+            var hasCoordinate = !string.IsNullOrWhiteSpace(record.Lat) ||
+                                !string.IsNullOrWhiteSpace(record.Long);
+            if (!hasCoordinate)
+            {
+                return false;
+            }
+
+            var owner = record.Owner?.Trim();
+            if (!string.IsNullOrEmpty(owner) && !string.Equals(owner, "-", StringComparison.Ordinal))
+            {
+                return false;
+            }
+
+            return true;
         }
 
         private void CreateOrUpdateLatLongTable()
