@@ -380,7 +380,21 @@ namespace XingManager.Services
             titleCell.Alignment = CellAlignment.MiddleCenter;
             titleCell.TextHeight = TitleTextHeight;
             titleCell.TextStyleId = boldStyleId;
-            titleCell.TextColor = titleColor;
+            var textColorProp = titleCell.GetType().GetProperty("TextColor", BindingFlags.Public | BindingFlags.Instance);
+            if (textColorProp != null && textColorProp.CanWrite)
+            {
+                try { textColorProp.SetValue(titleCell, titleColor, null); }
+                catch { }
+            }
+            else
+            {
+                var contentColorProp = titleCell.GetType().GetProperty("ContentColor", BindingFlags.Public | BindingFlags.Instance);
+                if (contentColorProp != null && contentColorProp.CanWrite)
+                {
+                    try { contentColorProp.SetValue(titleCell, titleColor, null); }
+                    catch { }
+                }
+            }
 
             for (int i = 0; i < ordered.Count; i++)
             {
