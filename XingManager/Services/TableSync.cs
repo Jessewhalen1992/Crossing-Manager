@@ -181,6 +181,12 @@ namespace XingManager.Services
             t.SetDatabaseDefaults();
             t.Position = insertPoint;
 
+            var layerId = LayerUtils.EnsureLayer(db, tr, TableFactory.LayerName);
+            if (!layerId.IsNull)
+            {
+                t.LayerId = layerId;
+            }
+
             var tsDict = (DBDictionary)tr.GetObject(db.TableStyleDictionaryId, OpenMode.ForRead);
             if (tsDict.Contains("Standard"))
                 t.TableStyle = tsDict.GetAt("Standard");
