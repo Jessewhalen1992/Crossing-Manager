@@ -158,15 +158,17 @@ namespace XingManager.Services
 
         public void GetLatLongTableSize(int dataRowCount, out double totalWidth, out double totalHeight)
         {
-            const double W0 = 40.0;
-            const double W1 = 150.0;
-            const double W2 = 90.0;
-            const double W3 = 90.0;
+            const double W0 = 40.0;   // ID
+            const double W1 = 200.0;  // Description
+            const double W2 = 70.0;   // Zone
+            const double W3 = 90.0;   // Latitude
+            const double W4 = 90.0;   // Longitude
+            const double W5 = 120.0;  // DWG_REF
             const double TitleRowHeight = 20.0;
             const double HeaderRowHeight = 25.0;
             const double DataRowHeight = 25.0;
 
-            totalWidth = W0 + W1 + W2 + W3;
+            totalWidth = W0 + W1 + W2 + W3 + W4 + W5;
             totalHeight = TitleRowHeight + HeaderRowHeight + Math.Max(0, dataRowCount) * DataRowHeight;
         }
 
@@ -314,9 +316,11 @@ namespace XingManager.Services
             const double HeaderRowHeight = 25.0;
             const double DataRowHeight = 25.0;
             const double W0 = 40.0;   // ID
-            const double W1 = 150.0;  // Description
-            const double W2 = 90.0;   // Latitude
-            const double W3 = 90.0;   // Longitude
+            const double W1 = 200.0;  // Description
+            const double W2 = 70.0;   // Zone label
+            const double W3 = 90.0;   // Latitude
+            const double W4 = 90.0;   // Longitude
+            const double W5 = 120.0;  // DWG_REF
 
             var ordered = (records ?? new List<CrossingRecord>())
                 .Where(r => r != null)
@@ -340,14 +344,16 @@ namespace XingManager.Services
             const int titleRow = 0;
             const int headerRow = 1;
             const int dataStart = 2;
-            table.SetSize(dataStart + ordered.Count, 4);
+            table.SetSize(dataStart + ordered.Count, 6);
 
-            if (table.Columns.Count >= 4)
+            if (table.Columns.Count >= 6)
             {
                 table.Columns[0].Width = W0;
                 table.Columns[1].Width = W1;
                 table.Columns[2].Width = W2;
                 table.Columns[3].Width = W3;
+                table.Columns[4].Width = W4;
+                table.Columns[5].Width = W5;
             }
 
             for (int r = 0; r < table.Rows.Count; r++)
@@ -358,14 +364,16 @@ namespace XingManager.Services
 
             table.Cells[headerRow, 0].TextString = "ID";
             table.Cells[headerRow, 1].TextString = "DESCRIPTION";
-            table.Cells[headerRow, 2].TextString = "LATITUDE";
-            table.Cells[headerRow, 3].TextString = "LONGITUDE";
+            table.Cells[headerRow, 2].TextString = "ZONE";
+            table.Cells[headerRow, 3].TextString = "LATITUDE";
+            table.Cells[headerRow, 4].TextString = "LONGITUDE";
+            table.Cells[headerRow, 5].TextString = "DWG_REF";
 
             var boldStyleId = EnsureBoldTextStyle(db, tr, "XING_BOLD", "Standard");
             var headerColor = Color.FromColorIndex(ColorMethod.ByAci, 254);
             var titleColor = Color.FromColorIndex(ColorMethod.ByAci, 14);
 
-            for (int c = 0; c < 4; c++)
+            for (int c = 0; c < table.Columns.Count; c++)
             {
                 var cell = table.Cells[headerRow, c];
                 cell.TextHeight = CellTextHeight;
@@ -374,7 +382,7 @@ namespace XingManager.Services
                 cell.BackgroundColor = headerColor;
             }
 
-            table.MergeCells(CellRange.Create(table, titleRow, 0, titleRow, 3));
+            table.MergeCells(CellRange.Create(table, titleRow, 0, titleRow, Math.Max(0, table.Columns.Count - 1)));
             var titleCell = table.Cells[titleRow, 0];
             titleCell.TextString = "WATER CROSSING INFORMATION";
             titleCell.Alignment = CellAlignment.MiddleLeft;
@@ -401,7 +409,7 @@ namespace XingManager.Services
                 var rec = ordered[i];
                 int row = dataStart + i;
 
-                for (int c = 0; c < 4; c++)
+                for (int c = 0; c < table.Columns.Count; c++)
                 {
                     var cell = table.Cells[row, c];
                     cell.Alignment = CellAlignment.MiddleCenter;
@@ -410,8 +418,10 @@ namespace XingManager.Services
 
                 table.Cells[row, 0].TextString = NormalizeXKey(rec?.Crossing);
                 table.Cells[row, 1].TextString = rec?.Description ?? string.Empty;
-                table.Cells[row, 2].TextString = rec?.Lat ?? string.Empty;
-                table.Cells[row, 3].TextString = rec?.Long ?? string.Empty;
+                table.Cells[row, 2].TextString = rec?.ZoneLabel ?? string.Empty;
+                table.Cells[row, 3].TextString = rec?.Lat ?? string.Empty;
+                table.Cells[row, 4].TextString = rec?.Long ?? string.Empty;
+                table.Cells[row, 5].TextString = rec?.DwgRef ?? string.Empty;
             }
 
             space.UpgradeOpen();
@@ -458,9 +468,10 @@ namespace XingManager.Services
             if (table.Columns.Count == 5) return XingTableType.Main;
             if (table.Columns.Count == 3) return XingTableType.Page;
 
-            if (table.Columns.Count == 4 && table.Rows.Count >= 1)
+            if ((table.Columns.Count == 4 || table.Columns.Count >= 6) && table.Rows.Count >= 1)
             {
-                if (HasHeaderRow(table, 4, IsLatLongHeader) || LooksLikeLatLongTable(table))
+                var headerColumns = Math.Min(table.Columns.Count, 6);
+                if (HasHeaderRow(table, headerColumns, IsLatLongHeader) || LooksLikeLatLongTable(table))
                     return XingTableType.LatLong;
             }
 
@@ -614,9 +625,15 @@ namespace XingManager.Services
             var columnCount = table.Columns.Count;
             var records = byKey?.Values ?? Enumerable.Empty<CrossingRecord>();
 
-            var dataRow = GetDataStartRow(table, 4, IsLatLongHeader);
+            var dataRow = FindLatLongDataStartRow(table);
             if (dataRow <= 0)
                 dataRow = 1;
+
+            var hasExtendedLayout = columnCount >= 6;
+            var zoneColumn = hasExtendedLayout ? 2 : -1;
+            var latColumn = hasExtendedLayout ? 3 : 2;
+            var longColumn = hasExtendedLayout ? 4 : 3;
+            var dwgColumn = hasExtendedLayout ? 5 : -1;
 
             for (var row = dataRow; row < table.Rows.Count; row++)
             {
@@ -647,13 +664,17 @@ namespace XingManager.Services
                 var desiredDescription = record.Description ?? string.Empty;
                 var desiredLat = record.Lat ?? string.Empty;
                 var desiredLong = record.Long ?? string.Empty;
+                var desiredZone = record.ZoneLabel ?? string.Empty;
+                var desiredDwg = record.DwgRef ?? string.Empty;
 
                 var rowUpdated = false;
 
                 if (columnCount > 0 && ValueDiffers(rawKey, desiredCrossing)) rowUpdated = true;
                 if (columnCount > 1 && ValueDiffers(ReadCellText(table, row, 1), desiredDescription)) rowUpdated = true;
-                if (columnCount > 2 && ValueDiffers(ReadCellText(table, row, 2), desiredLat)) rowUpdated = true;
-                if (columnCount > 3 && ValueDiffers(ReadCellText(table, row, 3), desiredLong)) rowUpdated = true;
+                if (zoneColumn >= 0 && ValueDiffers(ReadCellText(table, row, zoneColumn), desiredZone)) rowUpdated = true;
+                if (latColumn >= 0 && ValueDiffers(ReadCellText(table, row, latColumn), desiredLat)) rowUpdated = true;
+                if (longColumn >= 0 && ValueDiffers(ReadCellText(table, row, longColumn), desiredLong)) rowUpdated = true;
+                if (dwgColumn >= 0 && ValueDiffers(ReadCellText(table, row, dwgColumn), desiredDwg)) rowUpdated = true;
 
                 if (columnCount > 0) SetCellCrossingValue(table, row, 0, desiredCrossing);
 
@@ -661,10 +682,16 @@ namespace XingManager.Services
                 if (columnCount > 1) { try { descriptionCell = table.Cells[row, 1]; } catch { } SetCellValue(descriptionCell, desiredDescription); }
 
                 Cell latCell = null;
-                if (columnCount > 2) { try { latCell = table.Cells[row, 2]; } catch { } SetCellValue(latCell, desiredLat); }
+                if (latColumn >= 0) { try { latCell = table.Cells[row, latColumn]; } catch { } SetCellValue(latCell, desiredLat); }
 
                 Cell longCell = null;
-                if (columnCount > 3) { try { longCell = table.Cells[row, 3]; } catch { } SetCellValue(longCell, desiredLong); }
+                if (longColumn >= 0) { try { longCell = table.Cells[row, longColumn]; } catch { } SetCellValue(longCell, desiredLong); }
+
+                Cell zoneCell = null;
+                if (zoneColumn >= 0) { try { zoneCell = table.Cells[row, zoneColumn]; } catch { } SetCellValue(zoneCell, desiredZone); }
+
+                Cell dwgCell = null;
+                if (dwgColumn >= 0) { try { dwgCell = table.Cells[row, dwgColumn]; } catch { } SetCellValue(dwgCell, desiredDwg); }
 
                 if (rowUpdated)
                 {
@@ -703,7 +730,21 @@ namespace XingManager.Services
 
         internal static string NormalizeText(string value) => Norm(value);
 
-        internal static int FindLatLongDataStartRow(Table table) => GetDataStartRow(table, 4, IsLatLongHeader);
+        internal static int FindLatLongDataStartRow(Table table)
+        {
+            if (table == null)
+                return 0;
+
+            var columns = table.Columns.Count;
+            if (columns >= 6)
+            {
+                var start = GetDataStartRow(table, 6, IsLatLongHeader);
+                if (start > 0)
+                    return start;
+            }
+
+            return GetDataStartRow(table, Math.Min(columns, 4), IsLatLongHeader);
+        }
         // Create (or return) a bold text style. Inherits face/charset from a base style if present.
         // Create (or return) a bold text style. Portable across AutoCAD versions.
         private static ObjectId EnsureBoldTextStyle(Database db, Transaction tr, string styleName, string baseStyleName)
@@ -1341,6 +1382,12 @@ namespace XingManager.Services
 
         private static bool IsLatLongHeader(List<string> headers)
         {
+            if (headers == null)
+                return false;
+
+            var extended = new[] { "ID", "DESCRIPTION", "ZONE", "LATITUDE", "LONGITUDE", "DWG_REF" };
+            if (CompareHeaders(headers, extended)) return true;
+
             var updated = new[] { "ID", "DESCRIPTION", "LATITUDE", "LONGITUDE" };
             if (CompareHeaders(headers, updated)) return true;
 
@@ -1428,7 +1475,7 @@ namespace XingManager.Services
             }
 
             var normalized = builder.ToString();
-            if (columnIndex == 4)
+            if (columnIndex == 4 || columnIndex == 5)
             {
                 if (MainDwgColumnSynonyms.Contains(normalized)) return "DWGREF";
             }
@@ -1451,15 +1498,20 @@ namespace XingManager.Services
             if (table == null) return false;
 
             var rowCount = table.Rows.Count;
-            if (rowCount <= 0 || table.Columns.Count != 4) return false;
+            if (rowCount <= 0) return false;
+
+            var columns = table.Columns.Count;
+            if (columns != 4 && columns != 6) return false;
 
             var rowsToScan = Math.Min(rowCount, MaxHeaderRowsToScan);
             var candidates = 0;
 
             for (var row = 0; row < rowsToScan; row++)
             {
-                var latText = ReadCellText(table, row, 2);
-                var longText = ReadCellText(table, row, 3);
+                var latColumn = columns >= 6 ? 3 : 2;
+                var longColumn = columns >= 6 ? 4 : 3;
+                var latText = ReadCellText(table, row, latColumn);
+                var longText = ReadCellText(table, row, longColumn);
 
                 if (IsCoordinateValue(latText, -90.0, 90.0) && IsCoordinateValue(longText, -180.0, 180.0))
                 {
@@ -1472,8 +1524,8 @@ namespace XingManager.Services
                 if (string.IsNullOrWhiteSpace(latText) && string.IsNullOrWhiteSpace(longText))
                     continue;
 
-                var normalizedLat = NormalizeHeader(latText, 2);
-                var normalizedLong = NormalizeHeader(longText, 3);
+                var normalizedLat = NormalizeHeader(latText, latColumn);
+                var normalizedLong = NormalizeHeader(longText, longColumn);
                 if (normalizedLat.StartsWith("LAT", StringComparison.Ordinal) &&
                     normalizedLong.StartsWith("LONG", StringComparison.Ordinal))
                 {
@@ -1669,13 +1721,18 @@ namespace XingManager.Services
         private static CrossingRecord FindRecordByLatLongColumns(Table t, int row, IEnumerable<CrossingRecord> records)
         {
             var desc = ReadNorm(t, row, 1);
-            var lat = ReadNorm(t, row, 2);
-            var lng = ReadNorm(t, row, 3);
+            var columns = t?.Columns.Count ?? 0;
+            var zone = columns >= 6 ? ReadNorm(t, row, 2) : string.Empty;
+            var lat = ReadNorm(t, row, columns >= 6 ? 3 : 2);
+            var lng = ReadNorm(t, row, columns >= 6 ? 4 : 3);
+            var dwg = columns >= 6 ? ReadNorm(t, row, 5) : string.Empty;
 
             var candidates = records.Where(r =>
                 string.Equals(Norm(r.Description), desc, StringComparison.Ordinal) &&
                 string.Equals(Norm(r.Lat), lat, StringComparison.Ordinal) &&
-                string.Equals(Norm(r.Long), lng, StringComparison.Ordinal)).ToList();
+                string.Equals(Norm(r.Long), lng, StringComparison.Ordinal) &&
+                (string.IsNullOrEmpty(zone) || string.Equals(Norm(r.Zone), zone, StringComparison.Ordinal)) &&
+                (string.IsNullOrEmpty(dwg) || string.Equals(Norm(r.DwgRef), dwg, StringComparison.Ordinal))).ToList();
             if (candidates.Count == 1) return candidates[0];
 
             candidates = records.Where(r => string.Equals(Norm(r.Description), desc, StringComparison.Ordinal)).ToList();

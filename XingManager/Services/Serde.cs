@@ -13,7 +13,7 @@ namespace XingManager.Services
     /// </summary>
     public class Serde
     {
-        private static readonly string[] Header = { "CROSSING", "OWNER", "DESCRIPTION", "LOCATION", "DWG_REF", "LAT", "LONG" };
+        private static readonly string[] Header = { "CROSSING", "OWNER", "DESCRIPTION", "LOCATION", "DWG_REF", "LAT", "LONG", "ZONE" };
 
         public void Export(string path, IEnumerable<CrossingRecord> records)
         {
@@ -39,7 +39,8 @@ namespace XingManager.Services
                         Escape(record.Location),
                         Escape(record.DwgRef),
                         Escape(record.Lat),
-                        Escape(record.Long)
+                        Escape(record.Long),
+                        Escape(record.Zone)
                     };
 
                     writer.WriteLine(string.Join(",", values));
@@ -92,7 +93,8 @@ namespace XingManager.Services
                         Location = fields[3],
                         DwgRef = fields[4],
                         Lat = fields[5],
-                        Long = fields[6]
+                        Long = fields[6],
+                        Zone = fields.Count > 7 ? fields[7] : string.Empty
                     };
 
                     var key = record.CrossingKey;

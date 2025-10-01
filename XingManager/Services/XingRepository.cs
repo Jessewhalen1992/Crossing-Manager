@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
+using System.Text.RegularExpressions;
 using Autodesk.AutoCAD.ApplicationServices;
 using Autodesk.AutoCAD.DatabaseServices;
 using Autodesk.AutoCAD.Geometry;
@@ -140,7 +141,8 @@ namespace XingManager.Services
                         var dwgRef = GetValue(attributes, "DWG_REF");
                         string lat;
                         string lng;
-                        TryGetLatLong(br, tr, out lat, out lng);
+                        string zone;
+                        TryGetLatLong(br, tr, out lat, out lng, out zone);
 
                         var crossingKey = crossing.Trim().ToUpperInvariant();
                         CrossingRecord record;
@@ -155,6 +157,7 @@ namespace XingManager.Services
                                 DwgRef = dwgRef,
                                 Lat = lat,
                                 Long = lng,
+                                Zone = zone,
                                 CanonicalInstance = ObjectId.Null
                             };
                             records.Add(crossingKey, record);
@@ -175,6 +178,7 @@ namespace XingManager.Services
                             DwgRef = dwgRef,
                             Lat = lat,
                             Long = lng,
+                            Zone = zone,
                             IgnoreForDuplicates = ignore
                         };
 
@@ -190,6 +194,7 @@ namespace XingManager.Services
                             record.DwgRef = dwgRef;
                             record.Lat = lat;
                             record.Long = lng;
+                            record.Zone = zone;
                         }
                         else if (record.CanonicalInstance.IsNull)
                         {
@@ -200,6 +205,7 @@ namespace XingManager.Services
                             record.DwgRef = dwgRef;
                             record.Lat = lat;
                             record.Long = lng;
+                            record.Zone = zone;
                         }
                     }
                 }
@@ -247,7 +253,7 @@ namespace XingManager.Services
                         WriteAttribute(tr, br, "DESCRIPTION", record.Description);
                         WriteAttribute(tr, br, "LOCATION", record.Location);
                         WriteAttribute(tr, br, "DWG_REF", record.DwgRef);
-                        SetLatLong(br, tr, record.Lat, record.Long);
+                        SetLatLong(br, tr, record.Lat, record.Long, record.Zone);
                     }
                 }
 
@@ -303,7 +309,7 @@ namespace XingManager.Services
                     WriteAttribute(tr, br, "DESCRIPTION", record.Description);
                     WriteAttribute(tr, br, "LOCATION", record.Location);
                     WriteAttribute(tr, br, "DWG_REF", record.DwgRef);
-                    SetLatLong(br, tr, record.Lat, record.Long);
+                    SetLatLong(br, tr, record.Lat, record.Long, record.Zone);
 
                     tr.Commit();
                     return br.ObjectId;
@@ -387,10 +393,11 @@ namespace XingManager.Services
             }
         }
 
-        public bool TryGetLatLong(BlockReference br, Transaction tr, out string lat, out string lng)
+        public bool TryGetLatLong(BlockReference br, Transaction tr, out string lat, out string lng, out string zone)
         {
             lat = string.Empty;
             lng = string.Empty;
+            zone = string.Empty;
             if (br == null) return false;
 
             if (br.ExtensionDictionary.IsNull)
@@ -411,10 +418,13 @@ namespace XingManager.Services
             if (values.Length >= 2)
                 lng = Convert.ToString(values[1].Value, CultureInfo.InvariantCulture);
 
-            return true;
+            if (values.Length >= 3)
+                zone = Convert.ToString(values[2].Value, CultureInfo.InvariantCulture);
+
+            return !string.IsNullOrEmpty(lat) || !string.IsNullOrEmpty(lng) || !string.IsNullOrEmpty(zone);
         }
 
-        public void SetLatLong(BlockReference br, Transaction tr, string lat, string lng)
+        public void SetLatLong(BlockReference br, Transaction tr, string lat, string lng, string zone)
         {
             if (br == null) throw new ArgumentNullException(nameof(br));
             if (tr == null) throw new ArgumentNullException(nameof(tr));
@@ -435,7 +445,8 @@ namespace XingManager.Services
 
             xrec.Data = new ResultBuffer(
                 new TypedValue((int)DxfCode.Text, lat ?? string.Empty),
-                new TypedValue((int)DxfCode.Text, lng ?? string.Empty));
+                new TypedValue((int)DxfCode.Text, lng ?? string.Empty),
+                new TypedValue((int)DxfCode.Text, zone ?? string.Empty));
         }
 
         private static void CollectLatLongRows(Table table, IList<LatLongRowInfo> rows)
@@ -452,17 +463,30 @@ namespace XingManager.Services
                 startRow = 1;
             }
 
+            var columnCount = table.Columns.Count;
+            var hasZoneColumn = columnCount >= 6;
+            var hasDwgColumn = columnCount >= 6;
+
+            var zoneColumn = hasZoneColumn ? 2 : -1;
+            var latColumn = hasZoneColumn ? 3 : 2;
+            var longColumn = hasZoneColumn ? 4 : 3;
+            var dwgColumn = hasDwgColumn ? 5 : -1;
+
             for (var row = startRow; row < table.Rows.Count; row++)
             {
                 var crossing = TableSync.ResolveCrossingKey(table, row, 0);
                 var description = TableSync.ReadCellTextSafe(table, row, 1);
-                var latitude = TableSync.ReadCellTextSafe(table, row, 2);
-                var longitude = TableSync.ReadCellTextSafe(table, row, 3);
+                var zoneLabel = zoneColumn >= 0 ? TableSync.ReadCellTextSafe(table, row, zoneColumn) : string.Empty;
+                var latitude = TableSync.ReadCellTextSafe(table, row, latColumn);
+                var longitude = TableSync.ReadCellTextSafe(table, row, longColumn);
+                var dwgRef = dwgColumn >= 0 ? TableSync.ReadCellTextSafe(table, row, dwgColumn) : string.Empty;
 
                 if (string.IsNullOrWhiteSpace(crossing) &&
                     string.IsNullOrWhiteSpace(description) &&
                     string.IsNullOrWhiteSpace(latitude) &&
-                    string.IsNullOrWhiteSpace(longitude))
+                    string.IsNullOrWhiteSpace(longitude) &&
+                    string.IsNullOrWhiteSpace(zoneLabel) &&
+                    string.IsNullOrWhiteSpace(dwgRef))
                 {
                     continue;
                 }
@@ -472,7 +496,9 @@ namespace XingManager.Services
                     Crossing = crossing,
                     Description = description,
                     Latitude = latitude,
-                    Longitude = longitude
+                    Longitude = longitude,
+                    Zone = ExtractZoneValue(zoneLabel),
+                    DwgRef = dwgRef
                 });
             }
         }
@@ -493,6 +519,7 @@ namespace XingManager.Services
 
                 var latitude = row.Latitude?.Trim();
                 var longitude = row.Longitude?.Trim();
+                var zone = row.Zone?.Trim();
 
                 if (!string.IsNullOrWhiteSpace(latitude))
                 {
@@ -502,6 +529,17 @@ namespace XingManager.Services
                 if (!string.IsNullOrWhiteSpace(longitude))
                 {
                     record.Long = longitude;
+                }
+
+                if (!string.IsNullOrWhiteSpace(zone))
+                {
+                    record.Zone = zone;
+                }
+
+                var dwgRef = row.DwgRef?.Trim();
+                if (!string.IsNullOrWhiteSpace(dwgRef) && string.IsNullOrWhiteSpace(record.DwgRef))
+                {
+                    record.DwgRef = dwgRef;
                 }
             }
         }
@@ -553,10 +591,14 @@ namespace XingManager.Services
             {
                 var latNorm = NormalizeForComparison(row.Latitude);
                 var longNorm = NormalizeForComparison(row.Longitude);
+                var zoneNorm = NormalizeForComparison(row.Zone);
+                var dwgNorm = NormalizeForComparison(row.DwgRef);
 
                 var matches = candidates
                     .Where(r => string.Equals(NormalizeForComparison(r?.Lat), latNorm, StringComparison.Ordinal) &&
-                                string.Equals(NormalizeForComparison(r?.Long), longNorm, StringComparison.Ordinal))
+                                string.Equals(NormalizeForComparison(r?.Long), longNorm, StringComparison.Ordinal) &&
+                                (string.IsNullOrEmpty(zoneNorm) || string.Equals(NormalizeForComparison(r?.Zone), zoneNorm, StringComparison.Ordinal)) &&
+                                (string.IsNullOrEmpty(dwgNorm) || string.Equals(NormalizeForComparison(r?.DwgRef), dwgNorm, StringComparison.Ordinal)))
                     .ToList();
 
                 if (matches.Count == 1)
@@ -573,24 +615,25 @@ namespace XingManager.Services
             if (table == null)
                 return false;
 
-            if (table.Columns.Count != 4 || table.Rows.Count <= 0)
+            if ((table.Columns.Count != 4 && table.Columns.Count != 6) || table.Rows.Count <= 0)
                 return false;
 
             if (TableSync.FindLatLongDataStartRow(table) > 0)
                 return true;
 
             var normalizedHeaders = new List<string>(4);
-            for (var column = 0; column < Math.Min(4, table.Columns.Count); column++)
+            var maxColumns = Math.Min(table.Columns.Count, 6);
+            for (var column = 0; column < maxColumns; column++)
             {
                 normalizedHeaders.Add(NormalizeForComparison(TableSync.ReadCellTextSafe(table, 0, column)));
             }
 
-            var updatedHeaders = new[] { "ID", "DESCRIPTION", "LATITUDE", "LONGITUDE" };
-            if (normalizedHeaders.SequenceEqual(updatedHeaders))
+            var updatedHeaders = new[] { "ID", "DESCRIPTION", "ZONE", "LATITUDE", "LONGITUDE", "DWG_REF" };
+            if (normalizedHeaders.Count == updatedHeaders.Length && normalizedHeaders.SequenceEqual(updatedHeaders))
                 return true;
 
             var legacyHeaders = new[] { "XING", "DESCRIPTION", "LAT", "LONG" };
-            return normalizedHeaders.SequenceEqual(legacyHeaders);
+            return normalizedHeaders.Count == legacyHeaders.Length && normalizedHeaders.SequenceEqual(legacyHeaders);
         }
 
         private static string NormalizeForComparison(string value)
@@ -615,6 +658,37 @@ namespace XingManager.Services
             public string Description { get; set; }
             public string Latitude { get; set; }
             public string Longitude { get; set; }
+            public string Zone { get; set; }
+            public string DwgRef { get; set; }
+        }
+
+        private static string ExtractZoneValue(string zoneLabel)
+        {
+            if (string.IsNullOrWhiteSpace(zoneLabel))
+            {
+                return string.Empty;
+            }
+
+            var trimmed = TableSync.NormalizeText(zoneLabel) ?? string.Empty;
+            trimmed = trimmed.Trim();
+            if (trimmed.Length == 0)
+            {
+                return string.Empty;
+            }
+
+            var match = Regex.Match(trimmed, @"(\d+)");
+            if (match.Success)
+            {
+                return match.Groups[1].Value.TrimStart('0');
+            }
+
+            if (trimmed.StartsWith("ZONE", StringComparison.OrdinalIgnoreCase))
+            {
+                var remainder = trimmed.Substring(4).Trim();
+                return remainder.Length > 0 ? remainder : string.Empty;
+            }
+
+            return trimmed;
         }
 
         private static string GetBlockName(BlockReference br, Transaction tr)

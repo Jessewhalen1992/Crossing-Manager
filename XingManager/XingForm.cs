@@ -141,6 +141,7 @@ namespace XingManager
             gridCrossings.Columns.Add(CreateTextColumn("Owner", "OWNER", 120));
             gridCrossings.Columns.Add(CreateTextColumn("Description", "DESCRIPTION", 200));
             gridCrossings.Columns.Add(CreateTextColumn("Location", "LOCATION", 200));
+            gridCrossings.Columns.Add(CreateTextColumn("Zone", "ZONE", 80));
             gridCrossings.Columns.Add(CreateTextColumn("DwgRef", "DWG_REF", 100));
             gridCrossings.Columns.Add(CreateTextColumn("Lat", "LAT", 100));
             gridCrossings.Columns.Add(CreateTextColumn("Long", "LONG", 100));
@@ -148,6 +149,7 @@ namespace XingManager
             gridCrossings.DataSource = _records;
             gridCrossings.CellValueChanged += GridCrossingsOnCellValueChanged;
             gridCrossings.CurrentCellDirtyStateChanged += GridCrossingsOnCurrentCellDirtyStateChanged;
+            gridCrossings.CellFormatting += GridCrossingsOnCellFormatting;
         }
 
         private static DataGridViewTextBoxColumn CreateTextColumn(string propertyName, string header, int width)
@@ -171,6 +173,25 @@ namespace XingManager
         {
             if (_isScanning) return;
             _isDirty = true;
+        }
+
+        private void GridCrossingsOnCellFormatting(object sender, DataGridViewCellFormattingEventArgs e)
+        {
+            if (e == null || e.ColumnIndex < 0)
+                return;
+
+            var column = gridCrossings.Columns[e.ColumnIndex];
+            if (column == null)
+                return;
+
+            if (!string.Equals(column.DataPropertyName, nameof(CrossingRecord.Zone), StringComparison.Ordinal))
+                return;
+
+            if (e.Value is string zone && !string.IsNullOrWhiteSpace(zone))
+            {
+                e.Value = string.Format(CultureInfo.InvariantCulture, "ZONE {0}", zone.Trim());
+                e.FormattingApplied = true;
+            }
         }
 
         // ===== Buttons (Designer wires to these; keep them) =====
@@ -2447,6 +2468,7 @@ namespace XingManager
 
                 record.Lat = latString;
                 record.Long = longString;
+                record.Zone = zone.Value.ToString(CultureInfo.InvariantCulture);
                 gridCrossings.Refresh();
                 _isDirty = true;
 

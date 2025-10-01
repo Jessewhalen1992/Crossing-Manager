@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Drawing;
+using System.Globalization;
 using System.Linq;                    // <-- needed for Where/Select/GroupBy
 using System.Windows.Forms;
 using Autodesk.AutoCAD.DatabaseServices;
@@ -25,6 +26,7 @@ namespace XingManager.Services
             public string Description { get; set; }
             public string Location { get; set; }
             public string DwgRef { get; set; }
+            public string Zone { get; set; }
             public string Lat { get; set; }
             public string Long { get; set; }
 
@@ -84,6 +86,7 @@ namespace XingManager.Services
                 record.Description = selected.Description;
                 record.Location = selected.Location;
                 record.DwgRef = selected.DwgRef;
+                record.Zone = selected.Zone;
                 record.Lat = selected.Lat;
                 record.Long = selected.Long;
 
@@ -100,6 +103,7 @@ namespace XingManager.Services
                         ctx.Description = selected.Description;
                         ctx.Location = selected.Location;
                         ctx.DwgRef = selected.DwgRef;
+                        ctx.Zone = selected.Zone;
                         ctx.Lat = selected.Lat;
                         ctx.Long = selected.Long;
                     }
@@ -159,6 +163,7 @@ namespace XingManager.Services
                         Description = ctx.Description ?? string.Empty,
                         Location = ctx.Location ?? string.Empty,
                         DwgRef = ctx.DwgRef ?? string.Empty,
+                        Zone = ctx.Zone ?? string.Empty,
                         Lat = ctx.Lat ?? string.Empty,
                         Long = ctx.Long ?? string.Empty,
                         Canonical = objectId == record.CanonicalInstance
@@ -194,6 +199,7 @@ namespace XingManager.Services
                 Description = string.Empty,
                 Location = string.Empty,
                 DwgRef = string.Empty,
+                Zone = string.Empty,
                 Lat = string.Empty,
                 Long = string.Empty
             };
@@ -209,10 +215,22 @@ namespace XingManager.Services
             public string Description { get; set; }
             public string Location { get; set; }
             public string DwgRef { get; set; }
+            public string Zone { get; set; }
             public string Lat { get; set; }
             public string Long { get; set; }
             public ObjectId ObjectId { get; set; }
             public bool Canonical { get; set; }
+
+            public string ZoneLabel
+            {
+                get
+                {
+                    if (string.IsNullOrWhiteSpace(Zone))
+                        return string.Empty;
+
+                    return string.Format(CultureInfo.InvariantCulture, "ZONE {0}", Zone.Trim());
+                }
+            }
         }
 
         private static bool RequiresResolution(List<DuplicateCandidate> candidates)
@@ -244,6 +262,7 @@ namespace XingManager.Services
                 NormalizeAttribute(candidate.Description),
                 NormalizeAttribute(candidate.Location),
                 NormalizeAttribute(candidate.DwgRef),
+                NormalizeAttribute(candidate.Zone),
                 NormalizeAttribute(candidate.Lat),
                 NormalizeAttribute(candidate.Long));
         }
@@ -336,6 +355,13 @@ namespace XingManager.Services
                     ReadOnly = true,
                     Width = 200
                 };
+                var colZone = new DataGridViewTextBoxColumn
+                {
+                    DataPropertyName = nameof(DuplicateCandidate.ZoneLabel),
+                    HeaderText = "Zone",
+                    ReadOnly = true,
+                    Width = 80
+                };
                 var colDwgRef = new DataGridViewTextBoxColumn
                 {
                     DataPropertyName = nameof(DuplicateCandidate.DwgRef),
@@ -367,7 +393,7 @@ namespace XingManager.Services
 
                 _grid.Columns.AddRange(
                     colCrossing, colLayout, colOwner, colDescription,
-                    colLocation, colDwgRef, colLat, colLong, colCanonical);
+                    colLocation, colZone, colDwgRef, colLat, colLong, colCanonical);
 
                 _grid.CellContentClick += GridOnCellContentClick;
 
@@ -516,9 +542,19 @@ namespace XingManager.Services
                     get { return Representative.Location; }
                 }
 
+                public string Zone
+                {
+                    get { return Representative.Zone; }
+                }
+
                 public string DwgRef
                 {
                     get { return Representative.DwgRef; }
+                }
+
+                public string ZoneLabel
+                {
+                    get { return Representative.ZoneLabel; }
                 }
 
                 public string Lat
