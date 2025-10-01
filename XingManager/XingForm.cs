@@ -5,6 +5,7 @@ using Autodesk.AutoCAD.Geometry;
 using System;
 using System.Collections.Generic;
 using System.ComponentModel;
+using System.Drawing;
 using System.Globalization;
 using System.IO;
 using System.Linq;
@@ -1373,9 +1374,10 @@ namespace XingManager
 
         private sealed class AllPagesOption
         {
-            public string DwgRef;
-            public bool IncludeAdjacent;
-            public string SelectedLocation;
+            public string DwgRef { get; set; }
+            public bool IncludeAdjacent { get; set; }
+            public string SelectedLocation { get; set; }
+            public bool LocationEditable { get; set; }
         }
 
         private sealed class PageGenerationOptions
@@ -1586,11 +1588,40 @@ namespace XingManager
                     {
                         DwgRef = dr,
                         IncludeAdjacent = true,
-                        SelectedLocation = (locs.Count > 0 ? locs[0] : string.Empty)
+                        SelectedLocation = (locs.Count > 0 ? locs[0] : string.Empty),
+                        LocationEditable = locs.Count > 1
                     };
                     binding.Add(opt);
                 }
                 grid.DataSource = binding;
+
+                void ApplyLocationCellState()
+                {
+                    foreach (DataGridViewRow row in grid.Rows)
+                    {
+                        if (row?.Cells.Count <= colLoc.Index) continue;
+                        if (row.DataBoundItem is AllPagesOption opt)
+                        {
+                            var cell = row.Cells[colLoc.Index] as DataGridViewComboBoxCell;
+                            if (cell == null) continue;
+
+                            var readOnly = !opt.LocationEditable;
+                            cell.ReadOnly = readOnly;
+                            cell.DisplayStyle = readOnly
+                                ? DataGridViewComboBoxDisplayStyle.Nothing
+                                : DataGridViewComboBoxDisplayStyle.DropDownButton;
+                            cell.Style.ForeColor = readOnly
+                                ? SystemColors.GrayText
+                                : grid.DefaultCellStyle.ForeColor;
+                            cell.Style.BackColor = readOnly
+                                ? SystemColors.Control
+                                : grid.DefaultCellStyle.BackColor;
+                        }
+                    }
+                }
+
+                ApplyLocationCellState();
+                grid.DataBindingComplete += (s, e) => ApplyLocationCellState();
 
                 // Populate the LOCATION dropdown per row right before editing
                 grid.CellBeginEdit += (s, e) =>
@@ -1598,7 +1629,13 @@ namespace XingManager
                     if (e.RowIndex < 0) return;
                     if (!(grid.Columns[e.ColumnIndex] is DataGridViewComboBoxColumn)) return;
 
-                    var opt = binding[e.RowIndex];
+                    if (!(grid.Rows[e.RowIndex].DataBoundItem is AllPagesOption opt)) return;
+                    if (!opt.LocationEditable)
+                    {
+                        e.Cancel = true;
+                        return;
+                    }
+
                     var dr = opt.DwgRef;
                     var items = locMap.ContainsKey(dr) ? locMap[dr] : new List<string>();
 
