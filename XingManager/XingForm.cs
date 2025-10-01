@@ -37,6 +37,7 @@ namespace XingManager
 
         private const string TemplatePath = @"M:\Drafting\_CURRENT TEMPLATES\Compass_Main.dwt";
         private const string TemplateLayoutName = "X";
+        private const string CreateAllPagesDisplayText = "Create ALL XING pages...";
 
         public XingForm(
             Document doc,
@@ -1379,15 +1380,18 @@ namespace XingManager
 
         private sealed class PageGenerationOptions
         {
-            public PageGenerationOptions(string dwgRef, bool includeAdjacent)
+            public PageGenerationOptions(string dwgRef, bool includeAdjacent, bool generateAll = false)
             {
                 DwgRef = dwgRef;
                 IncludeAdjacent = includeAdjacent;
+                GenerateAll = generateAll;
             }
 
             public string DwgRef { get; }
 
             public bool IncludeAdjacent { get; }
+
+            public bool GenerateAll { get; }
         }
 
         private void GenerateAllXingPages()
@@ -1655,7 +1659,15 @@ namespace XingManager
             }
 
             var options = PromptForPageOptions("Select DWG_REF", choices);
-            if (options == null || string.IsNullOrEmpty(options.DwgRef)) return;
+            if (options == null) return;
+
+            if (options.GenerateAll)
+            {
+                GenerateAllXingPages();
+                return;
+            }
+
+            if (string.IsNullOrEmpty(options.DwgRef)) return;
 
             try
             {
@@ -1893,8 +1905,10 @@ namespace XingManager
                     DropDownStyle = ComboBoxStyle.DropDownList,
                     Margin = new Padding(3, 0, 3, 6)
                 };
-                combo.Items.AddRange(choices.Cast<object>().ToArray());
-                if (choices.Count > 0) combo.SelectedIndex = 0;
+                combo.Items.Add(CreateAllPagesDisplayText);
+                foreach (var choice in choices)
+                    combo.Items.Add(choice);
+                if (combo.Items.Count > 0) combo.SelectedIndex = 0;
 
                 var adjacentCheckbox = new CheckBox
                 {
@@ -1903,6 +1917,16 @@ namespace XingManager
                     AutoSize = true,
                     Anchor = AnchorStyles.Left,
                     Margin = new Padding(3, 6, 3, 0)
+                };
+
+                combo.SelectedIndexChanged += (s, e) =>
+                {
+                    var isAll = string.Equals(combo.SelectedItem as string, CreateAllPagesDisplayText, StringComparison.Ordinal);
+                    adjacentCheckbox.Enabled = !isAll;
+                    if (isAll)
+                    {
+                        adjacentCheckbox.Checked = true;
+                    }
                 };
 
                 layout.Controls.Add(label, 0, 0);
@@ -1933,9 +1957,14 @@ namespace XingManager
                 }
 
                 var selected = combo.SelectedItem as string;
-                if (string.IsNullOrWhiteSpace(selected))
+                if (string.IsNullOrEmpty(selected))
                 {
                     return null;
+                }
+
+                if (string.Equals(selected, CreateAllPagesDisplayText, StringComparison.Ordinal))
+                {
+                    return new PageGenerationOptions(null, true, generateAll: true);
                 }
 
                 return new PageGenerationOptions(selected, adjacentCheckbox.Checked);
