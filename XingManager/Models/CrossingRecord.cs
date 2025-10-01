@@ -25,6 +25,22 @@ namespace XingManager.Models
 
         public string Long { get; set; }
 
+        public string Zone { get; set; }
+
+        public string ZoneLabel
+        {
+            get
+            {
+                var zone = Zone?.Trim();
+                if (string.IsNullOrEmpty(zone))
+                {
+                    return string.Empty;
+                }
+
+                return string.Format(CultureInfo.InvariantCulture, "ZONE {0}", zone);
+            }
+        }
+
         public List<ObjectId> AllInstances { get; } = new List<ObjectId>();
 
         public ObjectId CanonicalInstance { get; set; }
@@ -48,6 +64,7 @@ namespace XingManager.Models
             DwgRef = other.DwgRef;
             Lat = other.Lat;
             Long = other.Long;
+            Zone = other.Zone;
         }
 
         public override string ToString()
