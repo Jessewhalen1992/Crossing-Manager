@@ -39,6 +39,7 @@ namespace XingManager
         private const string TemplatePath = @"M:\Drafting\_CURRENT TEMPLATES\Compass_Main.dwt";
         private const string TemplateLayoutName = "X";
         private const string CreateAllPagesDisplayText = "Create ALL XING pages...";
+        private static readonly IComparer<string> DwgRefComparer = new NaturalDwgRefComparer();
 
         public XingForm(
             Document doc,
@@ -1386,6 +1387,98 @@ namespace XingManager
             public bool LocationEditable { get; set; }
         }
 
+        private sealed class NaturalDwgRefComparer : IComparer<string>
+        {
+            public int Compare(string x, string y)
+            {
+                if (ReferenceEquals(x, y)) return 0;
+                if (x == null) return -1;
+                if (y == null) return 1;
+
+                int ix = 0, iy = 0;
+                while (ix < x.Length && iy < y.Length)
+                {
+                    var segX = ReadSegment(x, ref ix, out bool isNumericX);
+                    var segY = ReadSegment(y, ref iy, out bool isNumericY);
+
+                    if (isNumericX && isNumericY)
+                    {
+                        int cmp = CompareNumericSegments(segX, segY);
+                        if (cmp != 0) return cmp;
+                        continue;
+                    }
+
+                    if (isNumericX != isNumericY)
+                    {
+                        return isNumericX ? -1 : 1;
+                    }
+
+                    int textCmp = string.Compare(segX, segY, StringComparison.OrdinalIgnoreCase);
+                    if (textCmp != 0) return textCmp;
+                }
+
+                if (ix < x.Length) return 1;
+                if (iy < y.Length) return -1;
+                return 0;
+            }
+
+            private static string ReadSegment(string value, ref int index, out bool isNumeric)
+            {
+                if (string.IsNullOrEmpty(value) || index >= value.Length)
+                {
+                    isNumeric = false;
+                    return string.Empty;
+                }
+
+                isNumeric = char.IsDigit(value[index]);
+                int start = index;
+                while (index < value.Length && char.IsDigit(value[index]) == isNumeric)
+                {
+                    index++;
+                }
+
+                return value.Substring(start, index - start);
+            }
+
+            private static int CompareNumericSegments(string leftSegment, string rightSegment)
+            {
+                var left = TrimLeadingZeros(leftSegment, out int leftTrimmed);
+                var right = TrimLeadingZeros(rightSegment, out int rightTrimmed);
+
+                if (left.Length != right.Length)
+                    return left.Length < right.Length ? -1 : 1;
+
+                int cmp = string.Compare(left, right, StringComparison.Ordinal);
+                if (cmp != 0) return cmp;
+
+                return leftTrimmed.CompareTo(rightTrimmed);
+            }
+
+            private static string TrimLeadingZeros(string value, out int trimmedCount)
+            {
+                if (string.IsNullOrEmpty(value))
+                {
+                    trimmedCount = 0;
+                    return string.Empty;
+                }
+
+                int i = 0;
+                while (i < value.Length && value[i] == '0')
+                {
+                    i++;
+                }
+
+                if (i == value.Length)
+                {
+                    trimmedCount = Math.Max(0, value.Length - 1);
+                    return "0";
+                }
+
+                trimmedCount = i;
+                return value.Substring(i);
+            }
+        }
+
         private sealed class PageGenerationOptions
         {
             public PageGenerationOptions(string dwgRef, bool includeAdjacent, bool generateAll = false)
@@ -1408,7 +1501,7 @@ namespace XingManager
                 .Select(r => r.DwgRef ?? string.Empty)
                 .Where(s => !string.IsNullOrWhiteSpace(s))
                 .Distinct(StringComparer.OrdinalIgnoreCase)
-                .OrderBy(s => s, StringComparer.OrdinalIgnoreCase)
+                .OrderBy(s => s, DwgRefComparer)
                 .ToList();
 
             if (refs.Count == 0)
@@ -1435,6 +1528,10 @@ namespace XingManager
             // Dialog: per DWG_REF -> IncludeAdjacent + LOCATION (if multiple)
             var options = PromptForAllPagesOptions(refs, locMap);
             if (options == null || options.Count == 0) return;
+
+            options = options
+                .OrderBy(o => o?.DwgRef ?? string.Empty, DwgRefComparer)
+                .ToList();
 
             const double TableVerticalGap = 10.0;
 
@@ -1536,7 +1633,7 @@ namespace XingManager
                 .Where(HasLatLongData)
                 .Where(r => !string.IsNullOrWhiteSpace(r.DwgRef))
                 .GroupBy(r => r.DwgRef ?? string.Empty, StringComparer.OrdinalIgnoreCase)
-                .OrderBy(g => g.Key, StringComparer.OrdinalIgnoreCase)
+                .OrderBy(g => g.Key, DwgRefComparer)
                 .ToList();
 
             if (latGroups.Count == 0)
@@ -1692,7 +1789,7 @@ namespace XingManager
                     var opt = new AllPagesOption
                     {
                         DwgRef = dr,
-                        IncludeAdjacent = true,
+                        IncludeAdjacent = false,
                         SelectedLocation = (locs.Count > 0 ? locs[0] : string.Empty),
                         LocationEditable = locs.Count > 1
                     };
@@ -1790,7 +1887,7 @@ namespace XingManager
                 .Select(r => r.DwgRef ?? string.Empty)
                 .Where(s => !string.IsNullOrWhiteSpace(s))
                 .Distinct(StringComparer.OrdinalIgnoreCase)
-                .OrderBy(s => s, StringComparer.OrdinalIgnoreCase)
+                .OrderBy(s => s, DwgRefComparer)
                 .ToList();
 
             if (!choices.Any())

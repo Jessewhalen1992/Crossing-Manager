@@ -158,15 +158,16 @@ namespace XingManager.Services
 
         public void GetLatLongTableSize(int dataRowCount, out double totalWidth, out double totalHeight)
         {
-            const double W0 = 43.5;
-            const double W1 = 393.5;
-            const double W2 = 144.5;
-            const double W3 = 144.5;
-            const double RowH = 25.0;
-            const int HeaderRows = 1;
+            const double W0 = 40.0;
+            const double W1 = 150.0;
+            const double W2 = 90.0;
+            const double W3 = 90.0;
+            const double TitleRowHeight = 20.0;
+            const double HeaderRowHeight = 25.0;
+            const double DataRowHeight = 25.0;
 
             totalWidth = W0 + W1 + W2 + W3;
-            totalHeight = (HeaderRows + Math.Max(0, dataRowCount)) * RowH;
+            totalHeight = TitleRowHeight + HeaderRowHeight + Math.Max(0, dataRowCount) * DataRowHeight;
         }
 
         public void CreateAndInsertPageTable(
@@ -307,12 +308,15 @@ namespace XingManager.Services
             if (tr == null) throw new ArgumentNullException(nameof(tr));
             if (space == null) throw new ArgumentNullException(nameof(space));
 
-            const double TextH = 10.0;
-            const double RowH = 25.0;
-            const double W0 = 43.5;   // ID
-            const double W1 = 393.5;  // Description
-            const double W2 = 144.5;  // Latitude
-            const double W3 = 144.5;  // Longitude
+            const double CellTextHeight = 10.0;
+            const double TitleTextHeight = 12.0;
+            const double TitleRowHeight = 20.0;
+            const double HeaderRowHeight = 25.0;
+            const double DataRowHeight = 25.0;
+            const double W0 = 40.0;   // ID
+            const double W1 = 150.0;  // Description
+            const double W2 = 90.0;   // Latitude
+            const double W3 = 90.0;   // Longitude
 
             var ordered = (records ?? new List<CrossingRecord>())
                 .Where(r => r != null)
@@ -333,9 +337,10 @@ namespace XingManager.Services
             if (tsDict.Contains("Standard"))
                 table.TableStyle = tsDict.GetAt("Standard");
 
-            int headerRow = 1;
-            int dataStart = 2;
-            table.SetSize(2 + ordered.Count, 4);
+            const int titleRow = 0;
+            const int headerRow = 1;
+            const int dataStart = 2;
+            table.SetSize(dataStart + ordered.Count, 4);
 
             if (table.Columns.Count >= 4)
             {
@@ -346,7 +351,10 @@ namespace XingManager.Services
             }
 
             for (int r = 0; r < table.Rows.Count; r++)
-                table.Rows[r].Height = RowH;
+                table.Rows[r].Height = DataRowHeight;
+
+            table.Rows[titleRow].Height = TitleRowHeight;
+            table.Rows[headerRow].Height = HeaderRowHeight;
 
             table.Cells[headerRow, 0].TextString = "ID";
             table.Cells[headerRow, 1].TextString = "DESCRIPTION";
@@ -355,15 +363,24 @@ namespace XingManager.Services
 
             var boldStyleId = EnsureBoldTextStyle(db, tr, "XING_BOLD", "Standard");
             var headerColor = Color.FromColorIndex(ColorMethod.ByAci, 254);
+            var titleColor = Color.FromColorIndex(ColorMethod.ByAci, 14);
 
             for (int c = 0; c < 4; c++)
             {
                 var cell = table.Cells[headerRow, c];
-                cell.TextHeight = TextH;
+                cell.TextHeight = CellTextHeight;
                 cell.Alignment = CellAlignment.MiddleCenter;
                 cell.TextStyleId = boldStyleId;
                 cell.BackgroundColor = headerColor;
             }
+
+            table.MergeCells(CellRange.Create(table, titleRow, 0, titleRow, 3));
+            var titleCell = table.Cells[titleRow, 0];
+            titleCell.TextString = "WATER CROSSING INFORMATION";
+            titleCell.Alignment = CellAlignment.MiddleCenter;
+            titleCell.TextHeight = TitleTextHeight;
+            titleCell.TextStyleId = boldStyleId;
+            titleCell.TextColor = titleColor;
 
             for (int i = 0; i < ordered.Count; i++)
             {
@@ -374,28 +391,13 @@ namespace XingManager.Services
                 {
                     var cell = table.Cells[row, c];
                     cell.Alignment = CellAlignment.MiddleCenter;
-                    cell.TextHeight = TextH;
+                    cell.TextHeight = CellTextHeight;
                 }
 
                 table.Cells[row, 0].TextString = NormalizeXKey(rec?.Crossing);
                 table.Cells[row, 1].TextString = rec?.Description ?? string.Empty;
                 table.Cells[row, 2].TextString = rec?.Lat ?? string.Empty;
                 table.Cells[row, 3].TextString = rec?.Long ?? string.Empty;
-            }
-
-            try { table.DeleteRows(0, 1); } catch { }
-
-            if (table.Rows.Count > 0)
-            {
-                table.Rows[0].Height = RowH;
-                for (int c = 0; c < 4; c++)
-                {
-                    var cell = table.Cells[0, c];
-                    cell.Alignment = CellAlignment.MiddleCenter;
-                    cell.TextHeight = TextH;
-                    cell.TextStyleId = boldStyleId;
-                    cell.BackgroundColor = headerColor;
-                }
             }
 
             space.UpgradeOpen();

@@ -55,19 +55,19 @@ namespace XingManager
             this.gridCrossings.AutoSizeColumnsMode = System.Windows.Forms.DataGridViewAutoSizeColumnsMode.Fill;
             this.gridCrossings.ColumnHeadersHeightSizeMode = System.Windows.Forms.DataGridViewColumnHeadersHeightSizeMode.AutoSize;
             this.gridCrossings.Dock = System.Windows.Forms.DockStyle.Fill;
-            this.gridCrossings.Location = new System.Drawing.Point(0, 35);
+            this.gridCrossings.Location = new System.Drawing.Point(0, 47);
             this.gridCrossings.MultiSelect = false;
             this.gridCrossings.Name = "gridCrossings";
             this.gridCrossings.RowHeadersVisible = false;
             this.gridCrossings.SelectionMode = System.Windows.Forms.DataGridViewSelectionMode.FullRowSelect;
-            this.gridCrossings.Size = new System.Drawing.Size(900, 515);
+            this.gridCrossings.Size = new System.Drawing.Size(900, 503);
             this.gridCrossings.TabIndex = 0;
             // 
             // btnRescan
             // 
             this.btnRescan.Location = new System.Drawing.Point(3, 3);
             this.btnRescan.Name = "btnRescan";
-            this.btnRescan.Size = new System.Drawing.Size(75, 25);
+            this.btnRescan.Size = new System.Drawing.Size(75, 32);
             this.btnRescan.TabIndex = 0;
             this.btnRescan.Text = "Rescan";
             this.btnRescan.UseVisualStyleBackColor = true;
@@ -77,7 +77,7 @@ namespace XingManager
             // 
             this.btnApply.Location = new System.Drawing.Point(84, 3);
             this.btnApply.Name = "btnApply";
-            this.btnApply.Size = new System.Drawing.Size(100, 25);
+            this.btnApply.Size = new System.Drawing.Size(100, 32);
             this.btnApply.TabIndex = 1;
             this.btnApply.Text = "Apply to Drawing";
             this.btnApply.UseVisualStyleBackColor = true;
@@ -87,7 +87,7 @@ namespace XingManager
             //
             this.btnDelete.Location = new System.Drawing.Point(190, 3);
             this.btnDelete.Name = "btnDelete";
-            this.btnDelete.Size = new System.Drawing.Size(110, 25);
+            this.btnDelete.Size = new System.Drawing.Size(110, 32);
             this.btnDelete.TabIndex = 2;
             this.btnDelete.Text = "Delete Selected";
             this.btnDelete.UseVisualStyleBackColor = true;
@@ -97,7 +97,7 @@ namespace XingManager
             //
             this.btnRenumber.Location = new System.Drawing.Point(306, 3);
             this.btnRenumber.Name = "btnRenumber";
-            this.btnRenumber.Size = new System.Drawing.Size(85, 25);
+            this.btnRenumber.Size = new System.Drawing.Size(85, 32);
             this.btnRenumber.TabIndex = 3;
             this.btnRenumber.Text = "Renumber";
             this.btnRenumber.UseVisualStyleBackColor = true;
@@ -107,7 +107,7 @@ namespace XingManager
             //
             this.btnAddRncPolyline.Location = new System.Drawing.Point(397, 3);
             this.btnAddRncPolyline.Name = "btnAddRncPolyline";
-            this.btnAddRncPolyline.Size = new System.Drawing.Size(90, 25);
+            this.btnAddRncPolyline.Size = new System.Drawing.Size(90, 32);
             this.btnAddRncPolyline.TabIndex = 4;
             this.btnAddRncPolyline.Text = "Add RNC PL";
             this.btnAddRncPolyline.UseVisualStyleBackColor = true;
@@ -117,7 +117,7 @@ namespace XingManager
             //
             this.btnGeneratePage.Location = new System.Drawing.Point(493, 3);
             this.btnGeneratePage.Name = "btnGeneratePage";
-            this.btnGeneratePage.Size = new System.Drawing.Size(120, 25);
+            this.btnGeneratePage.Size = new System.Drawing.Size(120, 32);
             this.btnGeneratePage.TabIndex = 5;
             this.btnGeneratePage.Text = "Generate XING PAGE";
             this.btnGeneratePage.UseVisualStyleBackColor = true;
@@ -127,7 +127,7 @@ namespace XingManager
             //
             this.btnGenerateAllLatLongTables.Location = new System.Drawing.Point(619, 3);
             this.btnGenerateAllLatLongTables.Name = "btnGenerateAllLatLongTables";
-            this.btnGenerateAllLatLongTables.Size = new System.Drawing.Size(160, 25);
+            this.btnGenerateAllLatLongTables.Size = new System.Drawing.Size(160, 32);
             this.btnGenerateAllLatLongTables.TabIndex = 6;
             this.btnGenerateAllLatLongTables.Text = "Generate ALL LAT/LONG";
             this.btnGenerateAllLatLongTables.UseVisualStyleBackColor = true;
@@ -137,7 +137,7 @@ namespace XingManager
             //
             this.btnLatLong.Location = new System.Drawing.Point(785, 3);
             this.btnLatLong.Name = "btnLatLong";
-            this.btnLatLong.Size = new System.Drawing.Size(120, 25);
+            this.btnLatLong.Size = new System.Drawing.Size(120, 32);
             this.btnLatLong.TabIndex = 7;
             this.btnLatLong.Text = "Create LAT/LONG";
             this.btnLatLong.UseVisualStyleBackColor = true;
@@ -147,7 +147,7 @@ namespace XingManager
             //
             this.btnAddLatLong.Location = new System.Drawing.Point(911, 3);
             this.btnAddLatLong.Name = "btnAddLatLong";
-            this.btnAddLatLong.Size = new System.Drawing.Size(120, 25);
+            this.btnAddLatLong.Size = new System.Drawing.Size(120, 32);
             this.btnAddLatLong.TabIndex = 8;
             this.btnAddLatLong.Text = "Add LAT/LONG";
             this.btnAddLatLong.UseVisualStyleBackColor = true;
@@ -157,7 +157,7 @@ namespace XingManager
             //
             this.btnMatchTable.Location = new System.Drawing.Point(1037, 3);
             this.btnMatchTable.Name = "btnMatchTable";
-            this.btnMatchTable.Size = new System.Drawing.Size(120, 25);
+            this.btnMatchTable.Size = new System.Drawing.Size(120, 32);
             this.btnMatchTable.TabIndex = 9;
             this.btnMatchTable.Text = "Match Table";
             this.btnMatchTable.UseVisualStyleBackColor = true;
@@ -167,7 +167,7 @@ namespace XingManager
             //
             this.btnExport.Location = new System.Drawing.Point(1163, 3);
             this.btnExport.Name = "btnExport";
-            this.btnExport.Size = new System.Drawing.Size(75, 25);
+            this.btnExport.Size = new System.Drawing.Size(75, 32);
             this.btnExport.TabIndex = 10;
             this.btnExport.Text = "Export";
             this.btnExport.UseVisualStyleBackColor = true;
@@ -177,7 +177,7 @@ namespace XingManager
             //
             this.btnImport.Location = new System.Drawing.Point(1244, 3);
             this.btnImport.Name = "btnImport";
-            this.btnImport.Size = new System.Drawing.Size(75, 25);
+            this.btnImport.Size = new System.Drawing.Size(75, 32);
             this.btnImport.TabIndex = 11;
             this.btnImport.Text = "Import";
             this.btnImport.UseVisualStyleBackColor = true;
@@ -185,7 +185,7 @@ namespace XingManager
             // 
             // buttonPanel
             // 
-            this.buttonPanel.AutoSize = true;
+            this.buttonPanel.AutoSize = false;
             this.buttonPanel.AutoScroll = true;
             this.buttonPanel.Controls.Add(this.btnRescan);
             this.buttonPanel.Controls.Add(this.btnApply);
@@ -202,7 +202,7 @@ namespace XingManager
             this.buttonPanel.Dock = System.Windows.Forms.DockStyle.Top;
             this.buttonPanel.Location = new System.Drawing.Point(0, 0);
             this.buttonPanel.Name = "buttonPanel";
-            this.buttonPanel.Size = new System.Drawing.Size(900, 35);
+            this.buttonPanel.Size = new System.Drawing.Size(900, 47);
             this.buttonPanel.TabIndex = 1;
             this.buttonPanel.WrapContents = false;
             // 
