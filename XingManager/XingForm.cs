@@ -39,7 +39,20 @@ namespace XingManager
         private const string TemplatePath = @"M:\Drafting\_CURRENT TEMPLATES\Compass_Main.dwt";
         private const string DefaultTemplateLayoutName = "X";
         private const string HydroTemplateLayoutName = "H2O-PROFILE";
+        private const string CnrTemplateLayoutName = "CNR-PROFILE";
+        private const string HighwayTemplateLayoutName = "HWY-PROFILE";
         private static readonly string[] HydroKeywords = { "Watercourse", "Creek", "River" };
+        private static readonly string[] HydroOwnerKeywords =
+        {
+            "Nova",
+            "Alliance",
+            "Pembina",
+            "TCPL",
+            "Ovintiv",
+            "PGI"
+        };
+        private static readonly string[] RailwayKeywords = { "Railway" };
+        private static readonly string[] HighwayKeywords = { "Highway", "Hwy" };
         private const string CreateAllPagesDisplayText = "Create ALL XING pages...";
         private static readonly IComparer<string> DwgRefComparer = new NaturalDwgRefComparer();
 
@@ -1481,6 +1494,18 @@ namespace XingManager
             }
         }
 
+        private static (int Missing, int Number, string Suffix) BuildCrossingSortKey(string value)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+            {
+                return (1, int.MaxValue, string.Empty);
+            }
+
+            var token = CrossingRecord.ParseCrossingNumber(value);
+            var suffix = token.Suffix?.Trim().ToUpperInvariant() ?? string.Empty;
+            return (0, token.Number, suffix);
+        }
+
         private sealed class PageGenerationOptions
         {
             public PageGenerationOptions(string dwgRef, bool includeAdjacent, bool generateAll = false)
@@ -1532,10 +1557,15 @@ namespace XingManager
             if (options == null || options.Count == 0) return;
 
             options = options
-                .OrderBy(
-                    o => GetEarliestCrossingForDwgRef(o?.DwgRef ?? string.Empty),
-                    Comparer<string>.Create(CrossingRecord.CompareCrossingKeys))
-                .ThenBy(o => o?.DwgRef ?? string.Empty, DwgRefComparer)
+                .Select(o => new
+                {
+                    Option = o,
+                    EarliestCrossing = GetEarliestCrossingForDwgRef(o?.DwgRef ?? string.Empty)
+                })
+                .OrderBy(x => BuildCrossingSortKey(x.EarliestCrossing))
+                .ThenBy(x => BuildCrossingSortKey(x.Option?.DwgRef ?? string.Empty))
+                .ThenBy(x => x.Option?.DwgRef ?? string.Empty, DwgRefComparer)
+                .Select(x => x.Option)
                 .ToList();
 
             const double TableVerticalGap = 10.0;
@@ -1643,10 +1673,29 @@ namespace XingManager
                     continue;
 
                 var description = record?.Description;
-                if (string.IsNullOrWhiteSpace(description))
-                    continue;
+                if (!string.IsNullOrWhiteSpace(description))
+                {
+                    if (RailwayKeywords.Any(keyword =>
+                            description.IndexOf(keyword, StringComparison.OrdinalIgnoreCase) >= 0))
+                    {
+                        return CnrTemplateLayoutName;
+                    }
 
-                if (HydroKeywords.Any(keyword =>
+                    if (HighwayKeywords.Any(keyword =>
+                            description.IndexOf(keyword, StringComparison.OrdinalIgnoreCase) >= 0))
+                    {
+                        return HighwayTemplateLayoutName;
+                    }
+                }
+
+                var owner = record?.Owner;
+                if (!string.IsNullOrWhiteSpace(owner) && HydroOwnerKeywords.Any(keyword =>
+                        owner.IndexOf(keyword, StringComparison.OrdinalIgnoreCase) >= 0))
+                {
+                    return HydroTemplateLayoutName;
+                }
+
+                if (!string.IsNullOrWhiteSpace(description) && HydroKeywords.Any(keyword =>
                         description.IndexOf(keyword, StringComparison.OrdinalIgnoreCase) >= 0))
                 {
                     return HydroTemplateLayoutName;

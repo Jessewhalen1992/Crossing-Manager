@@ -37,6 +37,7 @@ namespace XingManager.Services
             var db = _doc.Database;
             var records = new Dictionary<string, CrossingRecord>(StringComparer.OrdinalIgnoreCase);
             var contexts = new Dictionary<ObjectId, DuplicateResolver.InstanceContext>();
+            var latLongRows = new List<LatLongRowInfo>();
 
             using (var tr = db.TransactionManager.StartTransaction())
             {
@@ -61,6 +62,15 @@ namespace XingManager.Services
                         catch
                         {
                             // ignore tables without extents
+                        }
+
+                        try
+                        {
+                            CollectLatLongRows(tbl, latLongRows);
+                        }
+                        catch
+                        {
+                            // ignore lat/long parsing errors
                         }
                     }
                 }
@@ -196,6 +206,8 @@ namespace XingManager.Services
 
                 tr.Commit();
             }
+
+            ApplyLatLongRows(latLongRows, records);
 
             var ordered = records.Values
                 .OrderBy(r => r, Comparer<CrossingRecord>.Create(CrossingRecord.CompareByCrossing))
@@ -424,6 +436,185 @@ namespace XingManager.Services
             xrec.Data = new ResultBuffer(
                 new TypedValue((int)DxfCode.Text, lat ?? string.Empty),
                 new TypedValue((int)DxfCode.Text, lng ?? string.Empty));
+        }
+
+        private static void CollectLatLongRows(Table table, IList<LatLongRowInfo> rows)
+        {
+            if (table == null || rows == null)
+                return;
+
+            if (!IsLatLongTable(table))
+                return;
+
+            var startRow = TableSync.FindLatLongDataStartRow(table);
+            if (startRow <= 0)
+            {
+                startRow = 1;
+            }
+
+            for (var row = startRow; row < table.Rows.Count; row++)
+            {
+                var crossing = TableSync.ResolveCrossingKey(table, row, 0);
+                var description = TableSync.ReadCellTextSafe(table, row, 1);
+                var latitude = TableSync.ReadCellTextSafe(table, row, 2);
+                var longitude = TableSync.ReadCellTextSafe(table, row, 3);
+
+                if (string.IsNullOrWhiteSpace(crossing) &&
+                    string.IsNullOrWhiteSpace(description) &&
+                    string.IsNullOrWhiteSpace(latitude) &&
+                    string.IsNullOrWhiteSpace(longitude))
+                {
+                    continue;
+                }
+
+                rows.Add(new LatLongRowInfo
+                {
+                    Crossing = crossing,
+                    Description = description,
+                    Latitude = latitude,
+                    Longitude = longitude
+                });
+            }
+        }
+
+        private static void ApplyLatLongRows(IEnumerable<LatLongRowInfo> rows, IDictionary<string, CrossingRecord> records)
+        {
+            if (rows == null || records == null)
+                return;
+
+            foreach (var row in rows)
+            {
+                if (row == null)
+                    continue;
+
+                var record = FindRecordForLatLong(row, records);
+                if (record == null)
+                    continue;
+
+                var latitude = row.Latitude?.Trim();
+                var longitude = row.Longitude?.Trim();
+
+                if (!string.IsNullOrWhiteSpace(latitude))
+                {
+                    record.Lat = latitude;
+                }
+
+                if (!string.IsNullOrWhiteSpace(longitude))
+                {
+                    record.Long = longitude;
+                }
+            }
+        }
+
+        private static CrossingRecord FindRecordForLatLong(LatLongRowInfo row, IDictionary<string, CrossingRecord> records)
+        {
+            if (row == null || records == null)
+                return null;
+
+            var rawCrossing = row.Crossing ?? string.Empty;
+            var normalizedCrossing = rawCrossing.Trim().ToUpperInvariant();
+            var normalizedKey = TableSync.NormalizeKeyForLookup(rawCrossing);
+
+            if (!string.IsNullOrWhiteSpace(normalizedCrossing) &&
+                records.TryGetValue(normalizedCrossing, out var direct))
+            {
+                return direct;
+            }
+
+            if (!string.IsNullOrWhiteSpace(normalizedKey) &&
+                records.TryGetValue(normalizedKey, out var normalizedMatch))
+            {
+                return normalizedMatch;
+            }
+
+            var byComparison = records.Values
+                .FirstOrDefault(r => CrossingRecord.CompareCrossingKeys(r?.Crossing, rawCrossing) == 0);
+            if (byComparison != null)
+            {
+                return byComparison;
+            }
+
+            var normalizedDescription = NormalizeForComparison(row.Description);
+            if (string.IsNullOrEmpty(normalizedDescription))
+            {
+                return null;
+            }
+
+            var candidates = records.Values
+                .Where(r => string.Equals(NormalizeForComparison(r?.Description), normalizedDescription, StringComparison.Ordinal))
+                .ToList();
+
+            if (candidates.Count == 1)
+            {
+                return candidates[0];
+            }
+
+            if (candidates.Count > 1)
+            {
+                var latNorm = NormalizeForComparison(row.Latitude);
+                var longNorm = NormalizeForComparison(row.Longitude);
+
+                var matches = candidates
+                    .Where(r => string.Equals(NormalizeForComparison(r?.Lat), latNorm, StringComparison.Ordinal) &&
+                                string.Equals(NormalizeForComparison(r?.Long), longNorm, StringComparison.Ordinal))
+                    .ToList();
+
+                if (matches.Count == 1)
+                {
+                    return matches[0];
+                }
+            }
+
+            return null;
+        }
+
+        private static bool IsLatLongTable(Table table)
+        {
+            if (table == null)
+                return false;
+
+            if (table.Columns.Count != 4 || table.Rows.Count <= 0)
+                return false;
+
+            if (TableSync.FindLatLongDataStartRow(table) > 0)
+                return true;
+
+            var normalizedHeaders = new List<string>(4);
+            for (var column = 0; column < Math.Min(4, table.Columns.Count); column++)
+            {
+                normalizedHeaders.Add(NormalizeForComparison(TableSync.ReadCellTextSafe(table, 0, column)));
+            }
+
+            var updatedHeaders = new[] { "ID", "DESCRIPTION", "LATITUDE", "LONGITUDE" };
+            if (normalizedHeaders.SequenceEqual(updatedHeaders))
+                return true;
+
+            var legacyHeaders = new[] { "XING", "DESCRIPTION", "LAT", "LONG" };
+            return normalizedHeaders.SequenceEqual(legacyHeaders);
+        }
+
+        private static string NormalizeForComparison(string value)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+                return string.Empty;
+
+            var normalized = TableSync.NormalizeText(value) ?? string.Empty;
+            normalized = normalized.Trim();
+
+            while (normalized.Contains("  "))
+            {
+                normalized = normalized.Replace("  ", " ");
+            }
+
+            return normalized.ToUpperInvariant();
+        }
+
+        private sealed class LatLongRowInfo
+        {
+            public string Crossing { get; set; }
+            public string Description { get; set; }
+            public string Latitude { get; set; }
+            public string Longitude { get; set; }
         }
 
         private static string GetBlockName(BlockReference br, Transaction tr)
