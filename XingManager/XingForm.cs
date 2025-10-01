@@ -82,6 +82,8 @@ namespace XingManager
 
         public void GenerateAllXingPagesFromCommand() => GenerateAllXingPages();
 
+        public void GenerateAllLatLongTablesFromCommand() => GenerateAllLatLongTables();
+
         public void CreateLatLongRowFromCommand() => CreateOrUpdateLatLongTable();
 
         private void OnCommandMatchTableDone(object sender, CommandEventArgs e)
@@ -161,6 +163,8 @@ namespace XingManager
         private void btnApply_Click(object sender, EventArgs e) => ApplyChangesToDrawing();
 
         private void btnGenerateAllPages_Click(object sender, EventArgs e) => GenerateAllXingPages();
+
+        private void btnGenerateAllLatLongTables_Click(object sender, EventArgs e) => GenerateAllLatLongTables();
 
         // DELETE SELECTED: does NOT renumber the remaining crossings.
         // - removes the block instances for the selected record
@@ -1432,6 +1436,8 @@ namespace XingManager
             var options = PromptForAllPagesOptions(refs, locMap);
             if (options == null || options.Count == 0) return;
 
+            const double TableVerticalGap = 10.0;
+
             try
             {
                 using (_doc.LockDocument())
@@ -1475,7 +1481,22 @@ namespace XingManager
                         double totalW, totalH;
                         _tableSync.GetPageTableSize(dataRowCount, out totalW, out totalH);
 
+                        var latLongRecords = _records
+                            .Where(r => string.Equals(r.DwgRef ?? string.Empty, opt.DwgRef, StringComparison.OrdinalIgnoreCase))
+                            .Where(HasLatLongData)
+                            .OrderBy(r => r, Comparer<CrossingRecord>.Create(CrossingRecord.CompareByCrossing))
+                            .ToList();
+
+                        double latTotalW = 0.0, latTotalH = 0.0;
+                        if (latLongRecords.Count > 0)
+                        {
+                            _tableSync.GetLatLongTableSize(latLongRecords.Count, out latTotalW, out latTotalH);
+                        }
+
                         var insert = new Point3d(center.X - totalW / 2.0, center.Y - totalH / 2.0, 0.0);
+                        var latInsert = latLongRecords.Count > 0
+                            ? new Point3d(center.X - latTotalW / 2.0, insert.Y + totalH + TableVerticalGap, 0.0)
+                            : Point3d.Origin;
 
                         using (var tr = _doc.Database.TransactionManager.StartTransaction())
                         {
@@ -1483,6 +1504,11 @@ namespace XingManager
                             var btr = (BlockTableRecord)tr.GetObject(layout.BlockTableRecordId, OpenMode.ForWrite);
 
                             _tableSync.CreateAndInsertPageTable(_doc.Database, tr, btr, insert, opt.DwgRef, _records);
+
+                            if (latLongRecords.Count > 0)
+                            {
+                                _tableSync.CreateAndInsertLatLongTable(_doc.Database, tr, btr, latInsert, latLongRecords);
+                            }
 
                             tr.Commit();
                         }
@@ -1501,6 +1527,83 @@ namespace XingManager
             {
                 MessageBox.Show(ex.Message, "Crossing Manager",
                     MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        }
+
+        private void GenerateAllLatLongTables()
+        {
+            var latGroups = _records
+                .Where(HasLatLongData)
+                .Where(r => !string.IsNullOrWhiteSpace(r.DwgRef))
+                .GroupBy(r => r.DwgRef ?? string.Empty, StringComparer.OrdinalIgnoreCase)
+                .OrderBy(g => g.Key, StringComparer.OrdinalIgnoreCase)
+                .ToList();
+
+            if (latGroups.Count == 0)
+            {
+                MessageBox.Show("No LAT/LONG data available to create tables.", "Crossing Manager",
+                    MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+
+            var editor = _doc.Editor;
+            if (editor == null)
+            {
+                MessageBox.Show("Unable to access the AutoCAD editor.", "Crossing Manager",
+                    MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return;
+            }
+
+            foreach (var group in latGroups)
+            {
+                var dwgRef = group.Key?.Trim() ?? string.Empty;
+                if (string.IsNullOrEmpty(dwgRef))
+                    continue;
+
+                var prompt = string.Format(CultureInfo.InvariantCulture,
+                    "\nSpecify insertion point for LAT/LONG table ({0}):", dwgRef);
+                var pointRes = editor.GetPoint(prompt);
+                if (pointRes.Status == PromptStatus.Cancel)
+                    break;
+                if (pointRes.Status != PromptStatus.OK)
+                    continue;
+
+                using (_doc.LockDocument())
+                using (var tr = _doc.Database.TransactionManager.StartTransaction())
+                {
+                    BlockTableRecord btr = null;
+                    try
+                    {
+                        var layoutManager = LayoutManager.Current;
+                        if (layoutManager != null)
+                        {
+                            var layoutDict = (DBDictionary)tr.GetObject(_doc.Database.LayoutDictionaryId, OpenMode.ForRead);
+                            if (layoutDict.Contains(layoutManager.CurrentLayout))
+                            {
+                                var layoutId = layoutDict.GetAt(layoutManager.CurrentLayout);
+                                var layout = (Layout)tr.GetObject(layoutId, OpenMode.ForRead);
+                                btr = (BlockTableRecord)tr.GetObject(layout.BlockTableRecordId, OpenMode.ForWrite);
+                            }
+                        }
+                    }
+                    catch
+                    {
+                        btr = null;
+                    }
+
+                    if (btr == null)
+                    {
+                        btr = (BlockTableRecord)tr.GetObject(_doc.Database.CurrentSpaceId, OpenMode.ForWrite);
+                    }
+
+                    var ordered = group
+                        .OrderBy(r => r, Comparer<CrossingRecord>.Create(CrossingRecord.CompareByCrossing))
+                        .ToList();
+
+                    _tableSync.CreateAndInsertLatLongTable(_doc.Database, tr, btr, pointRes.Value, ordered);
+
+                    tr.Commit();
+                }
             }
         }
 
@@ -1735,6 +1838,12 @@ namespace XingManager
                 }
                 // --- end lock ---
 
+                var latLongRecords = _records
+                    .Where(r => string.Equals(r.DwgRef ?? string.Empty, options.DwgRef, StringComparison.OrdinalIgnoreCase))
+                    .Where(HasLatLongData)
+                    .OrderBy(r => r, Comparer<CrossingRecord>.Create(CrossingRecord.CompareByCrossing))
+                    .ToList();
+
                 // Get insertion point (no lock needed)
                 var pointRes = _doc.Editor.GetPoint("\nSpecify insertion point for Crossing Page Table:");
                 if (pointRes.Status != PromptStatus.OK) return;
@@ -1747,6 +1856,22 @@ namespace XingManager
                     var btr = (BlockTableRecord)tr.GetObject(layout.BlockTableRecordId, OpenMode.ForWrite);
                     _tableSync.CreateAndInsertPageTable(_doc.Database, tr, btr, pointRes.Value, options.DwgRef, _records);
                     tr.Commit();
+                }
+
+                if (latLongRecords.Count > 0)
+                {
+                    var latPrompt = _doc.Editor.GetPoint("\nSpecify insertion point for LAT/LONG table:");
+                    if (latPrompt.Status == PromptStatus.OK)
+                    {
+                        using (_doc.LockDocument())
+                        using (var tr = _doc.Database.TransactionManager.StartTransaction())
+                        {
+                            var layout = (Layout)tr.GetObject(layoutId, OpenMode.ForRead);
+                            var btr = (BlockTableRecord)tr.GetObject(layout.BlockTableRecordId, OpenMode.ForWrite);
+                            _tableSync.CreateAndInsertLatLongTable(_doc.Database, tr, btr, latPrompt.Value, latLongRecords);
+                            tr.Commit();
+                        }
+                    }
                 }
             }
             catch (FileNotFoundException)
@@ -2010,6 +2135,12 @@ namespace XingManager
             }
         }
 
+        private static bool HasLatLongData(CrossingRecord record)
+        {
+            if (record == null) return false;
+            return !string.IsNullOrWhiteSpace(record.Lat) || !string.IsNullOrWhiteSpace(record.Long);
+        }
+
         private void CreateOrUpdateLatLongTable()
         {
             var record = GetSelectedRecord();
@@ -2065,7 +2196,7 @@ namespace XingManager
                 var layoutId = layoutDict.GetAt(layoutManager.CurrentLayout);
                 var layout = (Layout)tr.GetObject(layoutId, OpenMode.ForRead);
                 var btr = (BlockTableRecord)tr.GetObject(layout.BlockTableRecordId, OpenMode.ForWrite);
-                _tableSync.CreateAndInsertLatLongTable(_doc.Database, tr, btr, pointRes.Value, record);
+                _tableSync.CreateAndInsertLatLongTable(_doc.Database, tr, btr, pointRes.Value, new List<CrossingRecord> { record });
                 tr.Commit();
             }
         }

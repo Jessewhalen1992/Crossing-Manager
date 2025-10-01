@@ -7,6 +7,7 @@ using System.Reflection;
 using System.Text;
 using System.Text.RegularExpressions;
 using Autodesk.AutoCAD.ApplicationServices;
+using Autodesk.AutoCAD.Colors;
 using Autodesk.AutoCAD.DatabaseServices;
 using Autodesk.AutoCAD.EditorInput;
 using Autodesk.AutoCAD.Geometry;
@@ -155,6 +156,19 @@ namespace XingManager.Services
             totalHeight = (HeaderRows + Math.Max(0, dataRowCount)) * RowH;
         }
 
+        public void GetLatLongTableSize(int dataRowCount, out double totalWidth, out double totalHeight)
+        {
+            const double W0 = 43.5;
+            const double W1 = 393.5;
+            const double W2 = 144.5;
+            const double W3 = 144.5;
+            const double RowH = 25.0;
+            const int HeaderRows = 1;
+
+            totalWidth = W0 + W1 + W2 + W3;
+            totalHeight = (HeaderRows + Math.Max(0, dataRowCount)) * RowH;
+        }
+
         public void CreateAndInsertPageTable(
             Database db,
             Transaction tr,
@@ -287,14 +301,108 @@ namespace XingManager.Services
         // LAT/LONG TABLE CREATION (kept so XingForm compiles)
         // =====================================================================
 
-        public Table CreateAndInsertLatLongTable(Database db, Transaction tr, BlockTableRecord space, Point3d insertPoint, CrossingRecord record)
+        public Table CreateAndInsertLatLongTable(Database db, Transaction tr, BlockTableRecord space, Point3d insertPoint, IList<CrossingRecord> records)
         {
-            var table = _factory.CreateLatLongTable(db, tr, record);
+            if (db == null) throw new ArgumentNullException(nameof(db));
+            if (tr == null) throw new ArgumentNullException(nameof(tr));
+            if (space == null) throw new ArgumentNullException(nameof(space));
+
+            const double TextH = 10.0;
+            const double RowH = 25.0;
+            const double W0 = 43.5;   // ID
+            const double W1 = 393.5;  // Description
+            const double W2 = 144.5;  // Latitude
+            const double W3 = 144.5;  // Longitude
+
+            var ordered = (records ?? new List<CrossingRecord>())
+                .Where(r => r != null)
+                .OrderBy(r => r, Comparer<CrossingRecord>.Create(CrossingRecord.CompareByCrossing))
+                .ToList();
+
+            var table = new Table();
+            table.SetDatabaseDefaults();
             table.Position = insertPoint;
+
+            var layerId = LayerUtils.EnsureLayer(db, tr, TableFactory.LayerName);
+            if (!layerId.IsNull)
+            {
+                table.LayerId = layerId;
+            }
+
+            var tsDict = (DBDictionary)tr.GetObject(db.TableStyleDictionaryId, OpenMode.ForRead);
+            if (tsDict.Contains("Standard"))
+                table.TableStyle = tsDict.GetAt("Standard");
+
+            int headerRow = 1;
+            int dataStart = 2;
+            table.SetSize(2 + ordered.Count, 4);
+
+            if (table.Columns.Count >= 4)
+            {
+                table.Columns[0].Width = W0;
+                table.Columns[1].Width = W1;
+                table.Columns[2].Width = W2;
+                table.Columns[3].Width = W3;
+            }
+
+            for (int r = 0; r < table.Rows.Count; r++)
+                table.Rows[r].Height = RowH;
+
+            table.Cells[headerRow, 0].TextString = "ID";
+            table.Cells[headerRow, 1].TextString = "DESCRIPTION";
+            table.Cells[headerRow, 2].TextString = "LATITUDE";
+            table.Cells[headerRow, 3].TextString = "LONGITUDE";
+
+            var boldStyleId = EnsureBoldTextStyle(db, tr, "XING_BOLD", "Standard");
+            var headerColor = Color.FromColorIndex(ColorMethod.ByAci, 254);
+
+            for (int c = 0; c < 4; c++)
+            {
+                var cell = table.Cells[headerRow, c];
+                cell.TextHeight = TextH;
+                cell.Alignment = CellAlignment.MiddleCenter;
+                cell.TextStyleId = boldStyleId;
+                cell.BackgroundColor = headerColor;
+            }
+
+            for (int i = 0; i < ordered.Count; i++)
+            {
+                var rec = ordered[i];
+                int row = dataStart + i;
+
+                for (int c = 0; c < 4; c++)
+                {
+                    var cell = table.Cells[row, c];
+                    cell.Alignment = CellAlignment.MiddleCenter;
+                    cell.TextHeight = TextH;
+                }
+
+                table.Cells[row, 0].TextString = NormalizeXKey(rec?.Crossing);
+                table.Cells[row, 1].TextString = rec?.Description ?? string.Empty;
+                table.Cells[row, 2].TextString = rec?.Lat ?? string.Empty;
+                table.Cells[row, 3].TextString = rec?.Long ?? string.Empty;
+            }
+
+            try { table.DeleteRows(0, 1); } catch { }
+
+            if (table.Rows.Count > 0)
+            {
+                table.Rows[0].Height = RowH;
+                for (int c = 0; c < 4; c++)
+                {
+                    var cell = table.Cells[0, c];
+                    cell.Alignment = CellAlignment.MiddleCenter;
+                    cell.TextHeight = TextH;
+                    cell.TextStyleId = boldStyleId;
+                    cell.BackgroundColor = headerColor;
+                }
+            }
+
             space.UpgradeOpen();
             space.AppendEntity(table);
             tr.AddNewlyCreatedDBObject(table, true);
             _factory.TagTable(tr, table, XingTableType.LatLong.ToString().ToUpperInvariant());
+            try { table.GenerateLayout(); } catch { }
             return table;
         }
 
@@ -490,7 +598,11 @@ namespace XingManager.Services
             var columnCount = table.Columns.Count;
             var records = byKey?.Values ?? Enumerable.Empty<CrossingRecord>();
 
-            for (var row = 0; row < table.Rows.Count; row++)
+            var dataRow = GetDataStartRow(table, 4, IsLatLongHeader);
+            if (dataRow <= 0)
+                dataRow = 1;
+
+            for (var row = dataRow; row < table.Rows.Count; row++)
             {
                 var rawKey = ResolveCrossingKey(table, row, 0);
                 var key = NormalizeKeyForLookup(rawKey);
@@ -1207,8 +1319,11 @@ namespace XingManager.Services
 
         private static bool IsLatLongHeader(List<string> headers)
         {
-            var expected = new[] { "XING", "DESCRIPTION", "LAT", "LONG" };
-            return CompareHeaders(headers, expected);
+            var updated = new[] { "ID", "DESCRIPTION", "LATITUDE", "LONGITUDE" };
+            if (CompareHeaders(headers, updated)) return true;
+
+            var legacy = new[] { "XING", "DESCRIPTION", "LAT", "LONG" };
+            return CompareHeaders(headers, legacy);
         }
 
         private static bool CompareHeaders(List<string> headers, string[] expected)
