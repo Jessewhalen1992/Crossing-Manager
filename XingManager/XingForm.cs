@@ -1670,6 +1670,17 @@ namespace XingManager
                         // Optional: switch to the new layout to confirm creation
                         _layoutUtils.SwitchToLayout(_doc, actualName);
                     }
+
+                    // After creating all XING pages, reorder them by the numeric part
+                    // of the layout name so that XING #1, XING #2, etc. appear in order.
+                    try
+                    {
+                        ReorderXingLayouts();
+                    }
+                    catch
+                    {
+                        // best effort: if reordering fails, don’t abort page creation
+                    }
                 }
             }
             catch (FileNotFoundException)
@@ -1681,6 +1692,58 @@ namespace XingManager
             {
                 MessageBox.Show(ex.Message, "Crossing Manager",
                     MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        }
+
+        /// <summary>
+        /// Reorders all layouts whose name begins with "XING #"
+        /// by the numeric part of their name.  AutoCAD assigns new layouts
+        /// arbitrary tab orders when they are created; this method ensures
+        /// that the layout tabs appear in ascending numeric order
+        /// (e.g., XING #1, XING #2, XING #3).  The “Model” tab (order 0)
+        /// is not affected.
+        /// </summary>
+        private void ReorderXingLayouts()
+        {
+            var doc = _doc ?? AcadApp.DocumentManager.MdiActiveDocument;
+            if (doc == null) return;
+            var db = doc.Database;
+
+            using (var tr = db.TransactionManager.StartTransaction())
+            {
+                var layoutDict = (DBDictionary)tr.GetObject(db.LayoutDictionaryId, OpenMode.ForRead);
+                var list = new List<(string Name, int Number)>();
+
+                // Collect all layout names that start with "XING #"
+                foreach (DBDictionaryEntry entry in layoutDict)
+                {
+                    var layoutId = entry.Value;
+                    var layout = (Layout)tr.GetObject(layoutId, OpenMode.ForRead);
+                    var name = layout.LayoutName ?? string.Empty;
+                    if (name.StartsWith("XING #", StringComparison.OrdinalIgnoreCase))
+                    {
+                        var part = name.Substring(6).Trim();
+                        if (int.TryParse(part, out var num))
+                        {
+                            list.Add((name, num));
+                        }
+                    }
+                }
+
+                // Sort the list numerically by the extracted number
+                list.Sort((a, b) => a.Number.CompareTo(b.Number));
+
+                // Assign new tab orders starting from 1 (Model is always 0)
+                var mgr = LayoutManager.Current;
+                int tab = 1;
+                foreach (var item in list)
+                {
+                    var id = mgr.GetLayoutId(item.Name);
+                    var lay = (Layout)tr.GetObject(id, OpenMode.ForWrite);
+                    lay.TabOrder = tab++;
+                }
+
+                tr.Commit();
             }
         }
 
