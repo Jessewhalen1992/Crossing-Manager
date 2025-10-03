@@ -160,15 +160,13 @@ namespace XingManager.Services
         {
             const double W0 = 40.0;   // ID
             const double W1 = 200.0;  // Description
-            const double W2 = 70.0;   // Zone
-            const double W3 = 90.0;   // Latitude
-            const double W4 = 90.0;   // Longitude
-            const double W5 = 120.0;  // DWG_REF
+            const double W2 = 90.0;   // Latitude
+            const double W3 = 90.0;   // Longitude
             const double TitleRowHeight = 20.0;
             const double HeaderRowHeight = 25.0;
             const double DataRowHeight = 25.0;
 
-            totalWidth = W0 + W1 + W2 + W3 + W4 + W5;
+            totalWidth = W0 + W1 + W2 + W3;
             totalHeight = TitleRowHeight + HeaderRowHeight + Math.Max(0, dataRowCount) * DataRowHeight;
         }
 
@@ -317,10 +315,8 @@ namespace XingManager.Services
             const double DataRowHeight = 25.0;
             const double W0 = 40.0;   // ID
             const double W1 = 200.0;  // Description
-            const double W2 = 70.0;   // Zone label
-            const double W3 = 90.0;   // Latitude
-            const double W4 = 90.0;   // Longitude
-            const double W5 = 120.0;  // DWG_REF
+            const double W2 = 90.0;   // Latitude
+            const double W3 = 90.0;   // Longitude
 
             var ordered = (records ?? new List<CrossingRecord>())
                 .Where(r => r != null)
@@ -344,16 +340,14 @@ namespace XingManager.Services
             const int titleRow = 0;
             const int headerRow = 1;
             const int dataStart = 2;
-            table.SetSize(dataStart + ordered.Count, 6);
+            table.SetSize(dataStart + ordered.Count, 4);
 
-            if (table.Columns.Count >= 6)
+            if (table.Columns.Count >= 4)
             {
                 table.Columns[0].Width = W0;
                 table.Columns[1].Width = W1;
                 table.Columns[2].Width = W2;
                 table.Columns[3].Width = W3;
-                table.Columns[4].Width = W4;
-                table.Columns[5].Width = W5;
             }
 
             for (int r = 0; r < table.Rows.Count; r++)
@@ -364,10 +358,8 @@ namespace XingManager.Services
 
             table.Cells[headerRow, 0].TextString = "ID";
             table.Cells[headerRow, 1].TextString = "DESCRIPTION";
-            table.Cells[headerRow, 2].TextString = "ZONE";
-            table.Cells[headerRow, 3].TextString = "LATITUDE";
-            table.Cells[headerRow, 4].TextString = "LONGITUDE";
-            table.Cells[headerRow, 5].TextString = "DWG_REF";
+            table.Cells[headerRow, 2].TextString = "LATITUDE";
+            table.Cells[headerRow, 3].TextString = "LONGITUDE";
 
             var boldStyleId = EnsureBoldTextStyle(db, tr, "XING_BOLD", "Standard");
             var headerColor = Color.FromColorIndex(ColorMethod.ByAci, 254);
@@ -418,10 +410,8 @@ namespace XingManager.Services
 
                 table.Cells[row, 0].TextString = NormalizeXKey(rec?.Crossing);
                 table.Cells[row, 1].TextString = rec?.Description ?? string.Empty;
-                table.Cells[row, 2].TextString = rec?.ZoneLabel ?? string.Empty;
-                table.Cells[row, 3].TextString = rec?.Lat ?? string.Empty;
-                table.Cells[row, 4].TextString = rec?.Long ?? string.Empty;
-                table.Cells[row, 5].TextString = rec?.DwgRef ?? string.Empty;
+                table.Cells[row, 2].TextString = rec?.Lat ?? string.Empty;
+                table.Cells[row, 3].TextString = rec?.Long ?? string.Empty;
             }
 
             space.UpgradeOpen();

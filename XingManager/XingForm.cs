@@ -36,6 +36,7 @@ namespace XingManager
         private bool _isScanning;
         private bool _isAwaitingRenumber;
         private int? _currentUtmZone;
+        private bool _isUpdatingZoneControl;
 
         private const string TemplatePath = @"M:\Drafting\_CURRENT TEMPLATES\Compass_Main.dwt";
         private const string DefaultTemplateLayoutName = "X";
@@ -85,6 +86,7 @@ namespace XingManager
             _duplicateResolver = duplicateResolver;
 
             ConfigureGrid();
+            UpdateZoneControlFromState();
         }
 
         // ===== Public entry points called by your commands =====
@@ -141,7 +143,6 @@ namespace XingManager
             gridCrossings.Columns.Add(CreateTextColumn("Owner", "OWNER", 120));
             gridCrossings.Columns.Add(CreateTextColumn("Description", "DESCRIPTION", 200));
             gridCrossings.Columns.Add(CreateTextColumn("Location", "LOCATION", 200));
-            gridCrossings.Columns.Add(CreateTextColumn("Zone", "ZONE", 80));
             gridCrossings.Columns.Add(CreateTextColumn("DwgRef", "DWG_REF", 100));
             gridCrossings.Columns.Add(CreateTextColumn("Lat", "LAT", 100));
             gridCrossings.Columns.Add(CreateTextColumn("Long", "LONG", 100));
@@ -378,21 +379,22 @@ namespace XingManager
 
                     // 4) Re-read to reflect the new persisted state
                     var post = _repository.ScanCrossings();
-                    _records = new BindingList<CrossingRecord>(post.Records.ToList());
-                    _contexts = post.InstanceContexts ?? new Dictionary<ObjectId, DuplicateResolver.InstanceContext>();
-                    gridCrossings.DataSource = _records;
-                }
+                _records = new BindingList<CrossingRecord>(post.Records.ToList());
+                _contexts = post.InstanceContexts ?? new Dictionary<ObjectId, DuplicateResolver.InstanceContext>();
+                gridCrossings.DataSource = _records;
+            }
 
-                gridCrossings.Refresh();
-                _isDirty = false;
-            }
-            catch (Exception ex)
-            {
-                MessageBox.Show(ex.Message, "Crossing Manager",
-                    MessageBoxButtons.OK, MessageBoxIcon.Error);
-            }
-            finally { _isScanning = false; }
+            gridCrossings.Refresh();
+            _isDirty = false;
+            UpdateZoneSelectionFromRecords();
         }
+        catch (Exception ex)
+        {
+            MessageBox.Show(ex.Message, "Crossing Manager",
+                MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+        finally { _isScanning = false; }
+    }
 
         private void ApplyChangesToDrawing()
         {
@@ -471,12 +473,18 @@ namespace XingManager
                     existing.DwgRef = record.DwgRef;
                     existing.Lat = record.Lat;
                     existing.Long = record.Long;
+                    if (!string.IsNullOrWhiteSpace(record.Zone))
+                    {
+                        existing.Zone = record.Zone;
+                    }
                 }
                 else
                 {
                     _records.Add(record);
                 }
             }
+
+            UpdateZoneSelectionFromRecords();
         }
 
         // ===== Update all recognized crossing tables from the grid =====
@@ -2512,10 +2520,7 @@ namespace XingManager
                 return;
             }
 
-            if (!_currentUtmZone.HasValue)
-            {
-                _currentUtmZone = zone;
-            }
+            SetCurrentUtmZone(zone);
 
             var point = PromptForPoint(editor, zone.Value);
             if (!point.HasValue)
@@ -2543,6 +2548,112 @@ namespace XingManager
             catch (Exception ex)
             {
                 MessageBox.Show(ex.Message, "Crossing Manager", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        }
+
+        private void cmbUtmZone_SelectedIndexChanged(object sender, EventArgs e)
+        {
+            if (_isUpdatingZoneControl)
+            {
+                return;
+            }
+
+            int? selectedZone = null;
+            if (cmbUtmZone.SelectedItem is string text && !string.IsNullOrWhiteSpace(text))
+            {
+                if (int.TryParse(text, NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsed) &&
+                    (parsed == 11 || parsed == 12))
+                {
+                    selectedZone = parsed;
+                }
+            }
+
+            SetCurrentUtmZone(selectedZone);
+        }
+
+        private void SetCurrentUtmZone(int? zone)
+        {
+            if (Nullable.Equals(_currentUtmZone, zone))
+            {
+                UpdateZoneControlFromState();
+                return;
+            }
+
+            _currentUtmZone = zone;
+            UpdateZoneControlFromState();
+        }
+
+        private void UpdateZoneControlFromState()
+        {
+            if (cmbUtmZone == null)
+            {
+                return;
+            }
+
+            _isUpdatingZoneControl = true;
+            try
+            {
+                if (_currentUtmZone.HasValue)
+                {
+                    var text = _currentUtmZone.Value.ToString(CultureInfo.InvariantCulture);
+                    if (cmbUtmZone.Items.IndexOf(text) < 0)
+                    {
+                        cmbUtmZone.Items.Add(text);
+                    }
+
+                    var index = cmbUtmZone.Items.IndexOf(text);
+                    cmbUtmZone.SelectedIndex = index;
+                }
+                else
+                {
+                    cmbUtmZone.SelectedIndex = -1;
+                }
+            }
+            finally
+            {
+                _isUpdatingZoneControl = false;
+            }
+        }
+
+        private void UpdateZoneSelectionFromRecords()
+        {
+            if (_records == null)
+            {
+                UpdateZoneControlFromState();
+                return;
+            }
+
+            if (_currentUtmZone.HasValue)
+            {
+                UpdateZoneControlFromState();
+                return;
+            }
+
+            var zones = _records
+                .Select(r => r?.Zone)
+                .Where(z => !string.IsNullOrWhiteSpace(z))
+                .Select(z => z.Trim())
+                .Select(z =>
+                {
+                    if (int.TryParse(z, NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsed))
+                    {
+                        return (int?)parsed;
+                    }
+
+                    return null;
+                })
+                .Where(z => z.HasValue)
+                .Select(z => z.Value)
+                .Distinct()
+                .ToList();
+
+            if (zones.Count == 1)
+            {
+                SetCurrentUtmZone(zones[0]);
+            }
+            else
+            {
+                UpdateZoneControlFromState();
             }
         }
 
