@@ -180,28 +180,34 @@ namespace XingManager.Services
                         continue;
 
                     var identifiedType = IdentifyTable(table, tr);
-                    if (identifiedType == XingTableType.LatLong)
-                    {
-                        // Already handled by the regular update path.
-                        continue;
-                    }
-
                     try
                     {
                         var rowIndexMap = BuildLatLongRowIndexMap(table.ObjectId, byKey?.Values);
                         UpdateLatLongTable(table, byKey, out var matched, out var updated, rowIndexMap);
-                        _factory.TagTable(tr, table, XingTableType.LatLong.ToString().ToUpperInvariant());
+
+                        var typeLabel = XingTableType.LatLong.ToString().ToUpperInvariant();
+                        _factory.TagTable(tr, table, typeLabel);
+
+                        var suffix = identifiedType == XingTableType.LatLong
+                            ? string.Empty
+                            : " (source-scan)";
+
                         Log(string.Format(
                             CultureInfo.InvariantCulture,
-                            "Table {0}: LATLONG (source-scan) matched={1} updated={2}",
-                            table.ObjectId.Handle, matched, updated));
+                            "Table {0}: {1}{2} matched={3} updated={4}",
+                            table.ObjectId.Handle,
+                            typeLabel,
+                            suffix,
+                            matched,
+                            updated));
                     }
                     catch (Exception ex)
                     {
                         Log(string.Format(
                             CultureInfo.InvariantCulture,
                             "Failed to update LAT/LONG table {0}: {1}",
-                            table.ObjectId.Handle, ex.Message));
+                            table.ObjectId.Handle,
+                            ex.Message));
                     }
                 }
 
