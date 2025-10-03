@@ -18,6 +18,7 @@ namespace XingManager
         private readonly LayoutUtils _layoutUtils = new LayoutUtils();
         private readonly Serde _serde = new Serde();
         private readonly DuplicateResolver _duplicateResolver = new DuplicateResolver();
+        private readonly LatLongDuplicateResolver _latLongDuplicateResolver = new LatLongDuplicateResolver();
         private TableSync _tableSync;
 
         public static XingManagerApp Instance { get; private set; }
@@ -93,7 +94,15 @@ namespace XingManager
         private XingForm CreateForm(Document doc)
         {
             var repository = new XingRepository(doc);
-            var form = new XingForm(doc, repository, _tableSync, _layoutUtils, _tableFactory, _serde, _duplicateResolver);
+            var form = new XingForm(
+                doc,
+                repository,
+                _tableSync,
+                _layoutUtils,
+                _tableFactory,
+                _serde,
+                _duplicateResolver,
+                _latLongDuplicateResolver);
             form.LoadData();
             AttachForm(form);
             return form;
