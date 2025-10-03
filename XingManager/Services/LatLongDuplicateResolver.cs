@@ -366,6 +366,7 @@ namespace XingManager.Services
                 okButton.Click += OkButtonOnClick;
 
                 var cancelButton = new Button { Text = "Cancel", DialogResult = DialogResult.Cancel, Width = 80 };
+                cancelButton.Click += CancelButtonOnClick;
                 buttonPanel.Controls.Add(okButton);
                 buttonPanel.Controls.Add(cancelButton);
 
@@ -425,6 +426,12 @@ namespace XingManager.Services
                 }
 
                 DialogResult = DialogResult.OK;
+                Close();
+            }
+
+            private void CancelButtonOnClick(object sender, EventArgs e)
+            {
+                DialogResult = DialogResult.Cancel;
                 Close();
             }
 
