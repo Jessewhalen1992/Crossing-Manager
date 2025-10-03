@@ -710,7 +710,10 @@ namespace XingManager.Services
                 return true;
 
             var legacyHeaders = new[] { "XING", "DESCRIPTION", "LAT", "LONG" };
-            return normalizedHeaders.Count == legacyHeaders.Length && normalizedHeaders.SequenceEqual(legacyHeaders);
+            if (normalizedHeaders.Count == legacyHeaders.Length && normalizedHeaders.SequenceEqual(legacyHeaders))
+                return true;
+
+            return LooksLikeLatLongDataRows(table);
         }
 
         private static string NormalizeForComparison(string value)
@@ -727,6 +730,98 @@ namespace XingManager.Services
             }
 
             return normalized.ToUpperInvariant();
+        }
+
+        private static bool LooksLikeLatLongDataRows(Table table)
+        {
+            if (table == null)
+                return false;
+
+            var columns = table.Columns.Count;
+            if (columns < 4)
+                return false;
+
+            var latColumn = columns >= 6 ? 3 : 2;
+            var longColumn = columns >= 6 ? 4 : 3;
+
+            var rowCount = table.Rows.Count;
+            if (rowCount <= 0)
+                return false;
+
+            var rowsToScan = Math.Min(rowCount, 12);
+            var candidateRows = 0;
+
+            for (var row = 0; row < rowsToScan; row++)
+            {
+                var latText = TableSync.ReadCellTextSafe(table, row, latColumn);
+                var longText = TableSync.ReadCellTextSafe(table, row, longColumn);
+
+                if (string.IsNullOrWhiteSpace(latText) && string.IsNullOrWhiteSpace(longText))
+                    continue;
+
+                var latIsCoordinate = LooksLikeCoordinate(latText, -90.0, 90.0);
+                var longIsCoordinate = LooksLikeCoordinate(longText, -180.0, 180.0);
+
+                if (!latIsCoordinate || !longIsCoordinate)
+                {
+                    if (LooksLikeHeader(latText) && LooksLikeHeader(longText))
+                        continue;
+
+                    return false;
+                }
+
+                var crossing = TableSync.ResolveCrossingKey(table, row, 0);
+                var description = TableSync.ReadCellTextSafe(table, row, 1);
+
+                if (!LooksLikeCrossingValue(crossing) && string.IsNullOrWhiteSpace(description))
+                    return false;
+
+                candidateRows++;
+            }
+
+            return candidateRows > 0;
+        }
+
+        private static bool LooksLikeCoordinate(string text, double min, double max)
+        {
+            if (string.IsNullOrWhiteSpace(text))
+                return false;
+
+            var normalized = TableSync.NormalizeText(text);
+            if (string.IsNullOrWhiteSpace(normalized))
+                return false;
+
+            if (!double.TryParse(normalized, NumberStyles.Float, CultureInfo.InvariantCulture, out var value))
+            {
+                if (!double.TryParse(normalized, NumberStyles.Float, CultureInfo.CurrentCulture, out value))
+                    return false;
+            }
+
+            return value >= min && value <= max;
+        }
+
+        private static bool LooksLikeHeader(string text)
+        {
+            var normalized = NormalizeForComparison(text);
+            if (string.IsNullOrWhiteSpace(normalized))
+                return false;
+
+            return normalized.StartsWith("LAT", StringComparison.Ordinal) ||
+                   normalized.StartsWith("LONG", StringComparison.Ordinal) ||
+                   normalized.Contains("ZONE");
+        }
+
+        private static bool LooksLikeCrossingValue(string value)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+                return false;
+
+            var normalized = NormalizeForComparison(value);
+            if (normalized.StartsWith("X", StringComparison.Ordinal))
+                return true;
+
+            var token = CrossingRecord.ParseCrossingNumber(value);
+            return token.Number > 0;
         }
 
         private sealed class LatLongRowInfo
