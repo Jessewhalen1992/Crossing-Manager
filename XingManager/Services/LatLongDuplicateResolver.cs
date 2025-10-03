@@ -57,6 +57,18 @@ namespace XingManager.Services
                 if (!string.IsNullOrWhiteSpace(selected.DwgRef))
                     record.DwgRef = selected.DwgRef;
 
+                if (record.LatLongSources != null && record.LatLongSources.Count > 0)
+                {
+                    foreach (var source in record.LatLongSources)
+                    {
+                        source.Lat = selected.Lat;
+                        source.Long = selected.Long;
+                        source.Zone = selected.Zone;
+                        if (!string.IsNullOrWhiteSpace(selected.DwgRef))
+                            source.DwgRef = selected.DwgRef;
+                    }
+                }
+
                 foreach (var instanceId in record.AllInstances)
                 {
                     if (contexts != null && contexts.TryGetValue(instanceId, out var ctx) && ctx != null)
