@@ -137,6 +137,76 @@ namespace XingManager.Services
             }
         }
 
+        public void UpdateLatLongSourceTables(Document doc, IList<CrossingRecord> records)
+        {
+            if (doc == null) throw new ArgumentNullException(nameof(doc));
+            if (records == null) throw new ArgumentNullException(nameof(records));
+
+            var tableIds = records
+                .Where(r => r != null)
+                .SelectMany(r => r.LatLongSources ?? Enumerable.Empty<CrossingRecord.LatLongSource>(),
+                    (record, source) => new { Record = record, Source = source })
+                .Where(x => x.Source != null && !x.Source.TableId.IsNull && x.Source.TableId.IsValid && x.Source.RowIndex >= 0)
+                .Select(x => x.Source.TableId)
+                .Distinct()
+                .ToList();
+
+            if (tableIds.Count == 0)
+                return;
+
+            _ed = doc.Editor;
+
+            var byKey = records
+                .Where(r => r != null)
+                .ToDictionary(r => r.CrossingKey, r => r, StringComparer.OrdinalIgnoreCase);
+
+            using (doc.LockDocument())
+            using (var tr = doc.TransactionManager.StartTransaction())
+            {
+                foreach (var tableId in tableIds)
+                {
+                    Table table = null;
+                    try
+                    {
+                        table = tr.GetObject(tableId, OpenMode.ForWrite, false, true) as Table;
+                    }
+                    catch
+                    {
+                        table = null;
+                    }
+
+                    if (table == null)
+                        continue;
+
+                    var identifiedType = IdentifyTable(table, tr);
+                    if (identifiedType == XingTableType.LatLong)
+                    {
+                        // Already handled by the regular update path.
+                        continue;
+                    }
+
+                    try
+                    {
+                        UpdateLatLongTable(table, byKey, out var matched, out var updated);
+                        _factory.TagTable(tr, table, XingTableType.LatLong.ToString().ToUpperInvariant());
+                        Log(string.Format(
+                            CultureInfo.InvariantCulture,
+                            "Table {0}: LATLONG (source-scan) matched={1} updated={2}",
+                            table.ObjectId.Handle, matched, updated));
+                    }
+                    catch (Exception ex)
+                    {
+                        Log(string.Format(
+                            CultureInfo.InvariantCulture,
+                            "Failed to update LAT/LONG table {0}: {1}",
+                            table.ObjectId.Handle, ex.Message));
+                    }
+                }
+
+                tr.Commit();
+            }
+        }
+
         // =====================================================================
         // PAGE TABLE CREATION (no extra title row, header bold, height=10)
         // =====================================================================

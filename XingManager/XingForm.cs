@@ -409,8 +409,13 @@ namespace XingManager
 
             try
             {
+                var snapshot = _records.ToList();
+
                 // Persist changes to the crossing blocks/attributes in the DWG
-                _repository.ApplyChanges(_records.ToList(), _tableSync);
+                _repository.ApplyChanges(snapshot, _tableSync);
+
+                // Update any LAT/LONG tables that were discovered during scans
+                _tableSync.UpdateLatLongSourceTables(_doc, snapshot);
 
                 // Also push the changes into any MAIN/PAGE/LATLNG tables
                 UpdateAllXingTablesFromGrid();
