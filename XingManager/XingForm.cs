@@ -375,7 +375,13 @@ namespace XingManager
                 // 3) Persist to DWG/tables only if requested
                 if (applyToTables)
                 {
-                    try { _repository.ApplyChanges(_records.ToList(), _tableSync); }
+                    var snapshot = _records.ToList();
+
+                    try
+                    {
+                        _repository.ApplyChanges(snapshot, _tableSync);
+                        _tableSync.UpdateLatLongSourceTables(_doc, snapshot);
+                    }
                     catch (Exception ex)
                     {
                         MessageBox.Show(ex.Message, "Crossing Manager",
