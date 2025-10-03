@@ -460,7 +460,7 @@ namespace XingManager.Services
             var startRow = TableSync.FindLatLongDataStartRow(table);
             if (startRow <= 0)
             {
-                startRow = 1;
+                startRow = 0;
             }
 
             var columnCount = table.Columns.Count;
