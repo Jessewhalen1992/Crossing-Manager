@@ -67,7 +67,7 @@ namespace XingManager.Services
                 // Display the dialog for this group and let the user choose the canonical
                 using (var dialog = new DuplicateResolverDialog(group, displayName, i + 1, duplicateGroups.Count))
                 {
-                    if (dialog.ShowDialog() != DialogResult.OK)
+                    if (ModelessDialogRunner.ShowDialog(dialog) != DialogResult.OK)
                         return false;
                 }
 
