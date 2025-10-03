@@ -553,7 +553,15 @@ namespace XingManager
 
                         int matched = 0, updated = 0;
 
-                        for (int row = 1; row < table.Rows.Count; row++)
+                        int startRow = 1;
+                        if (kind == TableSync.XingTableType.LatLong)
+                        {
+                            try { startRow = TableSync.FindLatLongDataStartRow(table); }
+                            catch { startRow = 1; }
+                            if (startRow <= 0) startRow = 1;
+                        }
+
+                        for (int row = startRow; row < table.Rows.Count; row++)
                         {
                             string xRaw = ReadXFromCellAttributeOnly(table, row, tr);
                             if (string.IsNullOrWhiteSpace(xRaw))
@@ -1010,7 +1018,15 @@ namespace XingManager
 
                         table.UpgradeOpen();
 
-                        for (int row = 1; row < table.Rows.Count; row++)
+                        int startRow = 1;
+                        if (kind == TableSync.XingTableType.LatLong)
+                        {
+                            try { startRow = TableSync.FindLatLongDataStartRow(table); }
+                            catch { startRow = 1; }
+                            if (startRow <= 0) startRow = 1;
+                        }
+
+                        for (int row = startRow; row < table.Rows.Count; row++)
                         {
                             // Column A: attribute-first key; fall back to plain text token.
                             string xRaw = ReadXFromCellAttributeOnly(table, row, tr);

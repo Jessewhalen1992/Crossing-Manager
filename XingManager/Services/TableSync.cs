@@ -1611,8 +1611,9 @@ namespace XingManager.Services
 
                 if (IsCoordinateValue(latText, -90.0, 90.0) && IsCoordinateValue(longText, -180.0, 180.0))
                 {
-                    var crossing = ReadCellText(table, row, 0);
-                    if (string.IsNullOrWhiteSpace(crossing)) return false;
+                    var crossing = ResolveCrossingKey(table, row, 0);
+                    if (string.IsNullOrWhiteSpace(crossing))
+                        continue;
                     candidates++;
                     continue;
                 }
