@@ -43,6 +43,8 @@ namespace XingManager.Models
 
         public List<ObjectId> AllInstances { get; } = new List<ObjectId>();
 
+        public List<LatLongSource> LatLongSources { get; } = new List<LatLongSource>();
+
         public ObjectId CanonicalInstance { get; set; }
 
         public string CrossingKey
@@ -136,6 +138,25 @@ namespace XingManager.Models
             public int Number { get; private set; }
 
             public string Suffix { get; private set; }
+        }
+
+        public class LatLongSource
+        {
+            public string SourceLabel { get; set; }
+
+            public string Description { get; set; }
+
+            public string Lat { get; set; }
+
+            public string Long { get; set; }
+
+            public string Zone { get; set; }
+
+            public string DwgRef { get; set; }
+
+            public ObjectId TableId { get; set; }
+
+            public int RowIndex { get; set; }
         }
     }
 }

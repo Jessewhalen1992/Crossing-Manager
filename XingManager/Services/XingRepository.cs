@@ -472,6 +472,8 @@ namespace XingManager.Services
             var longColumn = hasZoneColumn ? 4 : 3;
             var dwgColumn = hasDwgColumn ? 5 : -1;
 
+            var tableHandle = table.ObjectId.IsNull ? string.Empty : table.ObjectId.Handle.ToString();
+
             for (var row = startRow; row < table.Rows.Count; row++)
             {
                 var crossing = TableSync.ResolveCrossingKey(table, row, 0);
@@ -493,6 +495,11 @@ namespace XingManager.Services
 
                 rows.Add(new LatLongRowInfo
                 {
+                    TableId = table.ObjectId,
+                    RowIndex = row,
+                    SourceLabel = string.IsNullOrWhiteSpace(tableHandle)
+                        ? string.Format(CultureInfo.InvariantCulture, "LAT/LONG table row {0}", row + 1)
+                        : string.Format(CultureInfo.InvariantCulture, "LAT/LONG table {0} row {1}", tableHandle, row + 1),
                     Crossing = crossing,
                     Description = description,
                     Latitude = latitude,
@@ -508,6 +515,11 @@ namespace XingManager.Services
             if (rows == null || records == null)
                 return;
 
+            foreach (var record in records.Values)
+            {
+                record?.LatLongSources?.Clear();
+            }
+
             foreach (var row in rows)
             {
                 if (row == null)
@@ -516,6 +528,18 @@ namespace XingManager.Services
                 var record = FindRecordForLatLong(row, records);
                 if (record == null)
                     continue;
+
+                record.LatLongSources.Add(new CrossingRecord.LatLongSource
+                {
+                    SourceLabel = row.SourceLabel,
+                    Description = row.Description,
+                    Lat = row.Latitude,
+                    Long = row.Longitude,
+                    Zone = row.Zone,
+                    DwgRef = row.DwgRef,
+                    TableId = row.TableId,
+                    RowIndex = row.RowIndex
+                });
 
                 var latitude = row.Latitude?.Trim();
                 var longitude = row.Longitude?.Trim();
@@ -540,6 +564,55 @@ namespace XingManager.Services
                 if (!string.IsNullOrWhiteSpace(dwgRef) && string.IsNullOrWhiteSpace(record.DwgRef))
                 {
                     record.DwgRef = dwgRef;
+                }
+            }
+
+            foreach (var record in records.Values)
+            {
+                if (record == null || record.LatLongSources == null || record.LatLongSources.Count == 0)
+                    continue;
+
+                var normalizedLat = NormalizeForComparison(record.Lat);
+                var normalizedLong = NormalizeForComparison(record.Long);
+                var normalizedZone = NormalizeForComparison(record.Zone);
+
+                var matching = record.LatLongSources.FirstOrDefault(s =>
+                    string.Equals(NormalizeForComparison(s.Lat), normalizedLat, StringComparison.Ordinal) &&
+                    string.Equals(NormalizeForComparison(s.Long), normalizedLong, StringComparison.Ordinal) &&
+                    (string.IsNullOrEmpty(NormalizeForComparison(s.Zone)) ||
+                     string.Equals(NormalizeForComparison(s.Zone), normalizedZone, StringComparison.Ordinal)));
+
+                if (matching != null)
+                    continue;
+
+                var candidates = record.LatLongSources
+                    .Where(s => !string.IsNullOrWhiteSpace(s.Lat) ||
+                                !string.IsNullOrWhiteSpace(s.Long) ||
+                                !string.IsNullOrWhiteSpace(s.Zone))
+                    .ToList();
+
+                if (candidates.Count == 0)
+                    continue;
+
+                var signatures = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                foreach (var candidate in candidates)
+                {
+                    var signature = string.Join("|",
+                        NormalizeForComparison(candidate.Lat),
+                        NormalizeForComparison(candidate.Long),
+                        NormalizeForComparison(candidate.Zone));
+                    signatures.Add(signature);
+                }
+
+                if (signatures.Count == 1)
+                {
+                    var source = candidates[0];
+                    if (!string.IsNullOrWhiteSpace(source.Lat))
+                        record.Lat = source.Lat.Trim();
+                    if (!string.IsNullOrWhiteSpace(source.Long))
+                        record.Long = source.Long.Trim();
+                    if (!string.IsNullOrWhiteSpace(source.Zone))
+                        record.Zone = source.Zone.Trim();
                 }
             }
         }
@@ -658,6 +731,9 @@ namespace XingManager.Services
 
         private sealed class LatLongRowInfo
         {
+            public ObjectId TableId { get; set; }
+            public int RowIndex { get; set; }
+            public string SourceLabel { get; set; }
             public string Crossing { get; set; }
             public string Description { get; set; }
             public string Latitude { get; set; }
