@@ -78,6 +78,7 @@ namespace XingManager.Services
             _ed = doc.Editor;
             var byKey = records.ToDictionary(r => r.CrossingKey, r => r, StringComparer.OrdinalIgnoreCase);
 
+            using (doc.LockDocument())
             using (var tr = db.TransactionManager.StartTransaction())
             {
                 var blockTable = (BlockTable)tr.GetObject(db.BlockTableId, OpenMode.ForRead);
