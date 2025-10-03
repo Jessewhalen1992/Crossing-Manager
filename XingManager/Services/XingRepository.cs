@@ -260,9 +260,10 @@ namespace XingManager.Services
                 tr.Commit();
             }
 
-            // IMPORTANT: removed automatic table updates here.
-            // Tables will ONLY change when you run XING_MATCH_TABLE (table -> blocks)
-            // or when you explicitly execute a table creation/update command.
+            // Automatic table updates were previously removed (see historical comment: "IMPORTANT: removed automatic table updates here.");
+            // Restore that behavior so every attribute write immediately syncs the LAT/LONG and other crossing tables without extra commands.
+            tableSync.UpdateLatLongSourceTables(_doc, records);
+            tableSync.UpdateAllTables(_doc, records);
         }
 
         public ObjectId InsertCrossing(CrossingRecord record, Point3d position)
