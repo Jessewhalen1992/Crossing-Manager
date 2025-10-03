@@ -80,7 +80,7 @@ namespace XingManager.Services
                 var record = records.First(r => string.Equals(r.CrossingKey, group[0].CrossingKey, StringComparison.OrdinalIgnoreCase));
 
                 // Promote selected candidate's values to the record (canonical snapshot)
-                if (!selected.FromLatLongTable)
+                if (!selected.ObjectId.IsNull)
                     record.CanonicalInstance = selected.ObjectId;
                 record.Crossing = selected.Crossing;
                 record.Owner = selected.Owner;
@@ -124,8 +124,7 @@ namespace XingManager.Services
             {
                 // Only consider records with more than one instance
                 var instanceCount = record.AllInstances?.Count ?? 0;
-                var latSourceCount = record.LatLongSources?.Count ?? 0;
-                if (instanceCount + latSourceCount <= 1)
+                if (instanceCount <= 1)
                     continue;
 
                 // Choose a default canonical if one isn't set (prefer Model space)
@@ -173,62 +172,6 @@ namespace XingManager.Services
                             Long = ctx.Long ?? string.Empty,
                             Canonical = objectId == record.CanonicalInstance
                         });
-                    }
-                }
-
-                var latSources = record.LatLongSources ?? new List<CrossingRecord.LatLongSource>();
-                if (latSources.Count > 0)
-                {
-                    var normalizedRecordLat = NormalizeAttribute(record.Lat);
-                    var normalizedRecordLong = NormalizeAttribute(record.Long);
-                    var normalizedRecordZone = NormalizeAttribute(record.Zone);
-
-                    foreach (var source in latSources)
-                    {
-                        var sourceLabel = !string.IsNullOrWhiteSpace(source.SourceLabel)
-                            ? source.SourceLabel
-                            : "LAT/LONG Table";
-
-                        var description = !string.IsNullOrWhiteSpace(source.Description)
-                            ? source.Description
-                            : record.Description ?? string.Empty;
-
-                        var dwgRef = !string.IsNullOrWhiteSpace(source.DwgRef)
-                            ? source.DwgRef
-                            : record.DwgRef ?? string.Empty;
-
-                        var candidate = new DuplicateCandidate
-                        {
-                            Crossing = record.Crossing ?? record.CrossingKey,
-                            CrossingKey = record.CrossingKey,
-                            ObjectId = source.TableId,
-                            Layout = sourceLabel,
-                            Owner = record.Owner ?? string.Empty,
-                            Description = description,
-                            Location = record.Location ?? string.Empty,
-                            DwgRef = dwgRef,
-                            Zone = source.Zone ?? string.Empty,
-                            Lat = source.Lat ?? string.Empty,
-                            Long = source.Long ?? string.Empty,
-                            FromLatLongTable = true
-                        };
-
-                        var normalizedLat = NormalizeAttribute(source.Lat);
-                        var normalizedLong = NormalizeAttribute(source.Long);
-                        var normalizedZone = NormalizeAttribute(source.Zone);
-
-                        if ((!string.IsNullOrWhiteSpace(normalizedLat) ||
-                             !string.IsNullOrWhiteSpace(normalizedLong) ||
-                             !string.IsNullOrWhiteSpace(normalizedZone)) &&
-                            string.Equals(normalizedLat, normalizedRecordLat, StringComparison.OrdinalIgnoreCase) &&
-                            string.Equals(normalizedLong, normalizedRecordLong, StringComparison.OrdinalIgnoreCase) &&
-                            (string.IsNullOrWhiteSpace(normalizedZone) ||
-                             string.Equals(normalizedZone, normalizedRecordZone, StringComparison.OrdinalIgnoreCase)))
-                        {
-                            candidate.Canonical = true;
-                        }
-
-                        recordCandidates.Add(candidate);
                     }
                 }
 
@@ -285,8 +228,6 @@ namespace XingManager.Services
             public string Long { get; set; }
             public ObjectId ObjectId { get; set; }
             public bool Canonical { get; set; }
-            public bool FromLatLongTable { get; set; }
-
             public string ZoneLabel
             {
                 get

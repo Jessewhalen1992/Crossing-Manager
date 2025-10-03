@@ -27,6 +27,7 @@ namespace XingManager
         private readonly TableFactory _tableFactory;
         private readonly Serde _serde;
         private readonly DuplicateResolver _duplicateResolver;
+        private readonly LatLongDuplicateResolver _latLongDuplicateResolver;
 
         private BindingList<CrossingRecord> _records = new BindingList<CrossingRecord>();
         private IDictionary<ObjectId, DuplicateResolver.InstanceContext> _contexts =
@@ -65,7 +66,8 @@ namespace XingManager
             LayoutUtils layoutUtils,
             TableFactory tableFactory,
             Serde serde,
-            DuplicateResolver duplicateResolver)
+            DuplicateResolver duplicateResolver,
+            LatLongDuplicateResolver latLongDuplicateResolver)
         {
             if (doc == null) throw new ArgumentNullException(nameof(doc));
             if (repository == null) throw new ArgumentNullException(nameof(repository));
@@ -74,6 +76,7 @@ namespace XingManager
             if (tableFactory == null) throw new ArgumentNullException(nameof(tableFactory));
             if (serde == null) throw new ArgumentNullException(nameof(serde));
             if (duplicateResolver == null) throw new ArgumentNullException(nameof(duplicateResolver));
+            if (latLongDuplicateResolver == null) throw new ArgumentNullException(nameof(latLongDuplicateResolver));
 
             InitializeComponent();
 
@@ -84,6 +87,7 @@ namespace XingManager
             _tableFactory = tableFactory;
             _serde = serde;
             _duplicateResolver = duplicateResolver;
+            _latLongDuplicateResolver = latLongDuplicateResolver;
 
             ConfigureGrid();
             UpdateZoneControlFromState();
@@ -365,6 +369,9 @@ namespace XingManager
 
                 // 2) Resolve duplicates (choose canonicals)
                 var ok = _duplicateResolver.ResolveDuplicates(_records, _contexts);
+                if (!ok) { gridCrossings.Refresh(); _isDirty = false; return; }
+
+                ok = _latLongDuplicateResolver.ResolveDuplicates(_records, _contexts);
                 if (!ok) { gridCrossings.Refresh(); _isDirty = false; return; }
 
                 // 3) Persist to DWG/tables only if requested
