@@ -368,11 +368,9 @@ namespace XingManager
                 gridCrossings.DataSource = _records;
 
                 // 2) Resolve duplicates (choose canonicals)
-                var ok = _duplicateResolver.ResolveDuplicates(_records, _contexts);
-                if (!ok) { gridCrossings.Refresh(); _isDirty = false; return; }
-
-                ok = _latLongDuplicateResolver.ResolveDuplicates(_records, _contexts);
-                if (!ok) { gridCrossings.Refresh(); _isDirty = false; return; }
+                var duplicateResolutionOk = _duplicateResolver.ResolveDuplicates(_records, _contexts);
+                var latLongResolutionOk = _latLongDuplicateResolver.ResolveDuplicates(_records, _contexts);
+                if (!duplicateResolutionOk || !latLongResolutionOk) { gridCrossings.Refresh(); _isDirty = false; return; }
 
                 // 3) Persist to DWG/tables only if requested
                 if (applyToTables)
