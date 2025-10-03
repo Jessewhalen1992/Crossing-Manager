@@ -17,6 +17,8 @@ namespace XingManager
         private System.Windows.Forms.Button btnExport;
         private System.Windows.Forms.Button btnImport;
         private System.Windows.Forms.FlowLayoutPanel buttonPanel;
+        private System.Windows.Forms.Label lblUtmZone;
+        private System.Windows.Forms.ComboBox cmbUtmZone;
 
         protected override void Dispose(bool disposing)
         {
@@ -43,6 +45,8 @@ namespace XingManager
             this.btnExport = new System.Windows.Forms.Button();
             this.btnImport = new System.Windows.Forms.Button();
             this.buttonPanel = new System.Windows.Forms.FlowLayoutPanel();
+            this.lblUtmZone = new System.Windows.Forms.Label();
+            this.cmbUtmZone = new System.Windows.Forms.ComboBox();
             ((System.ComponentModel.ISupportInitialize)(this.gridCrossings)).BeginInit();
             this.buttonPanel.SuspendLayout();
             this.SuspendLayout();
@@ -199,15 +203,42 @@ namespace XingManager
             this.buttonPanel.Controls.Add(this.btnMatchTable);
             this.buttonPanel.Controls.Add(this.btnExport);
             this.buttonPanel.Controls.Add(this.btnImport);
+            this.buttonPanel.Controls.Add(this.lblUtmZone);
+            this.buttonPanel.Controls.Add(this.cmbUtmZone);
             this.buttonPanel.Dock = System.Windows.Forms.DockStyle.Top;
             this.buttonPanel.Location = new System.Drawing.Point(0, 0);
             this.buttonPanel.Name = "buttonPanel";
             this.buttonPanel.Size = new System.Drawing.Size(900, 47);
             this.buttonPanel.TabIndex = 1;
             this.buttonPanel.WrapContents = false;
-            // 
+            //
+            // lblUtmZone
+            //
+            this.lblUtmZone.Anchor = System.Windows.Forms.AnchorStyles.Left;
+            this.lblUtmZone.AutoSize = true;
+            this.lblUtmZone.Location = new System.Drawing.Point(1325, 13);
+            this.lblUtmZone.Margin = new System.Windows.Forms.Padding(3, 10, 3, 0);
+            this.lblUtmZone.Name = "lblUtmZone";
+            this.lblUtmZone.Size = new System.Drawing.Size(64, 13);
+            this.lblUtmZone.TabIndex = 12;
+            this.lblUtmZone.Text = "UTM Zone:";
+            //
+            // cmbUtmZone
+            //
+            this.cmbUtmZone.DropDownStyle = System.Windows.Forms.ComboBoxStyle.DropDownList;
+            this.cmbUtmZone.FormattingEnabled = true;
+            this.cmbUtmZone.Items.AddRange(new object[] {
+            "11",
+            "12"});
+            this.cmbUtmZone.Location = new System.Drawing.Point(1395, 10);
+            this.cmbUtmZone.Margin = new System.Windows.Forms.Padding(3, 7, 3, 3);
+            this.cmbUtmZone.Name = "cmbUtmZone";
+            this.cmbUtmZone.Size = new System.Drawing.Size(60, 21);
+            this.cmbUtmZone.TabIndex = 13;
+            this.cmbUtmZone.SelectedIndexChanged += new System.EventHandler(this.cmbUtmZone_SelectedIndexChanged);
+            //
             // XingForm
-            // 
+            //
             this.AutoScaleDimensions = new System.Drawing.SizeF(6F, 13F);
             this.AutoScaleMode = System.Windows.Forms.AutoScaleMode.Font;
             this.Controls.Add(this.gridCrossings);

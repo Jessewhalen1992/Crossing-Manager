@@ -628,7 +628,11 @@ namespace XingManager.Services
                 normalizedHeaders.Add(NormalizeForComparison(TableSync.ReadCellTextSafe(table, 0, column)));
             }
 
-            var updatedHeaders = new[] { "ID", "DESCRIPTION", "ZONE", "LATITUDE", "LONGITUDE", "DWG_REF" };
+            var extendedHeaders = new[] { "ID", "DESCRIPTION", "ZONE", "LATITUDE", "LONGITUDE", "DWG_REF" };
+            if (normalizedHeaders.Count == extendedHeaders.Length && normalizedHeaders.SequenceEqual(extendedHeaders))
+                return true;
+
+            var updatedHeaders = new[] { "ID", "DESCRIPTION", "LATITUDE", "LONGITUDE" };
             if (normalizedHeaders.Count == updatedHeaders.Length && normalizedHeaders.SequenceEqual(updatedHeaders))
                 return true;
 
