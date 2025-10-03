@@ -370,7 +370,16 @@ namespace XingManager
                 // 2) Resolve duplicates (choose canonicals)
                 var duplicateResolutionOk = _duplicateResolver.ResolveDuplicates(_records, _contexts);
                 var latLongResolutionOk = _latLongDuplicateResolver.ResolveDuplicates(_records, _contexts);
-                if (!duplicateResolutionOk || !latLongResolutionOk) { gridCrossings.Refresh(); _isDirty = false; return; }
+                if (!duplicateResolutionOk || !latLongResolutionOk)
+                {
+                    _records?.ResetBindings();
+                    gridCrossings.Refresh();
+                    _isDirty = false;
+                    return;
+                }
+
+                _records.ResetBindings();
+                gridCrossings.Refresh();
 
                 // 3) Persist to DWG/tables only if requested
                 if (applyToTables)
@@ -390,22 +399,23 @@ namespace XingManager
 
                     // 4) Re-read to reflect the new persisted state
                     var post = _repository.ScanCrossings();
-                _records = new BindingList<CrossingRecord>(post.Records.ToList());
-                _contexts = post.InstanceContexts ?? new Dictionary<ObjectId, DuplicateResolver.InstanceContext>();
-                gridCrossings.DataSource = _records;
-            }
+                    _records = new BindingList<CrossingRecord>(post.Records.ToList());
+                    _contexts = post.InstanceContexts ?? new Dictionary<ObjectId, DuplicateResolver.InstanceContext>();
+                    gridCrossings.DataSource = _records;
+                    _records.ResetBindings();
+                    gridCrossings.Refresh();
+                }
 
-            gridCrossings.Refresh();
-            _isDirty = false;
-            UpdateZoneSelectionFromRecords();
+                _isDirty = false;
+                UpdateZoneSelectionFromRecords();
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(ex.Message, "Crossing Manager",
+                    MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+            finally { _isScanning = false; }
         }
-        catch (Exception ex)
-        {
-            MessageBox.Show(ex.Message, "Crossing Manager",
-                MessageBoxButtons.OK, MessageBoxIcon.Error);
-        }
-        finally { _isScanning = false; }
-    }
 
         private void ApplyChangesToDrawing()
         {

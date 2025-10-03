@@ -497,10 +497,7 @@ namespace XingManager.Services
                 public void SetCanonical(bool isCanonical)
                 {
                     foreach (var member in _members)
-                        member.Canonical = false;
-
-                    if (isCanonical)
-                        Representative.Canonical = true;
+                        member.Canonical = isCanonical;
                 }
             }
         }
