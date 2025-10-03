@@ -119,7 +119,8 @@ namespace XingManager.Services
                                     UpdatePageTable(table, byKey, out matched, out updated);
                                     break;
                                 case XingTableType.LatLong:
-                                    UpdateLatLongTable(table, byKey, out matched, out updated);
+                                    var rowIndexMap = BuildLatLongRowIndexMap(table.ObjectId, byKey?.Values);
+                                    UpdateLatLongTable(table, byKey, out matched, out updated, rowIndexMap);
                                     break;
                             }
 
@@ -187,7 +188,8 @@ namespace XingManager.Services
 
                     try
                     {
-                        UpdateLatLongTable(table, byKey, out var matched, out var updated);
+                        var rowIndexMap = BuildLatLongRowIndexMap(table.ObjectId, byKey?.Values);
+                        UpdateLatLongTable(table, byKey, out var matched, out var updated, rowIndexMap);
                         _factory.TagTable(tr, table, XingTableType.LatLong.ToString().ToUpperInvariant());
                         Log(string.Format(
                             CultureInfo.InvariantCulture,
@@ -676,7 +678,12 @@ namespace XingManager.Services
             RefreshTable(table);
         }
 
-        private void UpdateLatLongTable(Table table, IDictionary<string, CrossingRecord> byKey, out int matched, out int updated)
+        private void UpdateLatLongTable(
+            Table table,
+            IDictionary<string, CrossingRecord> byKey,
+            out int matched,
+            out int updated,
+            IDictionary<int, CrossingRecord> rowIndexMap = null)
         {
             matched = 0;
             updated = 0;
@@ -701,15 +708,23 @@ namespace XingManager.Services
                 var key = NormalizeKeyForLookup(rawKey);
                 CrossingRecord record = null;
 
-                if (!string.IsNullOrEmpty(key) && byKey != null)
+                if (rowIndexMap != null && rowIndexMap.TryGetValue(row, out var mappedRecord) && mappedRecord != null)
                 {
-                    if (!byKey.TryGetValue(key, out record))
-                    {
-                        record = byKey.Values.FirstOrDefault(r => CrossingRecord.CompareCrossingKeys(r.Crossing, key) == 0);
-                    }
+                    record = mappedRecord;
                 }
+                else
+                {
+                    if (!string.IsNullOrEmpty(key) && byKey != null)
+                    {
+                        if (!byKey.TryGetValue(key, out record))
+                        {
+                            record = byKey.Values.FirstOrDefault(r => CrossingRecord.CompareCrossingKeys(r.Crossing, key) == 0);
+                        }
+                    }
 
-                if (record == null) record = FindRecordByLatLongColumns(table, row, records);
+                    if (record == null)
+                        record = FindRecordByLatLongColumns(table, row, records);
+                }
 
                 if (record == null)
                 {
@@ -717,7 +732,11 @@ namespace XingManager.Services
                     continue;
                 }
 
-                var logKey = !string.IsNullOrEmpty(key) ? key : (rawKey ?? string.Empty);
+                var logKey = !string.IsNullOrEmpty(key)
+                    ? key
+                    : (!string.IsNullOrEmpty(rawKey)
+                        ? rawKey
+                        : (record.Crossing ?? string.Empty));
                 matched++;
 
                 var desiredCrossing = (record.Crossing ?? string.Empty).Trim();
@@ -761,6 +780,23 @@ namespace XingManager.Services
             }
 
             RefreshTable(table);
+        }
+
+        private static IDictionary<int, CrossingRecord> BuildLatLongRowIndexMap(
+            ObjectId tableId,
+            IEnumerable<CrossingRecord> records)
+        {
+            if (records == null)
+                return new Dictionary<int, CrossingRecord>();
+
+            return records
+                .Where(r => r != null)
+                .SelectMany(
+                    r => (r.LatLongSources ?? new List<CrossingRecord.LatLongSource>())
+                        .Where(s => s != null && !s.TableId.IsNull && s.TableId == tableId && s.RowIndex >= 0)
+                        .Select(s => new { Source = s, Record = r }))
+                .GroupBy(x => x.Source.RowIndex)
+                .ToDictionary(g => g.Key, g => g.First().Record);
         }
 
         // =====================================================================
