@@ -41,7 +41,7 @@ namespace XingManager.Services
 
                 using (var dialog = new LatLongDuplicateResolverDialog(group, displayName, i + 1, groups.Count))
                 {
-                    if (dialog.ShowDialog() != DialogResult.OK)
+                    if (ModelessDialogRunner.ShowDialog(dialog) != DialogResult.OK)
                         return false;
                 }
 
@@ -304,15 +304,7 @@ namespace XingManager.Services
                     DataPropertyName = nameof(DisplayCandidate.SourceType),
                     HeaderText = "Type",
                     ReadOnly = true,
-                    Width = 80
-                };
-
-                var colSource = new DataGridViewTextBoxColumn
-                {
-                    DataPropertyName = nameof(DisplayCandidate.Source),
-                    HeaderText = "Source",
-                    ReadOnly = true,
-                    Width = 220
+                    Width = 120
                 };
 
                 var colDescription = new DataGridViewTextBoxColumn
@@ -320,7 +312,7 @@ namespace XingManager.Services
                     DataPropertyName = nameof(DisplayCandidate.Description),
                     HeaderText = "Description",
                     ReadOnly = true,
-                    Width = 220
+                    Width = 260
                 };
 
                 var colLat = new DataGridViewTextBoxColumn
@@ -346,7 +338,7 @@ namespace XingManager.Services
                     Width = 80
                 };
 
-                _grid.Columns.AddRange(colType, colSource, colDescription, colLat, colLong, colCanonical);
+                _grid.Columns.AddRange(colType, colDescription, colLat, colLong, colCanonical);
                 _grid.CellContentClick += GridOnCellContentClick;
 
                 var headerLabel = new Label
