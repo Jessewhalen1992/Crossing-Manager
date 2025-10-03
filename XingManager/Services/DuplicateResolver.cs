@@ -80,7 +80,8 @@ namespace XingManager.Services
                 var record = records.First(r => string.Equals(r.CrossingKey, group[0].CrossingKey, StringComparison.OrdinalIgnoreCase));
 
                 // Promote selected candidate's values to the record (canonical snapshot)
-                record.CanonicalInstance = selected.ObjectId;
+                if (!selected.FromLatLongTable)
+                    record.CanonicalInstance = selected.ObjectId;
                 record.Crossing = selected.Crossing;
                 record.Owner = selected.Owner;
                 record.Description = selected.Description;
@@ -122,12 +123,14 @@ namespace XingManager.Services
             foreach (var record in records)
             {
                 // Only consider records with more than one instance
-                if (record.AllInstances == null || record.AllInstances.Count <= 1)
+                var instanceCount = record.AllInstances?.Count ?? 0;
+                var latSourceCount = record.LatLongSources?.Count ?? 0;
+                if (instanceCount + latSourceCount <= 1)
                     continue;
 
                 // Choose a default canonical if one isn't set (prefer Model space)
                 ObjectId defaultCanonical = record.CanonicalInstance;
-                if (defaultCanonical.IsNull)
+                if (instanceCount > 0 && defaultCanonical.IsNull)
                 {
                     var firstModel = record.AllInstances
                         .Select(id => new { Id = id, Context = GetContext(contexts, id) })
@@ -143,36 +146,98 @@ namespace XingManager.Services
 
                 // Build per-instance UI candidates; skip those flagged as IgnoreForDuplicates
                 var recordCandidates = new List<DuplicateCandidate>();
-                foreach (var objectId in record.AllInstances)
+                if (instanceCount > 0)
                 {
-                    var ctx = GetContext(contexts, objectId);
-                    if (ctx.IgnoreForDuplicates)
-                        continue; // table cell or paper-space block: update later but don't show
-
-                    var crossing = !string.IsNullOrWhiteSpace(ctx.Crossing)
-                        ? ctx.Crossing
-                        : record.Crossing ?? string.Empty;
-
-                    recordCandidates.Add(new DuplicateCandidate
+                    foreach (var objectId in record.AllInstances)
                     {
-                        Crossing = crossing,
-                        CrossingKey = record.CrossingKey,
-                        ObjectId = objectId,
-                        Layout = ctx.SpaceName ?? "Unknown",
-                        Owner = ctx.Owner ?? string.Empty,
-                        Description = ctx.Description ?? string.Empty,
-                        Location = ctx.Location ?? string.Empty,
-                        DwgRef = ctx.DwgRef ?? string.Empty,
-                        Zone = ctx.Zone ?? string.Empty,
-                        Lat = ctx.Lat ?? string.Empty,
-                        Long = ctx.Long ?? string.Empty,
-                        Canonical = objectId == record.CanonicalInstance
-                    });
+                        var ctx = GetContext(contexts, objectId);
+                        if (ctx.IgnoreForDuplicates)
+                            continue; // table cell or paper-space block: update later but don't show
+
+                        var crossing = !string.IsNullOrWhiteSpace(ctx.Crossing)
+                            ? ctx.Crossing
+                            : record.Crossing ?? string.Empty;
+
+                        recordCandidates.Add(new DuplicateCandidate
+                        {
+                            Crossing = crossing,
+                            CrossingKey = record.CrossingKey,
+                            ObjectId = objectId,
+                            Layout = ctx.SpaceName ?? "Unknown",
+                            Owner = ctx.Owner ?? string.Empty,
+                            Description = ctx.Description ?? string.Empty,
+                            Location = ctx.Location ?? string.Empty,
+                            DwgRef = ctx.DwgRef ?? string.Empty,
+                            Zone = ctx.Zone ?? string.Empty,
+                            Lat = ctx.Lat ?? string.Empty,
+                            Long = ctx.Long ?? string.Empty,
+                            Canonical = objectId == record.CanonicalInstance
+                        });
+                    }
+                }
+
+                var latSources = record.LatLongSources ?? new List<CrossingRecord.LatLongSource>();
+                if (latSources.Count > 0)
+                {
+                    var normalizedRecordLat = NormalizeAttribute(record.Lat);
+                    var normalizedRecordLong = NormalizeAttribute(record.Long);
+                    var normalizedRecordZone = NormalizeAttribute(record.Zone);
+
+                    foreach (var source in latSources)
+                    {
+                        var sourceLabel = !string.IsNullOrWhiteSpace(source.SourceLabel)
+                            ? source.SourceLabel
+                            : "LAT/LONG Table";
+
+                        var description = !string.IsNullOrWhiteSpace(source.Description)
+                            ? source.Description
+                            : record.Description ?? string.Empty;
+
+                        var dwgRef = !string.IsNullOrWhiteSpace(source.DwgRef)
+                            ? source.DwgRef
+                            : record.DwgRef ?? string.Empty;
+
+                        var candidate = new DuplicateCandidate
+                        {
+                            Crossing = record.Crossing ?? record.CrossingKey,
+                            CrossingKey = record.CrossingKey,
+                            ObjectId = source.TableId,
+                            Layout = sourceLabel,
+                            Owner = record.Owner ?? string.Empty,
+                            Description = description,
+                            Location = record.Location ?? string.Empty,
+                            DwgRef = dwgRef,
+                            Zone = source.Zone ?? string.Empty,
+                            Lat = source.Lat ?? string.Empty,
+                            Long = source.Long ?? string.Empty,
+                            FromLatLongTable = true
+                        };
+
+                        var normalizedLat = NormalizeAttribute(source.Lat);
+                        var normalizedLong = NormalizeAttribute(source.Long);
+                        var normalizedZone = NormalizeAttribute(source.Zone);
+
+                        if ((!string.IsNullOrWhiteSpace(normalizedLat) ||
+                             !string.IsNullOrWhiteSpace(normalizedLong) ||
+                             !string.IsNullOrWhiteSpace(normalizedZone)) &&
+                            string.Equals(normalizedLat, normalizedRecordLat, StringComparison.OrdinalIgnoreCase) &&
+                            string.Equals(normalizedLong, normalizedRecordLong, StringComparison.OrdinalIgnoreCase) &&
+                            (string.IsNullOrWhiteSpace(normalizedZone) ||
+                             string.Equals(normalizedZone, normalizedRecordZone, StringComparison.OrdinalIgnoreCase)))
+                        {
+                            candidate.Canonical = true;
+                        }
+
+                        recordCandidates.Add(candidate);
+                    }
                 }
 
                 // If all instances are ignored or there’s no visible discrepancy, skip this record
                 if (!recordCandidates.Any() || !RequiresResolution(recordCandidates))
                     continue;
+
+                if (!recordCandidates.Any(c => c.Canonical))
+                    recordCandidates[0].Canonical = true;
 
                 list.AddRange(recordCandidates);
             }
@@ -220,6 +285,7 @@ namespace XingManager.Services
             public string Long { get; set; }
             public ObjectId ObjectId { get; set; }
             public bool Canonical { get; set; }
+            public bool FromLatLongTable { get; set; }
 
             public string ZoneLabel
             {
