@@ -691,6 +691,10 @@ namespace XingManager.Services
 
             var columnCount = table.Columns.Count;
             var records = byKey?.Values ?? Enumerable.Empty<CrossingRecord>();
+            var recordList = records.Where(r => r != null).ToList();
+
+            var crossDescMap = BuildCrossingDescriptionMap(recordList);
+            var descriptionMap = BuildDescriptionMap(recordList);
 
             var dataRow = FindLatLongDataStartRow(table);
             if (dataRow <= 0)
@@ -706,6 +710,9 @@ namespace XingManager.Services
             {
                 var rawKey = ResolveCrossingKey(table, row, 0);
                 var key = NormalizeKeyForLookup(rawKey);
+                var normalizedCrossing = NormalizeCrossingForMap(rawKey);
+                if (string.IsNullOrEmpty(key))
+                    key = normalizedCrossing;
                 CrossingRecord record = null;
 
                 if (rowIndexMap != null && rowIndexMap.TryGetValue(row, out var mappedRecord) && mappedRecord != null)
@@ -723,7 +730,23 @@ namespace XingManager.Services
                     }
 
                     if (record == null)
-                        record = FindRecordByLatLongColumns(table, row, records);
+                        record = FindRecordByLatLongColumns(table, row, recordList);
+                }
+
+                var descriptionText = ReadCellText(table, row, 1);
+                var descriptionKey = NormalizeDescriptionKey(descriptionText);
+
+                if ((record == null || !MatchesCrossingAndDescription(record, key, normalizedCrossing, descriptionKey)) &&
+                    !string.IsNullOrEmpty(descriptionKey))
+                {
+                    record = TryResolveByCrossingAndDescription(key, normalizedCrossing, descriptionKey, crossDescMap) ?? record;
+                }
+
+                if (record == null && !string.IsNullOrEmpty(descriptionKey) &&
+                    descriptionMap.TryGetValue(descriptionKey, out var descriptionMatches) &&
+                    descriptionMatches.Count == 1)
+                {
+                    record = descriptionMatches[0];
                 }
 
                 if (record == null)
@@ -1855,6 +1878,150 @@ namespace XingManager.Services
             if (digits.Length == 0) digits = "0";
 
             return "X" + digits;
+        }
+
+        private static Dictionary<string, CrossingRecord> BuildCrossingDescriptionMap(IEnumerable<CrossingRecord> records)
+        {
+            var map = new Dictionary<string, CrossingRecord>(StringComparer.OrdinalIgnoreCase);
+            if (records == null) return map;
+
+            foreach (var record in records)
+            {
+                if (record == null) continue;
+
+                var descKey = NormalizeDescriptionKey(record.Description);
+                if (string.IsNullOrEmpty(descKey)) continue;
+
+                AddCrossingDescriptionKey(map, record.CrossingKey, descKey, record);
+                AddCrossingDescriptionKey(map, NormalizeKeyForLookup(record.Crossing), descKey, record);
+                AddCrossingDescriptionKey(map, NormalizeCrossingForMap(record.Crossing), descKey, record);
+            }
+
+            return map;
+        }
+
+        private static Dictionary<string, List<CrossingRecord>> BuildDescriptionMap(IEnumerable<CrossingRecord> records)
+        {
+            var map = new Dictionary<string, List<CrossingRecord>>(StringComparer.OrdinalIgnoreCase);
+            if (records == null) return map;
+
+            foreach (var record in records)
+            {
+                if (record == null) continue;
+
+                var descKey = NormalizeDescriptionKey(record.Description);
+                if (string.IsNullOrEmpty(descKey)) continue;
+
+                if (!map.TryGetValue(descKey, out var list))
+                {
+                    list = new List<CrossingRecord>();
+                    map[descKey] = list;
+                }
+
+                list.Add(record);
+            }
+
+            return map;
+        }
+
+        private static void AddCrossingDescriptionKey(
+            IDictionary<string, CrossingRecord> map,
+            string crossingKey,
+            string descriptionKey,
+            CrossingRecord record)
+        {
+            if (map == null || record == null) return;
+            var normalizedCrossing = NormalizeCrossingForMap(crossingKey);
+            if (string.IsNullOrEmpty(normalizedCrossing) || string.IsNullOrEmpty(descriptionKey)) return;
+
+            var composite = BuildCrossingDescriptionKey(normalizedCrossing, descriptionKey);
+            if (string.IsNullOrEmpty(composite)) return;
+
+            if (!map.ContainsKey(composite))
+                map[composite] = record;
+        }
+
+        private static CrossingRecord TryResolveByCrossingAndDescription(
+            string key,
+            string normalizedCrossing,
+            string descriptionKey,
+            IDictionary<string, CrossingRecord> map)
+        {
+            if (map == null || string.IsNullOrEmpty(descriptionKey))
+                return null;
+
+            var searchKeys = new List<string>
+            {
+                BuildCrossingDescriptionKey(normalizedCrossing, descriptionKey),
+                BuildCrossingDescriptionKey(key, descriptionKey)
+            };
+
+            foreach (var searchKey in searchKeys)
+            {
+                if (string.IsNullOrEmpty(searchKey))
+                    continue;
+
+                if (map.TryGetValue(searchKey, out var match) && match != null)
+                    return match;
+            }
+
+            return null;
+        }
+
+        private static bool MatchesCrossingAndDescription(
+            CrossingRecord record,
+            string key,
+            string normalizedCrossing,
+            string descriptionKey)
+        {
+            if (record == null || string.IsNullOrEmpty(descriptionKey))
+                return false;
+
+            var recordDescription = NormalizeDescriptionKey(record.Description);
+            if (!string.Equals(recordDescription, descriptionKey, StringComparison.OrdinalIgnoreCase))
+                return false;
+
+            var recordKey = BuildCrossingDescriptionKey(NormalizeCrossingForMap(record.Crossing), descriptionKey);
+            if (string.Equals(recordKey, BuildCrossingDescriptionKey(normalizedCrossing, descriptionKey), StringComparison.OrdinalIgnoreCase))
+                return true;
+
+            if (!string.IsNullOrEmpty(key))
+            {
+                var alt = BuildCrossingDescriptionKey(NormalizeCrossingForMap(key), descriptionKey);
+                if (string.Equals(recordKey, alt, StringComparison.OrdinalIgnoreCase))
+                    return true;
+            }
+
+            return false;
+        }
+
+        private static string NormalizeCrossingForMap(string value)
+        {
+            if (string.IsNullOrWhiteSpace(value)) return string.Empty;
+
+            var cleaned = StripMTextFormatting(value).Trim().ToUpperInvariant();
+            var sb = new StringBuilder(cleaned.Length);
+            foreach (var ch in cleaned)
+            {
+                if (!char.IsWhiteSpace(ch))
+                    sb.Append(ch);
+            }
+
+            return sb.ToString();
+        }
+
+        private static string NormalizeDescriptionKey(string value)
+        {
+            if (string.IsNullOrWhiteSpace(value)) return string.Empty;
+            return StripMTextFormatting(value).Trim().ToUpperInvariant();
+        }
+
+        private static string BuildCrossingDescriptionKey(string crossingKey, string descriptionKey)
+        {
+            if (string.IsNullOrEmpty(crossingKey) || string.IsNullOrEmpty(descriptionKey))
+                return string.Empty;
+
+            return crossingKey + "\u001F" + descriptionKey;
         }
     }
 }
