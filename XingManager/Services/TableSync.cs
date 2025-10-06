@@ -144,6 +144,7 @@ namespace XingManager.Services
             if (doc == null) throw new ArgumentNullException(nameof(doc));
             if (records == null) throw new ArgumentNullException(nameof(records));
 
+            // Tables referenced by LAT/LONG sources discovered during scanning
             var tableIds = records
                 .Where(r => r != null)
                 .SelectMany(r => r.LatLongSources ?? Enumerable.Empty<CrossingRecord.LatLongSource>(),
@@ -168,39 +169,49 @@ namespace XingManager.Services
                 foreach (var tableId in tableIds)
                 {
                     Table table = null;
-                    try
-                    {
-                        table = tr.GetObject(tableId, OpenMode.ForWrite, false, true) as Table;
-                    }
-                    catch
-                    {
-                        table = null;
-                    }
+                    try { table = tr.GetObject(tableId, OpenMode.ForWrite, false, true) as Table; }
+                    catch { table = null; }
 
                     if (table == null)
                         continue;
 
                     var identifiedType = IdentifyTable(table, tr);
+                    var rowIndexMap = BuildLatLongRowIndexMap(table.ObjectId, byKey?.Values);
+
+                    int matched = 0, updated = 0;
+
                     try
                     {
-                        var rowIndexMap = BuildLatLongRowIndexMap(table.ObjectId, byKey?.Values);
-                        UpdateLatLongTable(table, byKey, out var matched, out var updated, rowIndexMap);
+                        if (identifiedType == XingTableType.LatLong)
+                        {
+                            // Normal header-driven updater (program-generated tables)
+                            UpdateLatLongTable(table, byKey, out matched, out updated, rowIndexMap);
+                        }
+                        else
+                        {
+                            // Try normal pass anyway
+                            UpdateLatLongTable(table, byKey, out matched, out updated, rowIndexMap);
 
-                        var typeLabel = XingTableType.LatLong.ToString().ToUpperInvariant();
-                        _factory.TagTable(tr, table, typeLabel);
+                            // If nothing changed or it’s clearly non-standard, try legacy row heuristics
+                            if (updated == 0 || table.Columns.Count < 4)
+                            {
+                                updated += UpdateLegacyLatLongRows(table, rowIndexMap);
+                            }
+                        }
 
-                        var suffix = identifiedType == XingTableType.LatLong
-                            ? string.Empty
-                            : " (source-scan)";
+                        _factory.TagTable(tr, table, XingTableType.LatLong.ToString().ToUpperInvariant());
 
+                        var suffix = identifiedType == XingTableType.LatLong ? string.Empty : " (legacy)";
                         Log(string.Format(
                             CultureInfo.InvariantCulture,
-                            "Table {0}: {1}{2} matched={3} updated={4}",
-                            table.ObjectId.Handle,
-                            typeLabel,
-                            suffix,
-                            matched,
-                            updated));
+                            "Table {0}: LATLONG{1} matched={2} updated={3}",
+                            table.ObjectId.Handle, suffix, matched, updated));
+
+                        if (updated > 0)
+                        {
+                            try { table.GenerateLayout(); } catch { }
+                            try { table.RecordGraphicsModified(true); } catch { }
+                        }
                     }
                     catch (Exception ex)
                     {
@@ -408,9 +419,7 @@ namespace XingManager.Services
 
             var layerId = LayerUtils.EnsureLayer(db, tr, TableFactory.LayerName);
             if (!layerId.IsNull)
-            {
                 table.LayerId = layerId;
-            }
 
             var tsDict = (DBDictionary)tr.GetObject(db.TableStyleDictionaryId, OpenMode.ForRead);
             if (tsDict.Contains("Standard"))
@@ -453,46 +462,49 @@ namespace XingManager.Services
                 cell.BackgroundColor = headerColor;
             }
 
+            // Title
             table.MergeCells(CellRange.Create(table, titleRow, 0, titleRow, Math.Max(0, table.Columns.Count - 1)));
             var titleCell = table.Cells[titleRow, 0];
             titleCell.TextString = "WATER CROSSING INFORMATION";
             titleCell.Alignment = CellAlignment.MiddleLeft;
             titleCell.TextHeight = TitleTextHeight;
             titleCell.TextStyleId = boldStyleId;
-            try
-            {
-                var borders = titleCell.Borders;
-                if (borders != null)
-                {
-                    borders.Top.IsOn = false;
-                    borders.Left.IsOn = false;
-                    borders.Right.IsOn = false;
-                    borders.InsideHorizontal.IsOn = false;
-                    borders.InsideVertical.IsOn = false;
-                    borders.Outline.IsOn = false;
-                    borders.Bottom.IsOn = true;
-                }
-            }
-            catch
-            {
-                // Ignore border adjustments if unsupported in the running AutoCAD version
-            }
+
+            // Title color (TextColor or ContentColor depending on release)
             var textColorProp = titleCell.GetType().GetProperty("TextColor", BindingFlags.Public | BindingFlags.Instance);
             if (textColorProp != null && textColorProp.CanWrite)
             {
-                try { textColorProp.SetValue(titleCell, titleColor, null); }
-                catch { }
+                try { textColorProp.SetValue(titleCell, titleColor, null); } catch { }
             }
             else
             {
                 var contentColorProp = titleCell.GetType().GetProperty("ContentColor", BindingFlags.Public | BindingFlags.Instance);
                 if (contentColorProp != null && contentColorProp.CanWrite)
                 {
-                    try { contentColorProp.SetValue(titleCell, titleColor, null); }
-                    catch { }
+                    try { contentColorProp.SetValue(titleCell, titleColor, null); } catch { }
                 }
             }
 
+            // --- Portable border toggles (no direct IsOn/Inside* usage) ---
+            try
+            {
+                var bordersProp = titleCell.GetType().GetProperty("Borders", BindingFlags.Public | BindingFlags.Instance);
+                var bordersObj = bordersProp?.GetValue(titleCell, null);
+                if (bordersObj != null)
+                {
+                    // Turn OFF everything except Bottom (keeps a single underline)
+                    SetBorderVisible(bordersObj, "Top", false);
+                    SetBorderVisible(bordersObj, "Left", false);
+                    SetBorderVisible(bordersObj, "Right", false);
+                    SetBorderVisible(bordersObj, "InsideHorizontal", false);
+                    SetBorderVisible(bordersObj, "InsideVertical", false);
+                    SetBorderVisible(bordersObj, "Outline", false);
+                    SetBorderVisible(bordersObj, "Bottom", true);
+                }
+            }
+            catch { /* purely cosmetic; ignore on unsupported releases */ }
+
+            // Data rows
             for (int i = 0; i < ordered.Count; i++)
             {
                 var rec = ordered[i];
@@ -518,10 +530,197 @@ namespace XingManager.Services
             try { table.GenerateLayout(); } catch { }
             return table;
         }
+        // Portable border visibility setter across AutoCAD releases
+        private static void SetBorderVisible(object borders, string memberName, bool on)
+        {
+            if (borders == null || string.IsNullOrEmpty(memberName)) return;
+
+            try
+            {
+                // Get e.g. Top/Left/Right/Bottom/InsideHorizontal/InsideVertical/Outline
+                var member = borders.GetType().GetProperty(memberName, BindingFlags.Public | BindingFlags.Instance);
+                var border = member?.GetValue(borders, null);
+                if (border == null) return;
+
+                // Common property names
+                var isOnProp = border.GetType().GetProperty("IsOn");
+                if (isOnProp != null && isOnProp.CanWrite) { isOnProp.SetValue(border, on, null); return; }
+
+                var visibleProp = border.GetType().GetProperty("Visible");
+                if (visibleProp != null && visibleProp.CanWrite) { visibleProp.SetValue(border, on, null); return; }
+
+                var isVisibleProp = border.GetType().GetProperty("IsVisible");
+                if (isVisibleProp != null && isVisibleProp.CanWrite) { isVisibleProp.SetValue(border, on, null); return; }
+
+                var suppressProp = border.GetType().GetProperty("Suppress");
+                if (suppressProp != null && suppressProp.CanWrite) { suppressProp.SetValue(border, !on, null); return; }
+
+                // Method alternatives
+                var setOn = border.GetType().GetMethod("SetOn", new[] { typeof(bool) });
+                if (setOn != null) { setOn.Invoke(border, new object[] { on }); return; }
+
+                var setVisible = border.GetType().GetMethod("SetVisible", new[] { typeof(bool) });
+                if (setVisible != null) { setVisible.Invoke(border, new object[] { on }); return; }
+
+                var setSuppress = border.GetType().GetMethod("SetSuppress", new[] { typeof(bool) });
+                if (setSuppress != null) { setSuppress.Invoke(border, new object[] { !on }); return; }
+            }
+            catch
+            {
+                // If this member isn't present in the current AutoCAD release, skip it.
+            }
+        }
 
         // =====================================================================
         // Identify an existing table by content/shape
         // =====================================================================
+        // Heuristic updater for headerless or multi-row "LAT/LONG" tables.
+        // We only touch rows listed in rowIndexMap; each row either carries both
+        // LAT+LONG numbers, or it carries a label cell ("LAT","LONG") next to a value cell.
+        private static int UpdateLegacyLatLongRows(Table table, IDictionary<int, CrossingRecord> rowIndexMap)
+        {
+            if (table == null || rowIndexMap == null || rowIndexMap.Count == 0) return 0;
+
+            int updatedCells = 0;
+
+            foreach (var kv in rowIndexMap)
+            {
+                var row = kv.Key;
+                var rec = kv.Value;
+                if (rec == null) continue;
+
+                if (row < 0 || row >= table.Rows.Count) continue;
+
+                // Discover candidate cells on this row
+                int latCol, longCol;
+                TryDetectLatLongCellsInRow(table, row, out latCol, out longCol);
+
+                // Write LAT
+                if (latCol >= 0 && latCol < table.Columns.Count)
+                {
+                    var existing = ReadCellTextSafe(table, row, latCol);
+                    var desired = rec.Lat ?? string.Empty;
+                    if (!string.Equals(existing?.Trim(), desired?.Trim(), StringComparison.Ordinal))
+                    {
+                        try { table.Cells[row, latCol].TextString = desired; updatedCells++; } catch { }
+                    }
+                }
+
+                // Write LONG
+                if (longCol >= 0 && longCol < table.Columns.Count)
+                {
+                    var existing = ReadCellTextSafe(table, row, longCol);
+                    var desired = rec.Long ?? string.Empty;
+                    if (!string.Equals(existing?.Trim(), desired?.Trim(), StringComparison.Ordinal))
+                    {
+                        try { table.Cells[row, longCol].TextString = desired; updatedCells++; } catch { }
+                    }
+                }
+            }
+
+            return updatedCells;
+        }
+
+        // Try to find which cell(s) in a row are the Latitude and Longitude cells.
+        // Strategy:
+        //   1) If a cell looks like a LAT/LONG label, prefer its right neighbor as the value.
+        //   2) Otherwise, pick numeric cells by range: LAT in [-90..90], LONG in [-180..180].
+        //   3) If multiple candidates exist, prefer (leftmost LAT, then the nearest LONG to its right).
+        // Try to find which cell(s) in a row are the Latitude and Longitude cells.
+        // Strategy:
+        //   1) If a cell looks like a LAT/LONG label, prefer its right neighbor as the value.
+        //   2) Otherwise, pick numeric cells by range: LAT in [-90..90], LONG in [-180..180].
+        //   3) If multiple candidates exist, prefer (leftmost LAT, then the nearest LONG to its right).
+        // Try to find which cell(s) in a row are the Latitude and Longitude cells.
+        // Strategy:
+        //   1) If a cell looks like a LAT/LONG label, prefer its right neighbor as the value.
+        //   2) Otherwise, pick numeric cells by range: LAT in [-90..90], LONG in [-180..180].
+        //   3) If multiple candidates exist, prefer (leftmost LAT, then the nearest LONG to its right).
+        private static void TryDetectLatLongCellsInRow(Table table, int row, out int latCol, out int longCol)
+        {
+            latCol = -1;
+            longCol = -1;
+
+            if (table == null || row < 0 || row >= table.Rows.Count)
+                return;
+
+            int cols = table.Columns.Count;
+            var latLabelCols = new List<int>();
+            var longLabelCols = new List<int>();
+            var latNums = new List<int>();
+            var longNums = new List<int>();
+
+            // Scan the row and collect label and numeric candidates
+            for (int c = 0; c < cols; c++)
+            {
+                var raw = ReadCellTextSafe(table, row, c);
+                var txt = NormalizeText(raw); // strips mtext formatting and trims
+
+                if (!string.IsNullOrWhiteSpace(txt))
+                {
+                    var up = txt.ToUpperInvariant();
+
+                    if (up.Contains("LATITUDE") || up == "LAT" || up.StartsWith("LAT"))
+                        latLabelCols.Add(c);
+
+                    if (up.Contains("LONGITUDE") || up == "LONG" || up.StartsWith("LONG"))
+                        longLabelCols.Add(c);
+                }
+
+                // Numeric candidates
+                if (double.TryParse(txt, NumberStyles.Float, CultureInfo.InvariantCulture, out double val))
+                {
+                    if (val >= -90.0 && val <= 90.0) latNums.Add(c);
+                    if (val >= -180.0 && val <= 180.0) longNums.Add(c);
+                }
+            }
+
+            // Prefer explicit label -> value (right neighbor, else left neighbor)
+            for (int i = 0; i < latLabelCols.Count && latCol < 0; i++)
+            {
+                int c = latLabelCols[i];
+                int right = c + 1, left = c - 1;
+                if (right < cols) latCol = right;
+                else if (left >= 0) latCol = left;
+            }
+
+            for (int i = 0; i < longLabelCols.Count && longCol < 0; i++)
+            {
+                int c = longLabelCols[i];
+                int right = c + 1, left = c - 1;
+                if (right < cols) longCol = right;
+                else if (left >= 0) longCol = left;
+            }
+
+            // Fill from numeric pools if still unknown
+            if (latCol < 0 && latNums.Count > 0)
+                latCol = latNums[0];
+
+            if (longCol < 0 && longNums.Count > 0)
+            {
+                // Prefer a LONG to the right of LAT when both exist
+                int pick = -1;
+                for (int idx = 0; idx < longNums.Count; idx++)
+                {
+                    int i = longNums[idx];
+                    if (i == latCol) continue;
+                    if (latCol < 0 || i > latCol) { pick = i; break; }
+                }
+                longCol = pick >= 0 ? pick : longNums[0];
+            }
+
+            // If we accidentally picked the same column for both, try to separate
+            if (latCol >= 0 && longCol == latCol && longNums.Count > 1)
+            {
+                int alt = -1;
+                for (int k = 0; k < longNums.Count; k++)
+                {
+                    int i = longNums[k];
+                    if (i != latCol) { alt = i; break; }
+                }
+                if (alt >= 0) longCol = alt;
+            }
+        }
 
         public XingTableType IdentifyTable(Table table, Transaction tr)
         {

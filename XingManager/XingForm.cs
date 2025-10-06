@@ -356,32 +356,39 @@ namespace XingManager
 
         // ===== Core actions =====
 
-        private void RescanRecords(bool applyToTables = true)
+        private void RescanRecords(bool applyToTables = true, bool suppressDuplicateUi = false)
         {
             _isScanning = true;
             try
             {
-                // 1) Read from DWG
-                var result = _repository.ScanCrossings();
-                _records = new BindingList<CrossingRecord>(result.Records.ToList());
-                _contexts = result.InstanceContexts ?? new Dictionary<ObjectId, DuplicateResolver.InstanceContext>();
+                // NEW: in case Rescan is called while a cell is still being edited
+                FlushPendingGridEdits();
+
+                // 1) Read from DWG -> populate grid
+                var firstScan = _repository.ScanCrossings();
+                _records = new BindingList<CrossingRecord>(firstScan.Records.ToList());
+                _contexts = firstScan.InstanceContexts ?? new Dictionary<ObjectId, DuplicateResolver.InstanceContext>();
                 gridCrossings.DataSource = _records;
 
-                // 2) Resolve duplicates (choose canonicals)
-                var duplicateResolutionOk = _duplicateResolver.ResolveDuplicates(_records, _contexts);
-                var latLongResolutionOk = _latLongDuplicateResolver.ResolveDuplicates(_records, _contexts);
-                if (!duplicateResolutionOk || !latLongResolutionOk)
+                // 2) Resolve duplicates unless explicitly suppressed
+                bool dupOk = true, latDupOk = true;
+                if (!suppressDuplicateUi)
                 {
-                    _records?.ResetBindings();
-                    gridCrossings.Refresh();
-                    _isDirty = false;
-                    return;
+                    dupOk = _duplicateResolver.ResolveDuplicates(_records, _contexts);          // :contentReference[oaicite:4]{index=4}
+                    latDupOk = _latLongDuplicateResolver.ResolveDuplicates(_records, _contexts);
+                    if (!dupOk || !latDupOk)
+                    {
+                        _records?.ResetBindings();
+                        gridCrossings.Refresh();
+                        _isDirty = false;
+                        return;
+                    }
                 }
 
                 _records.ResetBindings();
                 gridCrossings.Refresh();
 
-                // 3) Persist to DWG/tables only if requested
+                // 3) Optionally persist to DWG/tables (used by a true "Rescan" merge pass)
                 if (applyToTables)
                 {
                     var snapshot = _records.ToList();
@@ -389,7 +396,9 @@ namespace XingManager
                     try
                     {
                         _repository.ApplyChanges(snapshot, _tableSync);
-                        _tableSync.UpdateLatLongSourceTables(_doc, snapshot);
+                        _tableSync.UpdateAllTables(_doc, snapshot);  // MAIN/PAGE/LATLONG  :contentReference[oaicite:5]{index=5}
+                        UpdateAllXingTablesFromGrid();               // safety X‑key pass (4/6‑col LAT/LONG)
+                        _tableSync.UpdateLatLongSourceTables(_doc, snapshot); // explicit sources  :contentReference[oaicite:6]{index=6}
                     }
                     catch (Exception ex)
                     {
@@ -397,7 +406,7 @@ namespace XingManager
                             MessageBoxButtons.OK, MessageBoxIcon.Error);
                     }
 
-                    // 4) Re-read to reflect the new persisted state
+                    // 4) Re-scan to reflect the persisted state (no resolver here)
                     var post = _repository.ScanCrossings();
                     _records = new BindingList<CrossingRecord>(post.Records.ToList());
                     _contexts = post.InstanceContexts ?? new Dictionary<ObjectId, DuplicateResolver.InstanceContext>();
@@ -414,25 +423,41 @@ namespace XingManager
                 MessageBox.Show(ex.Message, "Crossing Manager",
                     MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
-            finally { _isScanning = false; }
+            finally
+            {
+                _isScanning = false;
+            }
         }
 
         private void ApplyChangesToDrawing()
         {
+            // NEW: make sure the last keystroke in the grid is committed
+            FlushPendingGridEdits();
+
             if (!ValidateRecords()) return;
 
             try
             {
                 var snapshot = _records.ToList();
 
-                // Persist changes to the crossing blocks/attributes in the DWG
+                // 1) Persist grid -> blocks
                 _repository.ApplyChanges(snapshot, _tableSync);
 
-                // Update any LAT/LONG tables that were discovered during scans
-                _tableSync.UpdateLatLongSourceTables(_doc, snapshot);
+                // 2) Persist grid -> ALL recognised tables (MAIN / PAGE / LATLONG)
+                _tableSync.UpdateAllTables(_doc, snapshot);   // (uses robust header/heuristics)  :contentReference[oaicite:2]{index=2}
 
-                // Also push the changes into any MAIN/PAGE/LATLNG tables
+                // 3) Safety pass: force an X‑key keyed update for every recognised table
+                //    (handles both 4‑col and 6‑col LAT/LONG layouts).  See method below.
                 UpdateAllXingTablesFromGrid();
+
+                // 4) If we captured explicit LAT/LONG sources on scan, update those rows by id as well
+                _tableSync.UpdateLatLongSourceTables(_doc, snapshot);  // :contentReference[oaicite:3]{index=3}
+
+                // 5) Rebuild table display lists so the change is visible immediately
+                ForceRegenAllCrossingTablesInDwg();
+
+                // 6) Re-read **without** invoking the duplicate resolver UI
+                RescanRecords(applyToTables: false, suppressDuplicateUi: true);
 
                 _isDirty = false;
                 MessageBox.Show("Crossing data applied to drawing.", "Crossing Manager",
@@ -530,6 +555,11 @@ namespace XingManager
         /// Update recognised crossing tables (MAIN/PAGE/LATLONG) from the current grid.
         /// Never modifies Column 0 (the bubble/X); only columns B..E are written.
         /// Ends with a hard refresh to avoid the transient “ghost row” look.
+        /// Update recognised crossing tables (MAIN, PAGE, LATLONG) from the current grid.
+        /// - Matches rows by X-key (attribute-first, with text fallback).
+        /// - Never writes Column 0 (bubble) in any table.
+        /// - For LAT/LONG, supports both 4‑col (ID, DESC, LAT, LONG) and 6‑col (ID, DESC, ZONE, LAT, LONG, DWG_REF).
+        /// - Ends with a regen so changes appear immediately.
         private void UpdateAllXingTablesFromGrid()
         {
             var doc = _doc ?? AcadApp.DocumentManager.MdiActiveDocument;
@@ -537,7 +567,7 @@ namespace XingManager
 
             var ed = doc.Editor;
 
-            // Index records by normalized X key ("3" -> "X3")
+            // Index current records by normalized X key ("3" -> "X3")
             var byX = new Dictionary<string, CrossingRecord>(StringComparer.OrdinalIgnoreCase);
             foreach (var r in _records)
             {
@@ -562,23 +592,25 @@ namespace XingManager
                         var table = tr.GetObject(entId, OpenMode.ForRead) as Table;
                         if (table == null) continue;
 
-                        var kind = _tableSync.IdentifyTable(table, tr);
+                        var kind = _tableSync.IdentifyTable(table, tr); // robust classifier  :contentReference[oaicite:7]{index=7}
                         if (kind == TableSync.XingTableType.Unknown) continue;
 
                         table.UpgradeOpen();
 
                         int matched = 0, updated = 0;
 
+                        // Data start row (LAT/LONG tables may have a title + header)
                         int startRow = 1;
                         if (kind == TableSync.XingTableType.LatLong)
                         {
-                            try { startRow = TableSync.FindLatLongDataStartRow(table); }
+                            try { startRow = TableSync.FindLatLongDataStartRow(table); } // header-aware  :contentReference[oaicite:8]{index=8}
                             catch { startRow = 1; }
                             if (startRow <= 0) startRow = 1;
                         }
 
                         for (int row = startRow; row < table.Rows.Count; row++)
                         {
+                            // Column 0 key: attribute-first, fall back to visible token
                             string xRaw = ReadXFromCellAttributeOnly(table, row, tr);
                             if (string.IsNullOrWhiteSpace(xRaw))
                             {
@@ -593,14 +625,14 @@ namespace XingManager
                             var xKey = NormalizeXKey(xRaw);
                             if (string.IsNullOrWhiteSpace(xKey) || !byX.TryGetValue(xKey, out var rec))
                             {
-                                ed.WriteMessage($"\n[CrossingManager] Row {row} -> NO MATCH (key='{xRaw}')");
+                                ed?.WriteMessage($"\n[CrossingManager] Row {row} -> NO MATCH (key='{xRaw}')");
                                 continue;
                             }
 
                             matched++;
                             bool changed = false;
 
-                            // NEVER write column 0 (bubble)
+                            // Never touch Column 0 (bubble)
                             if (kind == TableSync.XingTableType.Main)
                             {
                                 changed |= SetCellIfChanged(table, row, 1, rec.Owner);
@@ -615,9 +647,30 @@ namespace XingManager
                             }
                             else if (kind == TableSync.XingTableType.LatLong)
                             {
+                                // 4‑col: ID | DESC | LAT | LONG
+                                // 6‑col: ID | DESC | ZONE | LAT | LONG | DWG_REF
+                                var cols = table.Columns.Count;
+
+                                // Description (col 1 is common)
                                 changed |= SetCellIfChanged(table, row, 1, rec.Description);
-                                changed |= SetCellIfChanged(table, row, 2, rec.Lat);
-                                changed |= SetCellIfChanged(table, row, 3, rec.Long);
+
+                                // Zone label for 6‑col tables (e.g., "ZONE 11")
+                                var zoneLabel = string.IsNullOrWhiteSpace(rec.Zone)
+                                    ? string.Empty
+                                    : string.Format(CultureInfo.InvariantCulture, "ZONE {0}", rec.Zone.Trim());
+
+                                if (cols >= 6)
+                                {
+                                    changed |= SetCellIfChanged(table, row, 2, zoneLabel);
+                                    changed |= SetCellIfChanged(table, row, 3, rec.Lat);
+                                    changed |= SetCellIfChanged(table, row, 4, rec.Long);
+                                    changed |= SetCellIfChanged(table, row, 5, rec.DwgRef);
+                                }
+                                else
+                                {
+                                    changed |= SetCellIfChanged(table, row, 2, rec.Lat);
+                                    changed |= SetCellIfChanged(table, row, 3, rec.Long);
+                                }
                             }
 
                             if (changed) updated++;
@@ -630,7 +683,7 @@ namespace XingManager
                         }
 
                         var handleHex = table.ObjectId.Handle.Value.ToString("X");
-                        ed.WriteMessage($"\n[CrossingManager] Table {handleHex}: {kind.ToString().ToUpperInvariant()} matched={matched} updated={updated}");
+                        ed?.WriteMessage($"\n[CrossingManager] Table {handleHex}: {kind.ToString().ToUpperInvariant()} matched={matched} updated={updated}");
                     }
                 }
 
@@ -2298,6 +2351,20 @@ namespace XingManager
 
                 return combo.SelectedItem as string;
             }
+        }
+        // Add this helper method anywhere inside XingForm
+        private void FlushPendingGridEdits()
+        {
+            try { gridCrossings.EndEdit(); } catch { /* best effort */ }
+            try { gridCrossings.CommitEdit(DataGridViewDataErrorContexts.Commit); } catch { }
+            try { this.Validate(); } catch { } // pushes control-bound edits
+            try
+            {
+                // In case a CurrencyManager is backing the BindingList
+                var cm = BindingContext[_records] as CurrencyManager;
+                cm?.EndCurrentEdit();
+            }
+            catch { }
         }
 
         // 1) Try Layout.Limits; 2) fall back to paperspace BTR extents; 3) (0,0).

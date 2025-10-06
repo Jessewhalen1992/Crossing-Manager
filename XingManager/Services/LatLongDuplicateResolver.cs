@@ -4,6 +4,7 @@ using System.Drawing;
 using System.Globalization;
 using System.Linq;
 using System.Windows.Forms;
+using Autodesk.AutoCAD.ApplicationServices;
 using Autodesk.AutoCAD.DatabaseServices;
 using XingManager.Models;
 using WinFormsFlowDirection = System.Windows.Forms.FlowDirection;
@@ -12,6 +13,7 @@ namespace XingManager.Services
 {
     /// <summary>
     /// Handles duplicate resolution for LAT/LONG values coming from blocks and LAT/LONG tables.
+    /// Adds a deterministic "find & replace" write-back so existing tables are updated immediately.
     /// </summary>
     public class LatLongDuplicateResolver
     {
@@ -32,6 +34,9 @@ namespace XingManager.Services
                 .Where(group => group.Count > 1)
                 .ToList();
 
+            // Track which crossings we actually changed so we can push to DWG tables
+            var changed = new List<(string CrossingKey, LatLongCandidate Canonical)>();
+
             for (var i = 0; i < groups.Count; i++)
             {
                 var group = groups[i];
@@ -49,6 +54,7 @@ namespace XingManager.Services
                 if (selected == null)
                     continue;
 
+                // Promote to the CrossingRecord (authoritative in-memory snapshot)
                 var record = records.First(r => string.Equals(r.CrossingKey, group[0].CrossingKey, StringComparison.OrdinalIgnoreCase));
 
                 record.Lat = selected.Lat;
@@ -57,6 +63,7 @@ namespace XingManager.Services
                 if (!string.IsNullOrWhiteSpace(selected.DwgRef))
                     record.DwgRef = selected.DwgRef;
 
+                // Keep existing LatLongSources in sync
                 if (record.LatLongSources != null && record.LatLongSources.Count > 0)
                 {
                     foreach (var source in record.LatLongSources)
@@ -69,7 +76,8 @@ namespace XingManager.Services
                     }
                 }
 
-                foreach (var instanceId in record.AllInstances)
+                // Keep live contexts (blocks/table instances) in sync
+                foreach (var instanceId in record.AllInstances ?? Enumerable.Empty<ObjectId>())
                 {
                     if (contexts != null && contexts.TryGetValue(instanceId, out var ctx) && ctx != null)
                     {
@@ -78,10 +86,187 @@ namespace XingManager.Services
                         ctx.Zone = selected.Zone;
                     }
                 }
+
+                changed.Add((record.CrossingKey, selected));
+            }
+
+            // ------------------------------------------------------------------
+            // Critical part: immediately push chosen LAT/LONG into DWG tables.
+            // This prevents the UI from "snapping back" when it refreshes from DWG.
+            // ------------------------------------------------------------------
+            if (changed.Count > 0)
+            {
+                try
+                {
+                    ApplyLatLongChoicesToDrawingTables(records, changed);
+                }
+                catch
+                {
+                    // Do not fail duplicate resolution if DWG write-back had an issue.
+                    // The normal TableSync pass will still try to push changes later.
+                }
             }
 
             return true;
         }
+
+        // =============================================================================
+        // DWG "find & replace" for LAT/LONG tables
+        // =============================================================================
+
+        /// <summary>
+        /// Writes selected LAT/LONG/ZONE into the actual drawing tables:
+        ///  (1) exact source rows we know about (TableId/RowIndex),
+        ///  (2) any other LAT/LONG tables whose "ID" cell matches the crossing key.
+        /// </summary>
+        private static void ApplyLatLongChoicesToDrawingTables(
+            IList<CrossingRecord> allRecords,
+            IEnumerable<(string CrossingKey, LatLongCandidate Canonical)> changes)
+        {
+            var doc = Autodesk.AutoCAD.ApplicationServices.Application.DocumentManager?.MdiActiveDocument;
+            if (doc == null)
+                return;
+
+            var byKey = (allRecords ?? new List<CrossingRecord>())
+                .Where(r => r != null)
+                .ToDictionary(r => r.CrossingKey, r => r, StringComparer.OrdinalIgnoreCase);
+
+            // Group by table for the (1) exact source rows case
+            var rowsByTable = new Dictionary<ObjectId, List<(int Row, CrossingRecord Rec, LatLongCandidate Sel)>>();
+
+            foreach (var (key, sel) in changes)
+            {
+                if (!byKey.TryGetValue(key, out var rec) || rec == null)
+                    continue;
+
+                foreach (var src in rec.LatLongSources ?? Enumerable.Empty<CrossingRecord.LatLongSource>())
+                {
+                    if (src == null || src.TableId.IsNull || !src.TableId.IsValid || src.RowIndex < 0)
+                        continue;
+
+                    if (!rowsByTable.TryGetValue(src.TableId, out var list))
+                    {
+                        list = new List<(int, CrossingRecord, LatLongCandidate)>();
+                        rowsByTable[src.TableId] = list;
+                    }
+                    list.Add((src.RowIndex, rec, sel));
+                }
+            }
+
+            using (doc.LockDocument())
+            using (var tr = doc.TransactionManager.StartTransaction())
+            {
+                // (1) Write directly into known source rows
+                foreach (var kvp in rowsByTable)
+                {
+                    var table = tr.GetObject(kvp.Key, OpenMode.ForWrite, false, true) as Table;
+                    if (table == null) continue;
+
+                    var hasExtended = table.Columns.Count >= 6;
+                    var zoneCol = hasExtended ? 2 : -1;
+                    var latCol = hasExtended ? 3 : 2;
+                    var lngCol = hasExtended ? 4 : 3;
+                    var dwgCol = hasExtended ? 5 : -1;
+
+                    foreach (var (row, rec, sel) in kvp.Value)
+                    {
+                        if (row < 0 || row >= table.Rows.Count) continue;
+
+                        SafeSetCell(table, row, latCol, sel.Lat);
+                        SafeSetCell(table, row, lngCol, sel.Long);
+                        if (zoneCol >= 0) SafeSetCell(table, row, zoneCol, rec.ZoneLabel ?? sel.Zone ?? string.Empty);
+                        if (dwgCol >= 0) SafeSetCell(table, row, dwgCol, rec.DwgRef ?? sel.DwgRef ?? string.Empty);
+                    }
+
+                    TryRefresh(table);
+                }
+
+                // (2) Sweep all tables: replace wherever ID == crossing key
+                //     (covers legacy tables / rows not recorded in LatLongSources)
+                var db = doc.Database;
+                var bt = (BlockTable)tr.GetObject(db.BlockTableId, OpenMode.ForRead);
+
+                foreach (ObjectId btrId in bt)
+                {
+                    var btr = (BlockTableRecord)tr.GetObject(btrId, OpenMode.ForRead);
+                    foreach (ObjectId entId in btr)
+                    {
+                        var table = tr.GetObject(entId, OpenMode.ForWrite, false, true) as Table;
+                        if (table == null) continue;
+
+                        // Only 4- or 6-col layouts are treated as LAT/LONG candidates
+                        var cols = table.Columns.Count;
+                        if (cols != 4 && cols != 6) continue;
+
+                        // Use the same start-row logic as TableSync
+                        var dataStart = TableSync.FindLatLongDataStartRow(table);
+                        if (dataStart <= 0) dataStart = 1; // fallback for header-less
+
+                        var hasExtended = cols >= 6;
+                        var zoneCol = hasExtended ? 2 : -1;
+                        var latCol = hasExtended ? 3 : 2;
+                        var lngCol = hasExtended ? 4 : 3;
+                        var dwgCol = hasExtended ? 5 : -1;
+
+                        bool anyRowChanged = false;
+
+                        for (int row = dataStart; row < table.Rows.Count; row++)
+                        {
+                            // Robust key read (handles text, blocks, attribute tags, mtext, etc.)
+                            var rawKey = TableSync.ResolveCrossingKey(table, row, 0);
+                            var normKey = TableSync.NormalizeKeyForLookup(rawKey); // "X4", "X10", ...
+                            if (string.IsNullOrEmpty(normKey)) continue;
+
+                            // Do we have a change for this key?
+                            var change = changes.FirstOrDefault(c =>
+                                string.Equals(c.CrossingKey, normKey, StringComparison.OrdinalIgnoreCase));
+                            if (string.IsNullOrEmpty(change.CrossingKey)) continue;
+
+                            // Resolve record to pick Zone/DWG if present
+                            byKey.TryGetValue(change.CrossingKey, out var rec);
+
+                            SafeSetCell(table, row, latCol, change.Canonical.Lat);
+                            SafeSetCell(table, row, lngCol, change.Canonical.Long);
+                            if (zoneCol >= 0) SafeSetCell(table, row, zoneCol, rec?.ZoneLabel ?? change.Canonical.Zone ?? string.Empty);
+                            if (dwgCol >= 0) SafeSetCell(table, row, dwgCol, rec?.DwgRef ?? change.Canonical.DwgRef ?? string.Empty);
+
+                            anyRowChanged = true;
+                        }
+
+                        if (anyRowChanged)
+                            TryRefresh(table);
+                    }
+                }
+
+                tr.Commit();
+            }
+        }
+
+        private static void SafeSetCell(Table table, int row, int col, string value)
+        {
+            if (table == null || row < 0 || col < 0) return;
+            if (row >= table.Rows.Count || col >= table.Columns.Count) return;
+
+            try { table.Cells[row, col].TextString = value ?? string.Empty; }
+            catch { /* swallow; we never want dialog to fail */ }
+        }
+
+        private static void TryRefresh(Table table)
+        {
+            if (table == null) return;
+
+            // Prefer RecomputeTableBlock(true) when available; else GenerateLayout()
+            var mi = table.GetType().GetMethod("RecomputeTableBlock", new[] { typeof(bool) });
+            if (mi != null)
+            {
+                try { mi.Invoke(table, new object[] { true }); return; } catch { }
+            }
+            try { table.GenerateLayout(); } catch { }
+        }
+
+        // =============================================================================
+        // Original candidate building & dialog
+        // =============================================================================
 
         private static List<LatLongCandidate> BuildCandidateList(
             IEnumerable<CrossingRecord> records,
@@ -266,6 +451,8 @@ namespace XingManager.Services
             public int RowIndex { get; set; }
             public bool Canonical { get; set; }
         }
+
+        // --------------------------- Dialog ---------------------------
 
         private class LatLongDuplicateResolverDialog : Form
         {

@@ -45,12 +45,12 @@ namespace XingManager.Services
             if (records == null)
                 throw new ArgumentNullException("records");
 
-            // Build the flat list of duplicate candidates, skipping ignored instances
+            // Build the flat list shown in the dialog (skips IgnoreForDuplicates instances)
             var duplicateCandidates = BuildCandidateList(records, contexts);
             if (!duplicateCandidates.Any())
                 return true; // nothing to resolve
 
-            // Group candidates by crossing key; show only groups with > 1 candidate
+            // Group by CrossingKey, only show groups that actually differ
             var duplicateGroups = duplicateCandidates
                 .GroupBy(c => c.CrossingKey, StringComparer.OrdinalIgnoreCase)
                 .Select(g => g.ToList())
@@ -64,40 +64,37 @@ namespace XingManager.Services
                     ? group[0].Crossing
                     : group[0].CrossingKey;
 
-                // Display the dialog for this group and let the user choose the canonical
                 using (var dialog = new DuplicateResolverDialog(group, displayName, i + 1, duplicateGroups.Count))
                 {
                     if (ModelessDialogRunner.ShowDialog(dialog) != DialogResult.OK)
-                        return false;
+                        return false; // user canceled
                 }
 
-                // Find the candidate marked as canonical
+                // The one the user ticked
                 var selected = group.FirstOrDefault(c => c.Canonical);
                 if (selected == null)
                     continue;
 
-                // Find the CrossingRecord associated with this key
-                var record = records.First(r => string.Equals(r.CrossingKey, group[0].CrossingKey, StringComparison.OrdinalIgnoreCase));
+                // Find & update the record (canonical snapshot)
+                var record = records.First(r =>
+                    string.Equals(r.CrossingKey, group[0].CrossingKey, StringComparison.OrdinalIgnoreCase));
 
-                // Promote selected candidate's values to the record (canonical snapshot)
                 if (!selected.ObjectId.IsNull)
                     record.CanonicalInstance = selected.ObjectId;
+
                 record.Crossing = selected.Crossing;
                 record.Owner = selected.Owner;
                 record.Description = selected.Description;
                 record.Location = selected.Location;
                 record.DwgRef = selected.DwgRef;
                 record.Zone = selected.Zone;
-                record.Lat = selected.Lat;
-                record.Long = selected.Long;
+                record.Lat = selected.Lat;     // <— IMPORTANT
+                record.Long = selected.Long;    // <— IMPORTANT
 
-                // Write the chosen values into every instance context of the record,
-                // including those flagged as IgnoreForDuplicates. This keeps the in-memory
-                // contexts in sync so the grid no longer shows *VARIES*.
+                // Keep every instance context synced (even those not shown in the dialog)
                 foreach (var instanceId in record.AllInstances)
                 {
-                    InstanceContext ctx;
-                    if (contexts != null && contexts.TryGetValue(instanceId, out ctx) && ctx != null)
+                    if (contexts != null && contexts.TryGetValue(instanceId, out var ctx) && ctx != null)
                     {
                         ctx.Crossing = selected.Crossing;
                         ctx.Owner = selected.Owner;
@@ -105,8 +102,8 @@ namespace XingManager.Services
                         ctx.Location = selected.Location;
                         ctx.DwgRef = selected.DwgRef;
                         ctx.Zone = selected.Zone;
-                        ctx.Lat = selected.Lat;
-                        ctx.Long = selected.Long;
+                        ctx.Lat = selected.Lat;   // <— IMPORTANT
+                        ctx.Long = selected.Long;  // <— IMPORTANT
                     }
                 }
             }
