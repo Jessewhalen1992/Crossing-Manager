@@ -388,7 +388,7 @@ namespace XingManager.Services
             if (space == null) throw new ArgumentNullException(nameof(space));
 
             const double CellTextHeight = 10.0;
-            const double TitleTextHeight = 12.0;
+            const double TitleTextHeight = 14.0;
             const double TitleRowHeight = 20.0;
             const double HeaderRowHeight = 25.0;
             const double DataRowHeight = 25.0;
@@ -459,6 +459,24 @@ namespace XingManager.Services
             titleCell.Alignment = CellAlignment.MiddleLeft;
             titleCell.TextHeight = TitleTextHeight;
             titleCell.TextStyleId = boldStyleId;
+            try
+            {
+                var borders = titleCell.Borders;
+                if (borders != null)
+                {
+                    borders.Top.IsOn = false;
+                    borders.Left.IsOn = false;
+                    borders.Right.IsOn = false;
+                    borders.InsideHorizontal.IsOn = false;
+                    borders.InsideVertical.IsOn = false;
+                    borders.Outline.IsOn = false;
+                    borders.Bottom.IsOn = true;
+                }
+            }
+            catch
+            {
+                // Ignore border adjustments if unsupported in the running AutoCAD version
+            }
             var textColorProp = titleCell.GetType().GetProperty("TextColor", BindingFlags.Public | BindingFlags.Instance);
             if (textColorProp != null && textColorProp.CanWrite)
             {
