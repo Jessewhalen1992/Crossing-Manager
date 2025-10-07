@@ -697,16 +697,40 @@ namespace XingManager
         /// Set a table cell's TextString only if it actually changes; returns true if changed.
         private static bool SetCellIfChanged(Table t, int row, int col, string newText)
         {
-            string desired = newText ?? string.Empty;
-            string current = string.Empty;
-            try { current = t.Cells[row, col]?.TextString ?? string.Empty; } catch { }
+            if (t == null) return false;
 
-            if (!string.Equals(current, desired, StringComparison.Ordinal))
+            var desired = newText ?? string.Empty;
+
+            Cell cell = null;
+            try { cell = t.Cells[row, col]; }
+            catch { cell = null; }
+
+            if (cell == null) return false;
+
+            string current;
+            try { current = cell.TextString ?? string.Empty; }
+            catch { current = string.Empty; }
+
+            if (string.Equals(current, desired, StringComparison.Ordinal))
+                return false;
+
+            try
             {
-                try { t.Cells[row, col].TextString = desired; } catch { return false; }
+                cell.TextString = desired;
                 return true;
             }
-            return false;
+            catch
+            {
+                try
+                {
+                    cell.Value = desired;
+                    return true;
+                }
+                catch
+                {
+                    return false;
+                }
+            }
         }
 
         // ===== MATCH TABLE (grid-only) =====
