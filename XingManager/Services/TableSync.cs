@@ -2085,23 +2085,33 @@ namespace XingManager.Services
 
         internal static string NormalizeKeyForLookup(string s)
         {
-            if (string.IsNullOrWhiteSpace(s)) return string.Empty;
+            if (string.IsNullOrWhiteSpace(s))
+                return string.Empty;
 
-            s = StripMTextFormatting(s).Trim().ToUpperInvariant();
-            var sb = new StringBuilder(s.Length);
-            foreach (var ch in s)
+            var cleaned = StripMTextFormatting(s).Trim();
+            if (string.IsNullOrEmpty(cleaned))
+                return string.Empty;
+
+            var builder = new StringBuilder(cleaned.Length);
+            var previousWhitespace = false;
+
+            foreach (var ch in cleaned)
             {
-                if (char.IsLetterOrDigit(ch)) sb.Append(ch);
+                if (char.IsWhiteSpace(ch))
+                {
+                    if (!previousWhitespace)
+                    {
+                        builder.Append(' ');
+                        previousWhitespace = true;
+                    }
+                    continue;
+                }
+
+                previousWhitespace = false;
+                builder.Append(char.IsLetter(ch) ? char.ToUpperInvariant(ch) : ch);
             }
 
-            var collapsed = sb.ToString();
-            var match = Regex.Match(collapsed, @"^X0*(\d+)$");
-            if (!match.Success) return string.Empty;
-
-            var digits = match.Groups[1].Value.TrimStart('0');
-            if (digits.Length == 0) digits = "0";
-
-            return "X" + digits;
+            return builder.ToString().Trim();
         }
 
         private static Dictionary<string, CrossingRecord> BuildCrossingDescriptionMap(IEnumerable<CrossingRecord> records)
