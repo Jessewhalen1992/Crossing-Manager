@@ -28,6 +28,15 @@ namespace XingManager.Services
             LatLong
         }
 
+        private static readonly HashSet<string> MainLocationColumnSynonyms = new HashSet<string>(StringComparer.Ordinal)
+        {
+            "LOCATION",
+            "LOC",
+            "LOCATIONS",
+            "XINGLOCATION",
+            "XINGLOCATIONS"
+        };
+
         private static readonly HashSet<string> MainDwgColumnSynonyms = new HashSet<string>(StringComparer.Ordinal)
         {
             "DWGREF",
@@ -1818,6 +1827,9 @@ namespace XingManager.Services
             }
 
             var normalized = builder.ToString();
+            if (columnIndex == 3 && MainLocationColumnSynonyms.Contains(normalized))
+                return "LOCATION";
+
             if (columnIndex == 4 || columnIndex == 5)
             {
                 if (MainDwgColumnSynonyms.Contains(normalized)) return "DWGREF";
