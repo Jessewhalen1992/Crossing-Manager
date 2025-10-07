@@ -429,35 +429,51 @@ namespace XingManager
             }
         }
 
+        // --- REPLACE your existing ApplyChangesToDrawing() with this exact method ---
+        // =======================
+        // XingForm.cs  (inside class XingForm)
+        // =======================
+
+        // REPLACE your existing ApplyChangesToDrawing() with this full method.
         private void ApplyChangesToDrawing()
         {
-            // NEW: make sure the last keystroke in the grid is committed
+            // Commit any in-grid edits first
             FlushPendingGridEdits();
 
             if (!ValidateRecords()) return;
 
             try
             {
+                // Snapshot the grid BEFORE we touch the DWG; this is our “source of truth”
                 var snapshot = _records.ToList();
 
-                // 1) Persist grid -> blocks
-                _repository.ApplyChanges(snapshot, _tableSync);
+                // 1) Push grid -> blocks (your existing behavior)
+                _repository.ApplyChanges(snapshot, _tableSync);                                             // updates block attributes etc.  (kept)  :contentReference[oaicite:4]{index=4}
 
-                // 2) Persist grid -> ALL recognised tables (MAIN / PAGE / LATLONG)
-                _tableSync.UpdateAllTables(_doc, snapshot);   // (uses robust header/heuristics)  :contentReference[oaicite:2]{index=2}
+                // 2) Push grid -> all RECOGNIZED tables (Main/Page/LatLong) via TableSync (kept)
+                _tableSync.UpdateAllTables(_doc, snapshot);                                                 // kept  :contentReference[oaicite:5]{index=5}
 
-                // 3) Safety pass: force an X‑key keyed update for every recognised table
-                //    (handles both 4‑col and 6‑col LAT/LONG layouts).  See method below.
-                UpdateAllXingTablesFromGrid();
+                // 3) Safety pass on recognized tables keyed by X (kept)
+                UpdateAllXingTablesFromGrid();                                                              // kept  :contentReference[oaicite:6]{index=6}
 
-                // 4) If we captured explicit LAT/LONG sources on scan, update those rows by id as well
-                _tableSync.UpdateLatLongSourceTables(_doc, snapshot);  // :contentReference[oaicite:3]{index=3}
+                // 4) If scanner found explicit LAT/LONG sources, update those directly (kept)
+                _tableSync.UpdateLatLongSourceTables(_doc, snapshot);                                       // kept  :contentReference[oaicite:7]{index=7}
 
-                // 5) Rebuild table display lists so the change is visible immediately
-                ForceRegenAllCrossingTablesInDwg();
+                // 5) NEW: robust LAT/LONG sweep that handles headerless/legacy tables.
+                //    - uses TableSync.ResolveCrossingKey for X
+                //    - finds LAT/LONG columns per *row* (labels or numeric ranges)
+                //    - tags any touched table as LATLONG so future scans recognize it
+                ReplaceLatLongInAnyTableRobust(snapshot);                                                   // NEW
 
-                // 6) Re-read **without** invoking the duplicate resolver UI
-                RescanRecords(applyToTables: false, suppressDuplicateUi: true);
+                // 6) Visual refresh of any tables we just touched (kept)
+                ForceRegenAllCrossingTablesInDwg();                                                         // kept  :contentReference[oaicite:8]{index=8}
+
+                // 7) Re-read from DWG to refresh the grid (kept: no table writes, no duplicate UI)
+                RescanRecords(applyToTables: false, suppressDuplicateUi: true);                             // kept  :contentReference[oaicite:9]{index=9}
+
+                // 8) NEW: guard against “snap back” only for LAT/LONG by reapplying the snapshot’s LAT/LONG.
+                //    This does not affect Owner/Desc/Location/DWG_REF (your original flow is preserved).
+                OverrideLatLongFromSnapshotInGrid(snapshot);                                                // NEW
 
                 _isDirty = false;
                 MessageBox.Show("Crossing data applied to drawing.", "Crossing Manager",
@@ -465,9 +481,303 @@ namespace XingManager
             }
             catch (Exception ex)
             {
-                MessageBox.Show(ex.Message, "Crossing Manager",
-                    MessageBoxButtons.OK, MessageBoxIcon.Error);
+                MessageBox.Show(ex.Message, "Crossing Manager", MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
+        }
+
+
+        // NEW: Update LAT/LONG in ANY table row that matches by X, even with no headings.
+        //      - Reads X with TableSync.ResolveCrossingKey (robust).
+        //      - Finds per-row LAT/LONG columns by label (“LAT”, “LONG”, “LATITUDE”, “LONGITUDE”) or numeric range.
+        //      - Writes only LAT and LONG to minimize side-effects.
+        //      - Tags updated tables as LATLONG (so IdentifyTable will classify them next time).
+        private void ReplaceLatLongInAnyTableRobust(IList<CrossingRecord> snapshot)
+        {
+            var doc = _doc ?? AcadApp.DocumentManager.MdiActiveDocument;
+            if (doc == null || snapshot == null || snapshot.Count == 0) return;
+
+            // Build a key -> record map (accept either “X12” or bare digits, normalize both ways)
+            var byX = new Dictionary<string, CrossingRecord>(StringComparer.OrdinalIgnoreCase);
+            foreach (var r in snapshot)
+            {
+                if (r == null) continue;
+                var k1 = TableSync.NormalizeKeyForLookup(r.Crossing);   // “X##” or ""  (robust normalization)  :contentReference[oaicite:10]{index=10}
+                var k2 = NormalizeXKey(r.Crossing);                     // fallback normalizer used elsewhere     :contentReference[oaicite:11]{index=11}
+                if (!string.IsNullOrWhiteSpace(k1) && !byX.ContainsKey(k1)) byX[k1] = r;
+                if (!string.IsNullOrWhiteSpace(k2) && !byX.ContainsKey(k2)) byX[k2] = r;
+            }
+
+            using (doc.LockDocument())
+            using (var tr = doc.TransactionManager.StartTransaction())
+            {
+                var bt = (BlockTable)tr.GetObject(doc.Database.BlockTableId, OpenMode.ForRead);
+
+                foreach (ObjectId btrId in bt)
+                {
+                    var btr = (BlockTableRecord)tr.GetObject(btrId, OpenMode.ForRead);
+                    foreach (ObjectId entId in btr)
+                    {
+                        var table = tr.GetObject(entId, OpenMode.ForRead) as Table;
+                        if (table == null) continue;
+
+                        // We don't depend on IdentifyTable here: this pass is meant to catch legacy/headerless tables too.
+                        // If IdentifyTable *does* work, great; if not, we still handle by row.
+                        table.UpgradeOpen();
+
+                        bool anyRowUpdated = false;
+                        for (int row = 0; row < table.Rows.Count; row++)
+                        {
+                            // Robustly read X from Column 0 (text, mtext, or block attr)
+                            string rawKey = string.Empty;
+                            try { rawKey = TableSync.ResolveCrossingKey(table, row, 0); } catch { rawKey = string.Empty; }  // :contentReference[oaicite:12]{index=12}
+
+                            var key = TableSync.NormalizeKeyForLookup(rawKey);
+                            if (string.IsNullOrWhiteSpace(key))
+                                key = NormalizeXKey(rawKey);
+
+                            if (string.IsNullOrWhiteSpace(key) || !byX.TryGetValue(key, out var rec) || rec == null)
+                                continue;
+
+                            // Detect which columns on this row are LAT and LONG
+                            if (!TryDetectLatLongColumns(table, row, out var latCol, out var longCol))
+                                continue;
+
+                            bool changed = false;
+                            changed |= SetCellIfChanged(table, row, latCol, rec.Lat ?? string.Empty);
+                            changed |= SetCellIfChanged(table, row, longCol, rec.Long ?? string.Empty);
+
+                            if (changed) anyRowUpdated = true;
+                        }
+
+                        if (anyRowUpdated)
+                        {
+                            try { table.GenerateLayout(); } catch { }
+                            try { table.RecordGraphicsModified(true); } catch { }
+
+                            // Tag this table as LATLONG so future scans/updates classify it correctly
+                            try
+                            {
+                                _tableFactory.TagTable(tr, table, TableSync.XingTableType.LatLong.ToString().ToUpperInvariant());  // :contentReference[oaicite:13]{index=13}
+                            }
+                            catch { /* tagging is best-effort */ }
+
+                            // Force a redraw to avoid the “ghost row” look
+                            ForceRegenTable(table);                                                                              // :contentReference[oaicite:14]{index=14}
+                        }
+                    }
+                }
+
+                tr.Commit();
+            }
+
+            // Non-undoable repaint
+            try { doc.Editor?.Regen(); } catch { }
+            try { AcadApp.UpdateScreen(); } catch { }
+        }
+
+
+        // NEW: After Rescan (which may ignore headerless LAT/LONG tables), put just the
+        //      snapshot’s LAT/LONG (and Zone if you want) back into the grid so the form
+        //      shows the values you just applied. Everything else remains from the rescan.
+        private void OverrideLatLongFromSnapshotInGrid(IList<CrossingRecord> snapshot)
+        {
+            if (snapshot == null || _records == null || _records.Count == 0) return;
+
+            var snapByX = new Dictionary<string, CrossingRecord>(StringComparer.OrdinalIgnoreCase);
+            foreach (var r in snapshot)
+            {
+                if (r == null) continue;
+                var k = NormalizeXKey(r.Crossing);
+                if (!string.IsNullOrWhiteSpace(k) && !snapByX.ContainsKey(k))
+                    snapByX[k] = r;
+            }
+
+            foreach (var r in _records)
+            {
+                if (r == null) continue;
+                var key = NormalizeXKey(r.Crossing);
+                if (string.IsNullOrWhiteSpace(key)) continue;
+
+                if (snapByX.TryGetValue(key, out var s) && s != null)
+                {
+                    if (!string.Equals(r.Lat, s.Lat, StringComparison.Ordinal)) r.Lat = s.Lat;
+                    if (!string.Equals(r.Long, s.Long, StringComparison.Ordinal)) r.Long = s.Long;
+
+                    // If you also want Zone to stick along with LAT/LONG, un-comment:
+                    // if (!string.Equals(r.Zone, s.Zone, StringComparison.Ordinal)) r.Zone = s.Zone;
+                }
+            }
+
+            _records.ResetBindings();
+            gridCrossings.Refresh();
+        }
+
+
+        // NEW (local heuristic): Try to find the LAT and LONG columns on a data row.
+        // Strategy (per row):
+        //   1) If we see "LAT"/"LATITUDE" (or "LONG"/"LONGITUDE"), prefer the neighbor to the right (else left).
+        //   2) Otherwise, pick numeric candidates by range: LAT in [-90..90], LONG in [-180..180].
+        //   3) Prefer a LONG that lies to the right of the chosen LAT when both exist.
+        private static bool TryDetectLatLongColumns(Table table, int row, out int latCol, out int longCol)
+        {
+            latCol = -1; longCol = -1;
+            if (table == null || row < 0 || row >= table.Rows.Count) return false;
+
+            int cols = table.Columns.Count;
+            var latLabelCols = new List<int>();
+            var longLabelCols = new List<int>();
+            var latNumericCols = new List<int>();
+            var longNumericCols = new List<int>();
+
+            for (int c = 0; c < cols; c++)
+            {
+                string raw = string.Empty;
+                try { raw = table.Cells[row, c]?.TextString ?? string.Empty; } catch { raw = string.Empty; }
+
+                var txt = (raw ?? string.Empty).Trim();
+                var up = txt.ToUpperInvariant();
+
+                if (up.Contains("LATITUDE") || up == "LAT" || up.StartsWith("LAT"))
+                    latLabelCols.Add(c);
+
+                if (up.Contains("LONGITUDE") || up == "LONG" || up.StartsWith("LONG"))
+                    longLabelCols.Add(c);
+
+                if (double.TryParse(txt, NumberStyles.Float, CultureInfo.InvariantCulture, out double val))
+                {
+                    if (val >= -90.0 && val <= 90.0) latNumericCols.Add(c);
+                    if (val >= -180.0 && val <= 180.0) longNumericCols.Add(c);
+                }
+            }
+
+            // Label -> neighbor
+            foreach (var c in latLabelCols)
+            {
+                if (c + 1 < cols) { latCol = c + 1; break; }
+                if (c - 1 >= 0) { latCol = c - 1; break; }
+            }
+            foreach (var c in longLabelCols)
+            {
+                if (c + 1 < cols) { longCol = c + 1; break; }
+                if (c - 1 >= 0) { longCol = c - 1; break; }
+            }
+
+            // Fill from numeric candidates if needed
+            if (latCol < 0 && latNumericCols.Count > 0) latCol = latNumericCols[0];
+
+            if (longCol < 0 && longNumericCols.Count > 0)
+            {
+                // Prefer a LONG to the right of LAT if we already picked a LAT
+                int pick = -1;
+                foreach (var c in longNumericCols)
+                {
+                    if (latCol < 0 || c > latCol) { pick = c; break; }
+                }
+                longCol = (pick >= 0) ? pick : longNumericCols[0];
+            }
+
+            // If both landed on the same column, split LONG to an alternative if possible
+            if (latCol >= 0 && longCol == latCol && longNumericCols.Count > 1)
+            {
+                foreach (var c in longNumericCols)
+                {
+                    if (c != latCol) { longCol = c; break; }
+                }
+            }
+
+            return latCol >= 0 && longCol >= 0 && latCol < cols && longCol < cols;
+        }
+
+
+        // --- NEW helper: only touches LAT, LONG (and ZONE/DWG_REF column in 6‑col LAT/LONG tables) ---
+        private void BruteForceReplaceLatLongEverywhere(IList<CrossingRecord> snapshot)
+        {
+            var doc = _doc ?? AcadApp.DocumentManager.MdiActiveDocument;
+            if (doc == null || snapshot == null || snapshot.Count == 0) return;
+
+            // Build by‑X map from the current grid snapshot ("X3" etc.)
+            var byX = new Dictionary<string, CrossingRecord>(StringComparer.OrdinalIgnoreCase);
+            foreach (var r in snapshot)
+            {
+                var key = NormalizeXKey(r?.Crossing);
+                if (!string.IsNullOrWhiteSpace(key) && !byX.ContainsKey(key))
+                    byX[key] = r;
+            }
+
+            using (doc.LockDocument())
+            using (var tr = doc.TransactionManager.StartTransaction())
+            {
+                var bt = (BlockTable)tr.GetObject(doc.Database.BlockTableId, OpenMode.ForRead);
+
+                foreach (ObjectId btrId in bt)
+                {
+                    var btr = (BlockTableRecord)tr.GetObject(btrId, OpenMode.ForRead);
+                    foreach (ObjectId entId in btr)
+                    {
+                        var table = tr.GetObject(entId, OpenMode.ForRead) as Table;
+                        if (table == null) continue;
+
+                        // Treat classic 4‑ or 6‑column layouts as LAT/LONG candidates (ID|DESC|LAT|LONG) or (ID|DESC|ZONE|LAT|LONG|DWG_REF)
+                        var cols = table.Columns.Count;
+                        if (cols != 4 && cols != 6) continue;
+
+                        // Use the same start‑row logic you already rely on elsewhere
+                        int startRow = 1;
+                        try { startRow = TableSync.FindLatLongDataStartRow(table); } // robust header finder. :contentReference[oaicite:7]{index=7}
+                        catch { startRow = 1; }
+                        if (startRow <= 0) startRow = 1;
+
+                        table.UpgradeOpen();
+
+                        bool anyUpdated = false;
+                        int zoneCol = (cols >= 6) ? 2 : -1;
+                        int latCol = (cols >= 6) ? 3 : 2;
+                        int lngCol = (cols >= 6) ? 4 : 3;
+                        int dwgCol = (cols >= 6) ? 5 : -1;
+
+                        for (int row = startRow; row < table.Rows.Count; row++)
+                        {
+                            // Column 0 key: attribute‑first, fall back to visible token
+                            string xRaw = ReadXFromCellAttributeOnly(table, row, tr);
+                            if (string.IsNullOrWhiteSpace(xRaw))
+                            {
+                                try
+                                {
+                                    var txt = table.Cells[row, 0]?.TextString ?? string.Empty;
+                                    xRaw = ExtractXToken(txt);
+                                }
+                                catch { /* ignore */ }
+                            }
+
+                            var xKey = NormalizeXKey(xRaw);
+                            if (string.IsNullOrWhiteSpace(xKey) || !byX.TryGetValue(xKey, out var rec) || rec == null)
+                                continue;
+
+                            // Write LAT/LONG (and Zone/DWG_REF if the 6‑col layout is present)
+                            string zoneLabel = string.IsNullOrWhiteSpace(rec.Zone)
+                                ? string.Empty
+                                : string.Format(CultureInfo.InvariantCulture, "ZONE {0}", rec.Zone.Trim());
+
+                            anyUpdated |= SetCellIfChanged(table, row, latCol, rec.Lat);
+                            anyUpdated |= SetCellIfChanged(table, row, lngCol, rec.Long);
+                            if (zoneCol >= 0) anyUpdated |= SetCellIfChanged(table, row, zoneCol, zoneLabel);
+                            if (dwgCol >= 0 && !string.IsNullOrWhiteSpace(rec.DwgRef)) anyUpdated |= SetCellIfChanged(table, row, dwgCol, rec.DwgRef);
+                        }
+
+                        if (anyUpdated)
+                        {
+                            try { table.GenerateLayout(); } catch { }
+                            try { table.RecordGraphicsModified(true); } catch { }
+                        }
+                    }
+                }
+
+                tr.Commit();
+            }
+
+            // Non‑undoable repaint paths
+            try { doc.Editor?.Regen(); } catch { }
+            try { AcadApp.UpdateScreen(); } catch { }
         }
 
         private bool ValidateRecords()
