@@ -910,12 +910,12 @@ namespace XingManager
                         int matched = 0, updated = 0;
 
                         // Data start row (LAT/LONG tables may have a title + header)
-                        int startRow = 1;
+                        int startRow = 0;
                         if (kind == TableSync.XingTableType.LatLong)
                         {
                             try { startRow = TableSync.FindLatLongDataStartRow(table); } // header-aware  :contentReference[oaicite:8]{index=8}
-                            catch { startRow = 1; }
-                            if (startRow <= 0) startRow = 1;
+                            catch { startRow = 0; }
+                            if (startRow < 0) startRow = 0;
                         }
 
                         for (int row = startRow; row < table.Rows.Count; row++)
@@ -1421,12 +1421,12 @@ namespace XingManager
 
                         table.UpgradeOpen();
 
-                        int startRow = 1;
+                        int startRow = 0;
                         if (kind == TableSync.XingTableType.LatLong)
                         {
                             try { startRow = TableSync.FindLatLongDataStartRow(table); }
-                            catch { startRow = 1; }
-                            if (startRow <= 0) startRow = 1;
+                            catch { startRow = 0; }
+                            if (startRow < 0) startRow = 0;
                         }
 
                         for (int row = startRow; row < table.Rows.Count; row++)
