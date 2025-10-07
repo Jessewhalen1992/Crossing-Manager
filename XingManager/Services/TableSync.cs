@@ -1921,7 +1921,24 @@ namespace XingManager.Services
         private static void SetCellValue(Cell cell, string value)
         {
             if (cell == null) return;
-            cell.TextString = value ?? string.Empty;
+
+            var desired = value ?? string.Empty;
+
+            try
+            {
+                cell.TextString = desired;
+            }
+            catch
+            {
+                try
+                {
+                    cell.Value = desired;
+                }
+                catch
+                {
+                    // best effort: ignore assignment failures
+                }
+            }
         }
 
         internal static string ResolveCrossingKey(Table table, int row, int col)
