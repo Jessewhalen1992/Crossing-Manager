@@ -1430,6 +1430,24 @@ namespace XingManager
 
                         for (int row = startRow; row < table.Rows.Count; row++)
                         {
+                            // Skip non-data rows (title/header) to avoid invalid deletions.
+                            TableRow rowDef = null;
+                            try { rowDef = table.Rows[row]; }
+                            catch { rowDef = null; }
+
+                            if (rowDef == null)
+                                continue;
+
+                            try
+                            {
+                                if (rowDef.RowType != RowType.DataRow)
+                                    continue;
+                            }
+                            catch
+                            {
+                                // Older AutoCAD versions may not expose RowType; fall back to deleting.
+                            }
+
                             // Column A: attribute-first key; fall back to plain text token.
                             string xRaw = ReadXFromCellAttributeOnly(table, row, tr);
                             if (string.IsNullOrWhiteSpace(xRaw))
