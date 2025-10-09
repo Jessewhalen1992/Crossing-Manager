@@ -466,9 +466,7 @@ namespace XingManager.Services
             {
                 var cell = table.Cells[row, column];
                 var text = cell?.TextString ?? string.Empty;
-                var trimmed = (text ?? string.Empty).Trim();
-                if (trimmed == "-" || trimmed == "—") return string.Empty;
-                return trimmed;
+                return (text ?? string.Empty).Trim();
             }
             catch { return string.Empty; }
         }

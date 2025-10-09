@@ -1380,8 +1380,7 @@ namespace XingManager
             try
             {
                 var s = t.Cells[row, col]?.TextString ?? string.Empty;
-                s = s.Trim();
-                return (s == "-" || s == "—") ? string.Empty : s;
+                return s.Trim();
             }
             catch { return string.Empty; }
         }
