@@ -1420,6 +1420,7 @@ namespace XingManager
 
                         table.UpgradeOpen();
 
+                        // Find the first *data* row to start from.
                         int startRow = 0;
                         if (kind == TableSync.XingTableType.LatLong)
                         {
@@ -1427,29 +1428,90 @@ namespace XingManager
                             catch { startRow = 0; }
                             if (startRow < 0) startRow = 0;
                         }
+                        else
+                        {
+                            // MAIN/PAGE: if row 0 isn’t an X row, advance until we hit a row that looks like data.
+                            startRow = 0;
+                            while (startRow < table.Rows.Count)
+                            {
+                                string probe = string.Empty;
+                                try
+                                {
+                                    // attribute-first
+                                    probe = ReadXFromCellAttributeOnly(table, startRow, tr);
+                                    if (string.IsNullOrWhiteSpace(probe))
+                                    {
+                                        // text fallback
+                                        var txt = table.Cells[startRow, 0]?.TextString ?? string.Empty;
+                                        probe = ExtractXToken(txt);
+                                    }
+                                }
+                                catch { probe = string.Empty; }
+
+                                if (!string.IsNullOrWhiteSpace(NormalizeXKey(probe)))
+                                    break; // first data row
+                                startRow++;
+                            }
+                        }
 
                         for (int row = startRow; row < table.Rows.Count; row++)
                         {
-                            // Column A: attribute-first key; fall back to plain text token.
                             string xRaw = ReadXFromCellAttributeOnly(table, row, tr);
                             if (string.IsNullOrWhiteSpace(xRaw))
                             {
-                                var txt = table.Cells[row, 0]?.TextString ?? string.Empty;
-                                xRaw = ExtractXToken(txt);
+                                try
+                                {
+                                    var txt = table.Cells[row, 0]?.TextString ?? string.Empty;
+                                    xRaw = ExtractXToken(txt);
+                                }
+                                catch { xRaw = string.Empty; }
                             }
 
                             var key = NormalizeXKey(xRaw);
                             if (!normalized.Equals(key, StringComparison.OrdinalIgnoreCase))
                                 continue;
 
-                            // Delete the entire row (no shifting across columns).
-                            table.DeleteRows(row, 1);
+                            bool deleted = false;
 
-                            // Keep table internals and graphics up to date.
+                            // 1) Preferred: hard delete the row
+                            try
+                            {
+                                if (row >= 0 && row < table.Rows.Count)
+                                {
+                                    table.DeleteRows(row, 1);
+                                    deleted = true;
+                                }
+                            }
+                            catch (Autodesk.AutoCAD.Runtime.Exception ex)
+                            {
+                                // eInvalidInput often means merged/title/header row; fall through to clear.
+                                if (ex.Message.IndexOf("eInvalidInput", StringComparison.OrdinalIgnoreCase) < 0)
+                                    throw; // different failure: rethrow
+                            }
+                            catch
+                            {
+                                // unknown; try clear fallback
+                            }
+
+                            // 2) Fallback: clear the row cells so we don’t leave stale data behind
+                            if (!deleted && row >= 0 && row < table.Rows.Count)
+                            {
+                                try
+                                {
+                                    int cols = table.Columns.Count;
+                                    for (int c = 0; c < cols; c++)
+                                    {
+                                        // Never touch Column 0’s block content; just blank the visible text.
+                                        // (If Column 0 is a block cell, TextString set is harmless/no-op.)
+                                        SetCellIfChanged(table, row, c, string.Empty);
+                                    }
+                                }
+                                catch { /* best effort */ }
+                            }
+
                             try { table.GenerateLayout(); } catch { }
                             try { table.RecordGraphicsModified(true); } catch { }
                             ForceRegenTable(table);
-
                             break; // done with this table
                         }
                     }
