@@ -1038,9 +1038,12 @@ namespace XingManager
             try
             {
                 var tableType = t.GetType();
-                _setGridVisibilityBool ??= tableType.GetMethod(
-                    "SetGridVisibility",
-                    new[] { typeof(int), typeof(int), typeof(GridLineType), typeof(bool) });
+                if (_setGridVisibilityBool == null)
+                {
+                    _setGridVisibilityBool = tableType.GetMethod(
+                        "SetGridVisibility",
+                        new[] { typeof(int), typeof(int), typeof(GridLineType), typeof(bool) });
+                }
 
                 if (_setGridVisibilityBool != null)
                 {
@@ -1048,13 +1051,19 @@ namespace XingManager
                     return;
                 }
 
-                _visibilityEnumType ??= tableType.Assembly.GetType("Autodesk.AutoCAD.DatabaseServices.Visibility");
+                if (_visibilityEnumType == null)
+                {
+                    _visibilityEnumType = tableType.Assembly.GetType("Autodesk.AutoCAD.DatabaseServices.Visibility");
+                }
                 if (_visibilityEnumType == null)
                     return;
 
-                _setGridVisibilityEnum ??= tableType.GetMethod(
-                    "SetGridVisibility",
-                    new[] { typeof(int), typeof(int), typeof(GridLineType), _visibilityEnumType });
+                if (_setGridVisibilityEnum == null)
+                {
+                    _setGridVisibilityEnum = tableType.GetMethod(
+                        "SetGridVisibility",
+                        new[] { typeof(int), typeof(int), typeof(GridLineType), _visibilityEnumType });
+                }
 
                 if (_setGridVisibilityEnum == null)
                     return;

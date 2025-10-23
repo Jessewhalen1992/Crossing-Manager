@@ -151,9 +151,8 @@ namespace XingManager
 
             try { doc.Editor?.Regen(); } catch { }
         }
-    }
 
-    private static MethodInfo _debugSetGridVisibilityBool;
+        private static MethodInfo _debugSetGridVisibilityBool;
         private static MethodInfo _debugSetGridVisibilityEnum;
         private static Type _debugVisibilityType;
 
@@ -164,9 +163,12 @@ namespace XingManager
             try
             {
                 var tableType = t.GetType();
-                _debugSetGridVisibilityBool ??= tableType.GetMethod(
-                    "SetGridVisibility",
-                    new[] { typeof(int), typeof(int), typeof(GridLineType), typeof(bool) });
+                if (_debugSetGridVisibilityBool == null)
+                {
+                    _debugSetGridVisibilityBool = tableType.GetMethod(
+                        "SetGridVisibility",
+                        new[] { typeof(int), typeof(int), typeof(GridLineType), typeof(bool) });
+                }
 
                 if (_debugSetGridVisibilityBool != null)
                 {
@@ -174,13 +176,19 @@ namespace XingManager
                     return;
                 }
 
-                _debugVisibilityType ??= tableType.Assembly.GetType("Autodesk.AutoCAD.DatabaseServices.Visibility");
+                if (_debugVisibilityType == null)
+                {
+                    _debugVisibilityType = tableType.Assembly.GetType("Autodesk.AutoCAD.DatabaseServices.Visibility");
+                }
                 if (_debugVisibilityType == null)
                     return;
 
-                _debugSetGridVisibilityEnum ??= tableType.GetMethod(
-                    "SetGridVisibility",
-                    new[] { typeof(int), typeof(int), typeof(GridLineType), _debugVisibilityType });
+                if (_debugSetGridVisibilityEnum == null)
+                {
+                    _debugSetGridVisibilityEnum = tableType.GetMethod(
+                        "SetGridVisibility",
+                        new[] { typeof(int), typeof(int), typeof(GridLineType), _debugVisibilityType });
+                }
 
                 if (_debugSetGridVisibilityEnum == null)
                     return;
@@ -216,3 +224,4 @@ namespace XingManager
             }
         }
     }
+}
