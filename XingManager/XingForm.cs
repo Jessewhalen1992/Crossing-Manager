@@ -1110,20 +1110,20 @@ namespace XingManager
             catch { return 0; }
         }
 
-        private static bool IsHeadingRow(Table t, int r, int dataStartRow)
+        private static bool IsSectionTitleRow(Table t, int r)
         {
-            // Section titles like "NOVA CROSSING INFORMATION" / "PGI CROSSING INFORMATION"
             try
             {
-                var s = (t.Cells[r, 0]?.TextString ?? string.Empty).Trim().ToUpperInvariant();
-                if (s.Contains("CROSSING INFORMATION")) return true;
+                var s = (t.Cells[r, 0]?.TextString ?? string.Empty).Trim();
+                if (string.IsNullOrEmpty(s))
+                    return false;
+
+                return s.IndexOf("CROSSING INFORMATION", StringComparison.OrdinalIgnoreCase) >= 0;
             }
-            catch { }
-
-            // Header row immediately before data start (e.g., LAT/LONG column captions)
-            if (dataStartRow > 0 && r == dataStartRow - 1) return true;
-
-            return false;
+            catch
+            {
+                return false;
+            }
         }
 
         // Normalize all cells: heading rows = underline only; data rows = full box
@@ -1137,13 +1137,23 @@ namespace XingManager
 
             for (int r = 0; r < rows; r++)
             {
-                bool heading = IsHeadingRow(t, r, dataStart);
+                bool sectionTitle = IsSectionTitleRow(t, r);
+                bool columnHeader = !sectionTitle && dataStart > 0 && r == dataStart - 1;
                 for (int c = 0; c < cols; c++)
                 {
-                    if (heading)
+                    if (sectionTitle)
+                    {
+                        bool showTop = r > 0;
+                        SetCellBorders(t, r, c, top: showTop, right: false, bottom: true, left: false);
+                    }
+                    else if (columnHeader)
+                    {
                         SetCellBorders(t, r, c, top: false, right: false, bottom: true, left: false);
+                    }
                     else
+                    {
                         SetCellBorders(t, r, c, top: true, right: true, bottom: true, left: true);
+                    }
                 }
             }
 
