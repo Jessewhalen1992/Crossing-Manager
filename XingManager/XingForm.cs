@@ -2034,6 +2034,19 @@ namespace XingManager
             return (0, token.Number, suffix);
         }
 
+        private static bool IsPlaceholderDwgRef(string value)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+            {
+                return true;
+            }
+
+            var trimmed = value.Trim();
+            return string.Equals(trimmed, "-", StringComparison.Ordinal) ||
+                   string.Equals(trimmed, "—", StringComparison.Ordinal) ||
+                   string.Equals(trimmed, "–", StringComparison.Ordinal);
+        }
+
         private sealed class PageGenerationOptions
         {
             public PageGenerationOptions(string dwgRef, bool includeAdjacent, bool generateAll = false)
@@ -2055,6 +2068,7 @@ namespace XingManager
             var refs = _records
                 .Select(r => r.DwgRef ?? string.Empty)
                 .Where(s => !string.IsNullOrWhiteSpace(s))
+                .Where(s => !IsPlaceholderDwgRef(s))
                 .Distinct(StringComparer.OrdinalIgnoreCase)
                 .OrderBy(s => s, DwgRefComparer)
                 .ToList();
@@ -2667,6 +2681,7 @@ namespace XingManager
             var choices = _records
                 .Select(r => r.DwgRef ?? string.Empty)
                 .Where(s => !string.IsNullOrWhiteSpace(s))
+                .Where(s => !IsPlaceholderDwgRef(s))
                 .Distinct(StringComparer.OrdinalIgnoreCase)
                 .OrderBy(s => s, DwgRefComparer)
                 .ToList();
