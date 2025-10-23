@@ -554,6 +554,8 @@ namespace XingManager.Services
                     headerCell.TextString = headerText;
                     ApplyCellTextColor(headerCell, titleColor);
                     ApplyTitleBorderStyle(headerCell);
+                    continue;
+                }
 
                 if (rowInfo.IsColumnHeader)
                 {
@@ -628,6 +630,51 @@ namespace XingManager.Services
             }
 
             return rows;
+        }
+
+        private static void ApplyLatLongColumnHeaderRow(
+            Table table,
+            int row,
+            double headerRowHeight,
+            double cellTextHeight,
+            ObjectId textStyleId,
+            Color headerColor)
+        {
+            if (table == null)
+                return;
+
+            if (row < 0 || row >= table.Rows.Count)
+                return;
+
+            table.Rows[row].Height = headerRowHeight;
+
+            for (int c = 0; c < table.Columns.Count; c++)
+            {
+                var cell = table.Cells[row, c];
+                cell.Alignment = CellAlignment.MiddleCenter;
+                cell.TextHeight = cellTextHeight;
+                cell.TextStyleId = textStyleId;
+                cell.BackgroundColor = headerColor;
+
+                switch (c)
+                {
+                    case 0:
+                        cell.TextString = "ID";
+                        break;
+                    case 1:
+                        cell.TextString = "DESCRIPTION";
+                        break;
+                    case 2:
+                        cell.TextString = "LATITUDE";
+                        break;
+                    case 3:
+                        cell.TextString = "LONGITUDE";
+                        break;
+                    default:
+                        cell.TextString = string.Empty;
+                        break;
+                }
+            }
         }
 
         private static void ApplyTitleBorderStyle(Cell cell)
