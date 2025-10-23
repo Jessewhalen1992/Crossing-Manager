@@ -131,14 +131,14 @@ namespace XingManager.Services
 
                         // Capture attributes
                         var attributes = ReadAttributes(br, tr);
-                        var crossing = GetValue(attributes, "CROSSING");
+                        var crossing = SanitizeAttributeValue(GetValue(attributes, "CROSSING"));
                         if (string.IsNullOrEmpty(crossing))
                             continue;
 
-                        var owner = GetValue(attributes, "OWNER");
-                        var description = GetValue(attributes, "DESCRIPTION");
-                        var location = GetValue(attributes, "LOCATION");
-                        var dwgRef = GetValue(attributes, "DWG_REF");
+                        var owner = SanitizeAttributeValue(GetValue(attributes, "OWNER"));
+                        var description = SanitizeAttributeValue(GetValue(attributes, "DESCRIPTION"));
+                        var location = SanitizeAttributeValue(GetValue(attributes, "LOCATION"));
+                        var dwgRef = SanitizeAttributeValue(GetValue(attributes, "DWG_REF"));
                         string lat;
                         string lng;
                         string zone;
@@ -893,6 +893,30 @@ namespace XingManager.Services
         private static string GetValue(IDictionary<string, string> dict, string key)
         {
             return (dict != null && dict.TryGetValue(key, out var value)) ? value : string.Empty;
+        }
+
+        private static string SanitizeAttributeValue(string value)
+        {
+            if (string.IsNullOrEmpty(value))
+            {
+                return string.Empty;
+            }
+
+            var sanitized = value;
+
+            sanitized = Regex.Replace(sanitized, @"\\S([^;]+);", m =>
+            {
+                var frac = m.Groups[1].Value.Replace('#', '/');
+                return frac;
+            }, RegexOptions.IgnoreCase);
+
+            sanitized = Regex.Replace(sanitized, @"\\P|\\~", " ", RegexOptions.IgnoreCase);
+            sanitized = Regex.Replace(sanitized, @"\\[A-Za-z][^;]*;", string.Empty);
+            sanitized = sanitized.Replace("{", string.Empty).Replace("}", string.Empty);
+            sanitized = sanitized.Replace('\u00A0', ' ');
+            sanitized = Regex.Replace(sanitized, @"\s+", " ").Trim();
+
+            return sanitized;
         }
 
         private static void WriteAttribute(Transaction tr, BlockReference br, string tag, string value)
