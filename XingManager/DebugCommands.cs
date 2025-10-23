@@ -96,8 +96,8 @@ namespace XingManager
             }
         }
 
-        [CommandMethod("XING_NORMALIZE_BORDERS")]
-        public void XingNormalizeBorders()
+        [CommandMethod("XING_FIXBORDERS")]
+        public void FixAllTableBorders()
         {
             var doc = Autodesk.AutoCAD.ApplicationServices.Application.DocumentManager.MdiActiveDocument;
             if (doc == null) return;
@@ -105,113 +105,114 @@ namespace XingManager
             using (doc.LockDocument())
             using (var tr = doc.TransactionManager.StartTransaction())
             {
-                var db = doc.Database;
-                var bt = (BlockTable)tr.GetObject(db.BlockTableId, OpenMode.ForRead);
+                var bt = (BlockTable)tr.GetObject(doc.Database.BlockTableId, OpenMode.ForRead);
                 foreach (ObjectId btrId in bt)
                 {
                     var btr = (BlockTableRecord)tr.GetObject(btrId, OpenMode.ForRead);
                     foreach (ObjectId entId in btr)
                     {
-                        var table = tr.GetObject(entId, OpenMode.ForRead) as Table;
-                        if (table == null) continue;
+                        var t = tr.GetObject(entId, OpenMode.ForRead) as Table;
+                        if (t == null) continue;
+                        t.UpgradeOpen();
 
-                        table.UpgradeOpen();
-                        Normalize(table);
+                        int rows = t.Rows.Count;
+                        int cols = t.Columns.Count;
+
+                        int dataStart = 0;
+                        try { dataStart = TableSync.FindLatLongDataStartRow(t); if (dataStart < 0) dataStart = 0; } catch { dataStart = 0; }
+
+                        bool IsHeading(int r)
+                        {
+                            try
+                            {
+                                var s = (t.Cells[r, 0]?.TextString ?? string.Empty).Trim().ToUpperInvariant();
+                                if (s.Contains("CROSSING INFORMATION")) return true;
+                            }
+                            catch { }
+                            return (dataStart > 0 && r == dataStart - 1);
+                        }
+
+                        for (int r = 0; r < rows; r++)
+                        for (int c = 0; c < cols; c++)
+                        {
+                            bool heading = IsHeading(r);
+                            TrySetGridVisibility(t, r, c, GridLineType.HorizontalTop, !heading);
+                            TrySetGridVisibility(t, r, c, GridLineType.VerticalRight, !heading);
+                            TrySetGridVisibility(t, r, c, GridLineType.HorizontalBottom, true);
+                            TrySetGridVisibility(t, r, c, GridLineType.VerticalLeft, !heading);
+                        }
+
+                        try { t.GenerateLayout(); } catch { }
+                        try { t.RecordGraphicsModified(true); } catch { }
                     }
                 }
                 tr.Commit();
             }
 
             try { doc.Editor?.Regen(); } catch { }
+        }
+    }
 
-            void Normalize(Table t)
+    private static MethodInfo _debugSetGridVisibilityBool;
+    private static MethodInfo _debugSetGridVisibilityEnum;
+    private static Type _debugVisibilityType;
+
+    private static void TrySetGridVisibility(Table t, int row, int col, GridLineType line, bool visible)
+    {
+        if (t == null) return;
+
+        try
+        {
+            var tableType = t.GetType();
+            _debugSetGridVisibilityBool ??= tableType.GetMethod(
+                "SetGridVisibility",
+                new[] { typeof(int), typeof(int), typeof(GridLineType), typeof(bool) });
+
+            if (_debugSetGridVisibilityBool != null)
             {
-                if (t == null) return;
+                _debugSetGridVisibilityBool.Invoke(t, new object[] { row, col, line, visible });
+                return;
+            }
 
-                int rows = t.Rows.Count;
-                int cols = t.Columns.Count;
+            _debugVisibilityType ??= tableType.Assembly.GetType("Autodesk.AutoCAD.DatabaseServices.Visibility");
+            if (_debugVisibilityType == null)
+                return;
 
-                int dataStartRow = 0;
+            _debugSetGridVisibilityEnum ??= tableType.GetMethod(
+                "SetGridVisibility",
+                new[] { typeof(int), typeof(int), typeof(GridLineType), _debugVisibilityType });
+
+            if (_debugSetGridVisibilityEnum == null)
+                return;
+
+            object enumValue = null;
+            try
+            {
+                var field = _debugVisibilityType.GetField(visible ? "Visible" : "Invisible", BindingFlags.Public | BindingFlags.Static);
+                enumValue = field?.GetValue(null);
+            }
+            catch
+            {
+                enumValue = null;
+            }
+
+            if (enumValue == null)
+            {
                 try
                 {
-                    dataStartRow = TableSync.FindLatLongDataStartRow(t);
-                    if (dataStartRow < 0) dataStartRow = 0;
+                    enumValue = Enum.Parse(_debugVisibilityType, visible ? "Visible" : "Invisible");
                 }
                 catch
                 {
-                    dataStartRow = 0;
+                    return;
                 }
-
-                bool IsHeadingRow(int r)
-                {
-                    try
-                    {
-                        for (int c = 0; c < cols; c++)
-                        {
-                            var cell = t.Cells[r, c];
-                            if (cell == null) continue;
-                            try
-                            {
-                                if (cell.ColumnSpan > 1 || cell.RowSpan > 1)
-                                    return true;
-                            }
-                            catch { }
-                        }
-                    }
-                    catch { }
-
-                    try
-                    {
-                        var txt = (t.Cells[r, 0]?.TextString ?? string.Empty)
-                            .Trim()
-                            .ToUpperInvariant();
-                        if (txt.Contains("CROSSING INFORMATION"))
-                            return true;
-                    }
-                    catch { }
-
-                    if (r == dataStartRow - 1 && dataStartRow > 0)
-                        return true;
-
-                    return false;
-                }
-
-                for (int r = 0; r < rows; r++)
-                {
-                    bool heading = IsHeadingRow(r);
-
-                    for (int c = 0; c < cols; c++)
-                    {
-                        Cell cell = null;
-                        try { cell = t.Cells[r, c]; } catch { cell = null; }
-                        if (cell == null) continue;
-
-                        try
-                        {
-                            if (heading)
-                            {
-                                cell.Borders.Top.Visible = false;
-                                cell.Borders.Left.Visible = false;
-                                cell.Borders.Right.Visible = false;
-                                cell.Borders.Bottom.Visible = true;
-                            }
-                            else
-                            {
-                                cell.Borders.Top.Visible = true;
-                                cell.Borders.Left.Visible = true;
-                                cell.Borders.Right.Visible = true;
-                                cell.Borders.Bottom.Visible = true;
-                            }
-                        }
-                        catch
-                        {
-                        }
-                    }
-                }
-
-                try { t.GenerateLayout(); } catch { }
-                try { t.RecordGraphicsModified(true); } catch { }
             }
+
+            _debugSetGridVisibilityEnum.Invoke(t, new[] { (object)row, (object)col, (object)line, enumValue });
+        }
+        catch
+        {
+            // best effort compatibility for different AutoCAD versions
         }
     }
 }
