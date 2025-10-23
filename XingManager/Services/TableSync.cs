@@ -503,11 +503,25 @@ namespace XingManager.Services
 
             if (showTitle)
                 table.Rows[titleRow].Height = TitleRowHeight;
+            table.Rows[headerRow].Height = HeaderRowHeight;
+
+            table.Cells[headerRow, 0].TextString = "ID";
+            table.Cells[headerRow, 1].TextString = "DESCRIPTION";
+            table.Cells[headerRow, 2].TextString = "LATITUDE";
+            table.Cells[headerRow, 3].TextString = "LONGITUDE";
+
             var boldStyleId = EnsureBoldTextStyle(db, tr, "XING_BOLD", "Standard");
             var headerColor = Color.FromColorIndex(ColorMethod.ByAci, 254);
             var titleColor = Color.FromColorIndex(ColorMethod.ByAci, 14);
 
-            ApplyLatLongColumnHeaderRow(table, headerRow, HeaderRowHeight, CellTextHeight, boldStyleId, headerColor);
+            for (int c = 0; c < table.Columns.Count; c++)
+            {
+                var cell = table.Cells[headerRow, c];
+                cell.TextHeight = CellTextHeight;
+                cell.Alignment = CellAlignment.MiddleCenter;
+                cell.TextStyleId = boldStyleId;
+                cell.BackgroundColor = headerColor;
+            }
 
             if (showTitle)
             {
@@ -540,9 +554,6 @@ namespace XingManager.Services
                     headerCell.TextString = headerText;
                     ApplyCellTextColor(headerCell, titleColor);
                     ApplyTitleBorderStyle(headerCell);
-
-                    continue;
-                }
 
                 if (rowInfo.IsColumnHeader)
                 {
@@ -617,35 +628,6 @@ namespace XingManager.Services
             }
 
             return rows;
-        }
-
-        private static void ApplyLatLongColumnHeaderRow(
-            Table table,
-            int rowIndex,
-            double rowHeight,
-            double textHeight,
-            ObjectId textStyleId,
-            Color backgroundColor)
-        {
-            if (table == null)
-                return;
-
-            if (rowIndex < 0 || rowIndex >= table.Rows.Count)
-                return;
-
-            table.Rows[rowIndex].Height = rowHeight;
-
-            var headers = new[] { "ID", "DESCRIPTION", "LATITUDE", "LONGITUDE" };
-
-            for (int c = 0; c < table.Columns.Count; c++)
-            {
-                var cell = table.Cells[rowIndex, c];
-                cell.Alignment = CellAlignment.MiddleCenter;
-                cell.TextHeight = textHeight;
-                cell.TextStyleId = textStyleId;
-                cell.BackgroundColor = backgroundColor;
-                cell.TextString = c < headers.Length ? headers[c] : string.Empty;
-            }
         }
 
         private static void ApplyTitleBorderStyle(Cell cell)
