@@ -2200,7 +2200,8 @@ namespace XingManager
                                     otherInsert,
                                     null,
                                     OtherLatLongTableTitle,
-                                    otherSections);
+                                    otherSections,
+                                    includeTitleRow: false);
                             }
 
                             tr.Commit();
@@ -2775,7 +2776,8 @@ namespace XingManager
                                 otherPrompt.Value,
                                 null,
                                 OtherLatLongTableTitle,
-                                otherSections);
+                                otherSections,
+                                includeTitleRow: false);
                             tr.Commit();
                         }
                     }

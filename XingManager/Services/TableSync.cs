@@ -540,7 +540,7 @@ namespace XingManager.Services
                 titleCell.TextHeight = TitleTextHeight;
                 titleCell.TextStyleId = boldStyleId;
                 ApplyCellTextColor(titleCell, titleColor);
-                ApplyTitleBorderStyle(titleCell);
+                ApplyTitleBorderStyle(table, titleRow, 0, table.Columns.Count - 1);
             }
 
             // Data rows
@@ -561,7 +561,7 @@ namespace XingManager.Services
                     headerCell.TextStyleId = boldStyleId;
                     headerCell.TextString = headerText;
                     ApplyCellTextColor(headerCell, titleColor);
-                    ApplyTitleBorderStyle(headerCell);
+                    ApplyTitleBorderStyle(table, row, 0, table.Columns.Count - 1);
                     continue;
                 }
 
@@ -587,6 +587,23 @@ namespace XingManager.Services
                 table.Cells[row, 1].TextString = rec?.Description ?? string.Empty;
                 table.Cells[row, 2].TextString = rec?.Lat ?? string.Empty;
                 table.Cells[row, 3].TextString = rec?.Long ?? string.Empty;
+            }
+
+            var lastRecordRowIndex = -1;
+            for (int i = orderedRows.Count - 1; i >= 0; i--)
+            {
+                if (!orderedRows[i].HasRecord)
+                {
+                    continue;
+                }
+
+                lastRecordRowIndex = dataStart + i;
+                break;
+            }
+
+            if (lastRecordRowIndex >= 0)
+            {
+                ApplyBottomBorderToRow(table, lastRecordRowIndex);
             }
 
             space.UpgradeOpen();
@@ -686,6 +703,20 @@ namespace XingManager.Services
             }
         }
 
+        private static void ApplyTitleBorderStyle(Table table, int row, int startColumn, int endColumn)
+        {
+            if (table == null || table.Columns.Count == 0) return;
+            if (row < 0 || row >= table.Rows.Count) return;
+
+            startColumn = Math.Max(0, startColumn);
+            endColumn = Math.Min(table.Columns.Count - 1, endColumn);
+
+            for (int c = startColumn; c <= endColumn; c++)
+            {
+                ApplyTitleBorderStyle(table.Cells[row, c]);
+            }
+        }
+
         private static void ApplyTitleBorderStyle(Cell cell)
         {
             if (cell == null) return;
@@ -701,12 +732,22 @@ namespace XingManager.Services
                 SetBorderVisible(bordersObj, "Right", false);
                 SetBorderVisible(bordersObj, "InsideHorizontal", false);
                 SetBorderVisible(bordersObj, "InsideVertical", false);
-                SetBorderVisible(bordersObj, "Outline", false);
                 SetBorderVisible(bordersObj, "Bottom", true);
             }
             catch
             {
                 // purely cosmetic; ignore on unsupported releases
+            }
+        }
+
+        private static void ApplyBottomBorderToRow(Table table, int row)
+        {
+            if (table == null) return;
+            if (row < 0 || row >= table.Rows.Count) return;
+
+            for (int c = 0; c < table.Columns.Count; c++)
+            {
+                ApplyDataCellBorderStyle(table.Cells[row, c]);
             }
         }
 
