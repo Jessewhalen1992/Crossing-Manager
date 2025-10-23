@@ -2477,7 +2477,8 @@ namespace XingManager
                     pointRes.Value,
                     null,
                     OtherLatLongTableTitle,
-                    sections);
+                    sections,
+                    includeTitleRow: false);
 
                 tr.Commit();
             }

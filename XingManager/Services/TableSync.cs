@@ -408,23 +408,39 @@ namespace XingManager.Services
             public IList<CrossingRecord> Records { get; set; } = new List<CrossingRecord>();
         }
 
+        private enum LatLongRowKind
+        {
+            Data,
+            SectionHeader,
+            ColumnHeader
+        }
+
         private struct LatLongRow
         {
-            private LatLongRow(CrossingRecord record, string header)
+            private LatLongRow(LatLongRowKind kind, CrossingRecord record, string header)
             {
+                Kind = kind;
                 Record = record;
                 Header = header;
             }
+
+            public LatLongRowKind Kind { get; }
 
             public CrossingRecord Record { get; }
 
             public string Header { get; }
 
-            public bool IsHeader => !string.IsNullOrEmpty(Header);
+            public bool IsSectionHeader => Kind == LatLongRowKind.SectionHeader;
 
-            public static LatLongRow FromRecord(CrossingRecord record) => new LatLongRow(record, null);
+            public bool IsColumnHeader => Kind == LatLongRowKind.ColumnHeader;
 
-            public static LatLongRow FromHeader(string header) => new LatLongRow(null, header);
+            public bool HasRecord => Kind == LatLongRowKind.Data && Record != null;
+
+            public static LatLongRow FromRecord(CrossingRecord record) => new LatLongRow(LatLongRowKind.Data, record, null);
+
+            public static LatLongRow FromHeader(string header) => new LatLongRow(LatLongRowKind.SectionHeader, null, header);
+
+            public static LatLongRow ColumnHeader() => new LatLongRow(LatLongRowKind.ColumnHeader, null, null);
         }
 
         public Table CreateAndInsertLatLongTable(
@@ -434,7 +450,8 @@ namespace XingManager.Services
             Point3d insertPoint,
             IList<CrossingRecord> records,
             string titleOverride = null,
-            IList<LatLongSection> sections = null)
+            IList<LatLongSection> sections = null,
+            bool includeTitleRow = true)
         {
             if (db == null) throw new ArgumentNullException(nameof(db));
             if (tr == null) throw new ArgumentNullException(nameof(tr));
@@ -451,6 +468,10 @@ namespace XingManager.Services
             const double W3 = 90.0;   // Longitude
 
             var orderedRows = BuildLatLongRows(records, sections);
+            var resolvedTitle = string.IsNullOrWhiteSpace(titleOverride)
+                ? "WATER CROSSING INFORMATION"
+                : titleOverride;
+            var showTitle = includeTitleRow && !string.IsNullOrWhiteSpace(resolvedTitle);
 
             var table = new Table();
             table.SetDatabaseDefaults();
@@ -464,9 +485,9 @@ namespace XingManager.Services
             if (tsDict.Contains("Standard"))
                 table.TableStyle = tsDict.GetAt("Standard");
 
-            const int titleRow = 0;
-            const int headerRow = 1;
-            const int dataStart = 2;
+            var titleRow = showTitle ? 0 : -1;
+            var headerRow = showTitle ? 1 : 0;
+            var dataStart = headerRow + 1;
             table.SetSize(dataStart + orderedRows.Count, 4);
 
             if (table.Columns.Count >= 4)
@@ -480,70 +501,25 @@ namespace XingManager.Services
             for (int r = 0; r < table.Rows.Count; r++)
                 table.Rows[r].Height = DataRowHeight;
 
-            table.Rows[titleRow].Height = TitleRowHeight;
-            table.Rows[headerRow].Height = HeaderRowHeight;
-
-            table.Cells[headerRow, 0].TextString = "ID";
-            table.Cells[headerRow, 1].TextString = "DESCRIPTION";
-            table.Cells[headerRow, 2].TextString = "LATITUDE";
-            table.Cells[headerRow, 3].TextString = "LONGITUDE";
-
+            if (showTitle)
+                table.Rows[titleRow].Height = TitleRowHeight;
             var boldStyleId = EnsureBoldTextStyle(db, tr, "XING_BOLD", "Standard");
             var headerColor = Color.FromColorIndex(ColorMethod.ByAci, 254);
             var titleColor = Color.FromColorIndex(ColorMethod.ByAci, 14);
 
-            for (int c = 0; c < table.Columns.Count; c++)
-            {
-                var cell = table.Cells[headerRow, c];
-                cell.TextHeight = CellTextHeight;
-                cell.Alignment = CellAlignment.MiddleCenter;
-                cell.TextStyleId = boldStyleId;
-                cell.BackgroundColor = headerColor;
-            }
+            ApplyLatLongColumnHeaderRow(table, headerRow, HeaderRowHeight, CellTextHeight, boldStyleId, headerColor);
 
-            // Title
-            var titleCell = table.Cells[titleRow, 0];
-            table.MergeCells(CellRange.Create(table, titleRow, 0, titleRow, Math.Max(0, table.Columns.Count - 1)));
-            titleCell.TextString = string.IsNullOrWhiteSpace(titleOverride)
-                ? "WATER CROSSING INFORMATION"
-                : titleOverride;
-            titleCell.Alignment = CellAlignment.MiddleLeft;
-            titleCell.TextHeight = TitleTextHeight;
-            titleCell.TextStyleId = boldStyleId;
-
-            // Title color (TextColor or ContentColor depending on release)
-            var textColorProp = titleCell.GetType().GetProperty("TextColor", BindingFlags.Public | BindingFlags.Instance);
-            if (textColorProp != null && textColorProp.CanWrite)
+            if (showTitle)
             {
-                try { textColorProp.SetValue(titleCell, titleColor, null); } catch { }
+                var titleCell = table.Cells[titleRow, 0];
+                table.MergeCells(CellRange.Create(table, titleRow, 0, titleRow, Math.Max(0, table.Columns.Count - 1)));
+                titleCell.TextString = resolvedTitle;
+                titleCell.Alignment = CellAlignment.MiddleLeft;
+                titleCell.TextHeight = TitleTextHeight;
+                titleCell.TextStyleId = boldStyleId;
+                ApplyCellTextColor(titleCell, titleColor);
+                ApplyTitleBorderStyle(titleCell);
             }
-            else
-            {
-                var contentColorProp = titleCell.GetType().GetProperty("ContentColor", BindingFlags.Public | BindingFlags.Instance);
-                if (contentColorProp != null && contentColorProp.CanWrite)
-                {
-                    try { contentColorProp.SetValue(titleCell, titleColor, null); } catch { }
-                }
-            }
-
-            // --- Portable border toggles (no direct IsOn/Inside* usage) ---
-            try
-            {
-                var bordersProp = titleCell.GetType().GetProperty("Borders", BindingFlags.Public | BindingFlags.Instance);
-                var bordersObj = bordersProp?.GetValue(titleCell, null);
-                if (bordersObj != null)
-                {
-                    // Turn OFF everything except Bottom (keeps a single underline)
-                    SetBorderVisible(bordersObj, "Top", false);
-                    SetBorderVisible(bordersObj, "Left", false);
-                    SetBorderVisible(bordersObj, "Right", false);
-                    SetBorderVisible(bordersObj, "InsideHorizontal", false);
-                    SetBorderVisible(bordersObj, "InsideVertical", false);
-                    SetBorderVisible(bordersObj, "Outline", false);
-                    SetBorderVisible(bordersObj, "Bottom", true);
-                }
-            }
-            catch { /* purely cosmetic; ignore on unsupported releases */ }
 
             // Data rows
             for (int i = 0; i < orderedRows.Count; i++)
@@ -551,22 +527,31 @@ namespace XingManager.Services
                 var rowInfo = orderedRows[i];
                 int row = dataStart + i;
 
-                if (rowInfo.IsHeader)
+                if (rowInfo.IsSectionHeader)
                 {
                     var headerText = rowInfo.Header ?? string.Empty;
 
-                    for (int c = 0; c < table.Columns.Count; c++)
-                    {
-                        var cell = table.Cells[row, c];
-                        cell.Alignment = CellAlignment.MiddleLeft;
-                        cell.TextHeight = TitleTextHeight;
-                        cell.TextStyleId = boldStyleId;
-                        cell.BackgroundColor = headerColor;
-                        cell.TextString = c == 1 ? headerText : string.Empty;
-                    }
+                    table.Rows[row].Height = TitleRowHeight;
+                    table.MergeCells(CellRange.Create(table, row, 0, row, Math.Max(0, table.Columns.Count - 1)));
+                    var headerCell = table.Cells[row, 0];
+                    headerCell.Alignment = CellAlignment.MiddleLeft;
+                    headerCell.TextHeight = TitleTextHeight;
+                    headerCell.TextStyleId = boldStyleId;
+                    headerCell.TextString = headerText;
+                    ApplyCellTextColor(headerCell, titleColor);
+                    ApplyTitleBorderStyle(headerCell);
 
                     continue;
                 }
+
+                if (rowInfo.IsColumnHeader)
+                {
+                    ApplyLatLongColumnHeaderRow(table, row, HeaderRowHeight, CellTextHeight, boldStyleId, headerColor);
+                    continue;
+                }
+
+                if (!rowInfo.HasRecord)
+                    continue;
 
                 var rec = rowInfo.Record;
                 for (int c = 0; c < table.Columns.Count; c++)
@@ -609,6 +594,7 @@ namespace XingManager.Services
                     if (!string.IsNullOrEmpty(header) && sectionRecords.Count > 0)
                     {
                         rows.Add(LatLongRow.FromHeader(header));
+                        rows.Add(LatLongRow.ColumnHeader());
                     }
 
                     foreach (var record in sectionRecords)
@@ -632,6 +618,85 @@ namespace XingManager.Services
 
             return rows;
         }
+
+        private static void ApplyLatLongColumnHeaderRow(
+            Table table,
+            int rowIndex,
+            double rowHeight,
+            double textHeight,
+            ObjectId textStyleId,
+            Color backgroundColor)
+        {
+            if (table == null)
+                return;
+
+            if (rowIndex < 0 || rowIndex >= table.Rows.Count)
+                return;
+
+            table.Rows[rowIndex].Height = rowHeight;
+
+            var headers = new[] { "ID", "DESCRIPTION", "LATITUDE", "LONGITUDE" };
+
+            for (int c = 0; c < table.Columns.Count; c++)
+            {
+                var cell = table.Cells[rowIndex, c];
+                cell.Alignment = CellAlignment.MiddleCenter;
+                cell.TextHeight = textHeight;
+                cell.TextStyleId = textStyleId;
+                cell.BackgroundColor = backgroundColor;
+                cell.TextString = c < headers.Length ? headers[c] : string.Empty;
+            }
+        }
+
+        private static void ApplyTitleBorderStyle(Cell cell)
+        {
+            if (cell == null) return;
+
+            try
+            {
+                var bordersProp = cell.GetType().GetProperty("Borders", BindingFlags.Public | BindingFlags.Instance);
+                var bordersObj = bordersProp?.GetValue(cell, null);
+                if (bordersObj == null) return;
+
+                SetBorderVisible(bordersObj, "Top", false);
+                SetBorderVisible(bordersObj, "Left", false);
+                SetBorderVisible(bordersObj, "Right", false);
+                SetBorderVisible(bordersObj, "InsideHorizontal", false);
+                SetBorderVisible(bordersObj, "InsideVertical", false);
+                SetBorderVisible(bordersObj, "Outline", false);
+                SetBorderVisible(bordersObj, "Bottom", true);
+            }
+            catch
+            {
+                // purely cosmetic; ignore on unsupported releases
+            }
+        }
+
+        private static void ApplyCellTextColor(Cell cell, Color color)
+        {
+            if (cell == null) return;
+
+            var textColorProp = cell.GetType().GetProperty("TextColor", BindingFlags.Public | BindingFlags.Instance);
+            if (textColorProp != null && textColorProp.CanWrite)
+            {
+                try
+                {
+                    textColorProp.SetValue(cell, color, null);
+                    return;
+                }
+                catch
+                {
+                    // ignore and fall back to ContentColor
+                }
+            }
+
+            var contentColorProp = cell.GetType().GetProperty("ContentColor", BindingFlags.Public | BindingFlags.Instance);
+            if (contentColorProp != null && contentColorProp.CanWrite)
+            {
+                try { contentColorProp.SetValue(cell, color, null); } catch { }
+            }
+        }
+
         // Portable border visibility setter across AutoCAD releases
         private static void SetBorderVisible(object borders, string memberName, bool on)
         {
@@ -1034,7 +1099,8 @@ namespace XingManager.Services
 
             for (var row = dataRow; row < table.Rows.Count; row++)
             {
-                if (IsLatLongSectionHeaderRow(table, row, zoneColumn, latColumn, longColumn, dwgColumn))
+                if (IsLatLongSectionHeaderRow(table, row, zoneColumn, latColumn, longColumn, dwgColumn) ||
+                    IsLatLongColumnHeaderRow(table, row))
                 {
                     continue;
                 }
@@ -1170,6 +1236,23 @@ namespace XingManager.Services
                 return false;
 
             return descriptionKey.EndsWith("CROSSING INFORMATION", StringComparison.Ordinal);
+        }
+
+        private static bool IsLatLongColumnHeaderRow(Table table, int row)
+        {
+            if (table == null)
+                return false;
+
+            var expected = new[] { "ID", "DESCRIPTION", "LATITUDE", "LONGITUDE" };
+
+            for (int c = 0; c < expected.Length && c < table.Columns.Count; c++)
+            {
+                var text = ReadCellText(table, row, c);
+                if (!string.Equals(text, expected[c], StringComparison.OrdinalIgnoreCase))
+                    return false;
+            }
+
+            return true;
         }
 
         private static IDictionary<int, CrossingRecord> BuildLatLongRowIndexMap(
