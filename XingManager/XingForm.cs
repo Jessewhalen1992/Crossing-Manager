@@ -1016,89 +1016,61 @@ namespace XingManager
             try { AcadApp.UpdateScreen(); } catch { }
         }
 
-        /// Normalize table borders so data rows have full borders and headings retain underline.
+        // Set borders on a single cell via grid visibility
+        private static void SetCellBorders(Table t, int r, int c, bool top, bool right, bool bottom, bool left)
+        {
+            if (t == null) return;
+            try { t.SetGridVisibility(r, c, GridLineType.HorizontalTop,    top);    } catch { }
+            try { t.SetGridVisibility(r, c, GridLineType.VerticalRight,    right);  } catch { }
+            try { t.SetGridVisibility(r, c, GridLineType.HorizontalBottom, bottom); } catch { }
+            try { t.SetGridVisibility(r, c, GridLineType.VerticalLeft,     left);   } catch { }
+        }
+
+        private static int TryFindDataStartRow(Table t)
+        {
+            try
+            {
+                // Prefer the existing helper if available
+                int r = TableSync.FindLatLongDataStartRow(t);
+                return (r < 0 ? 0 : r);
+            }
+            catch { return 0; }
+        }
+
+        private static bool IsHeadingRow(Table t, int r, int dataStartRow)
+        {
+            // Section titles like "NOVA CROSSING INFORMATION" / "PGI CROSSING INFORMATION"
+            try
+            {
+                var s = (t.Cells[r, 0]?.TextString ?? string.Empty).Trim().ToUpperInvariant();
+                if (s.Contains("CROSSING INFORMATION")) return true;
+            }
+            catch { }
+
+            // Header row immediately before data start (e.g., LAT/LONG column captions)
+            if (dataStartRow > 0 && r == dataStartRow - 1) return true;
+
+            return false;
+        }
+
+        // Normalize all cells: heading rows = underline only; data rows = full box
         private static void NormalizeTableBorders(Table t)
         {
             if (t == null) return;
 
             int rows = t.Rows.Count;
             int cols = t.Columns.Count;
-
-            int dataStartRow = 0;
-            try
-            {
-                dataStartRow = TableSync.FindLatLongDataStartRow(t);
-                if (dataStartRow < 0) dataStartRow = 0;
-            }
-            catch
-            {
-                dataStartRow = 0;
-            }
-
-            bool IsHeadingRow(int r)
-            {
-                try
-                {
-                    for (int c = 0; c < cols; c++)
-                    {
-                        var cell = t.Cells[r, c];
-                        if (cell == null) continue;
-                        try
-                        {
-                            if (cell.ColumnSpan > 1 || cell.RowSpan > 1)
-                                return true;
-                        }
-                        catch { }
-                    }
-                }
-                catch { }
-
-                try
-                {
-                    var txt = (t.Cells[r, 0]?.TextString ?? string.Empty)
-                        .Trim()
-                        .ToUpperInvariant();
-                    if (txt.Contains("CROSSING INFORMATION"))
-                        return true;
-                }
-                catch { }
-
-                if (r == dataStartRow - 1 && dataStartRow > 0)
-                    return true;
-
-                return false;
-            }
+            int dataStart = TryFindDataStartRow(t);
 
             for (int r = 0; r < rows; r++)
             {
-                bool heading = IsHeadingRow(r);
-
+                bool heading = IsHeadingRow(t, r, dataStart);
                 for (int c = 0; c < cols; c++)
                 {
-                    Cell cell = null;
-                    try { cell = t.Cells[r, c]; } catch { cell = null; }
-                    if (cell == null) continue;
-
-                    try
-                    {
-                        if (heading)
-                        {
-                            cell.Borders.Top.Visible = false;
-                            cell.Borders.Left.Visible = false;
-                            cell.Borders.Right.Visible = false;
-                            cell.Borders.Bottom.Visible = true;
-                        }
-                        else
-                        {
-                            cell.Borders.Top.Visible = true;
-                            cell.Borders.Left.Visible = true;
-                            cell.Borders.Right.Visible = true;
-                            cell.Borders.Bottom.Visible = true;
-                        }
-                    }
-                    catch
-                    {
-                    }
+                    if (heading)
+                        SetCellBorders(t, r, c, top: false, right: false, bottom: true, left: false);
+                    else
+                        SetCellBorders(t, r, c, top: true, right: true, bottom: true, left: true);
                 }
             }
 
