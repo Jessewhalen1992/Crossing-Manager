@@ -96,8 +96,8 @@ namespace XingManager
             }
         }
 
-        [CommandMethod("XING_NORMALIZE_BORDERS")]
-        public void XingNormalizeBorders()
+        [CommandMethod("XING_FIXBORDERS")]
+        public void FixAllTableBorders()
         {
             var doc = Autodesk.AutoCAD.ApplicationServices.Application.DocumentManager.MdiActiveDocument;
             if (doc == null) return;
@@ -105,113 +105,51 @@ namespace XingManager
             using (doc.LockDocument())
             using (var tr = doc.TransactionManager.StartTransaction())
             {
-                var db = doc.Database;
-                var bt = (BlockTable)tr.GetObject(db.BlockTableId, OpenMode.ForRead);
+                var bt = (BlockTable)tr.GetObject(doc.Database.BlockTableId, OpenMode.ForRead);
                 foreach (ObjectId btrId in bt)
                 {
                     var btr = (BlockTableRecord)tr.GetObject(btrId, OpenMode.ForRead);
                     foreach (ObjectId entId in btr)
                     {
-                        var table = tr.GetObject(entId, OpenMode.ForRead) as Table;
-                        if (table == null) continue;
+                        var t = tr.GetObject(entId, OpenMode.ForRead) as Table;
+                        if (t == null) continue;
+                        t.UpgradeOpen();
 
-                        table.UpgradeOpen();
-                        Normalize(table);
+                        int rows = t.Rows.Count;
+                        int cols = t.Columns.Count;
+
+                        int dataStart = 0;
+                        try { dataStart = TableSync.FindLatLongDataStartRow(t); if (dataStart < 0) dataStart = 0; } catch { dataStart = 0; }
+
+                        bool IsHeading(int r)
+                        {
+                            try
+                            {
+                                var s = (t.Cells[r, 0]?.TextString ?? string.Empty).Trim().ToUpperInvariant();
+                                if (s.Contains("CROSSING INFORMATION")) return true;
+                            }
+                            catch { }
+                            return (dataStart > 0 && r == dataStart - 1);
+                        }
+
+                        for (int r = 0; r < rows; r++)
+                        for (int c = 0; c < cols; c++)
+                        {
+                            bool heading = IsHeading(r);
+                            try { t.SetGridVisibility(r, c, GridLineType.HorizontalTop,    !heading); } catch { }
+                            try { t.SetGridVisibility(r, c, GridLineType.VerticalRight,    !heading); } catch { }
+                            try { t.SetGridVisibility(r, c, GridLineType.HorizontalBottom,  true);     } catch { }
+                            try { t.SetGridVisibility(r, c, GridLineType.VerticalLeft,     !heading); } catch { }
+                        }
+
+                        try { t.GenerateLayout(); } catch { }
+                        try { t.RecordGraphicsModified(true); } catch { }
                     }
                 }
                 tr.Commit();
             }
 
             try { doc.Editor?.Regen(); } catch { }
-
-            void Normalize(Table t)
-            {
-                if (t == null) return;
-
-                int rows = t.Rows.Count;
-                int cols = t.Columns.Count;
-
-                int dataStartRow = 0;
-                try
-                {
-                    dataStartRow = TableSync.FindLatLongDataStartRow(t);
-                    if (dataStartRow < 0) dataStartRow = 0;
-                }
-                catch
-                {
-                    dataStartRow = 0;
-                }
-
-                bool IsHeadingRow(int r)
-                {
-                    try
-                    {
-                        for (int c = 0; c < cols; c++)
-                        {
-                            var cell = t.Cells[r, c];
-                            if (cell == null) continue;
-                            try
-                            {
-                                if (cell.ColumnSpan > 1 || cell.RowSpan > 1)
-                                    return true;
-                            }
-                            catch { }
-                        }
-                    }
-                    catch { }
-
-                    try
-                    {
-                        var txt = (t.Cells[r, 0]?.TextString ?? string.Empty)
-                            .Trim()
-                            .ToUpperInvariant();
-                        if (txt.Contains("CROSSING INFORMATION"))
-                            return true;
-                    }
-                    catch { }
-
-                    if (r == dataStartRow - 1 && dataStartRow > 0)
-                        return true;
-
-                    return false;
-                }
-
-                for (int r = 0; r < rows; r++)
-                {
-                    bool heading = IsHeadingRow(r);
-
-                    for (int c = 0; c < cols; c++)
-                    {
-                        Cell cell = null;
-                        try { cell = t.Cells[r, c]; } catch { cell = null; }
-                        if (cell == null) continue;
-
-                        try
-                        {
-                            if (heading)
-                            {
-                                cell.Borders.Top.Visible = false;
-                                cell.Borders.Left.Visible = false;
-                                cell.Borders.Right.Visible = false;
-                                cell.Borders.Bottom.Visible = true;
-                            }
-                            else
-                            {
-                                cell.Borders.Top.Visible = true;
-                                cell.Borders.Left.Visible = true;
-                                cell.Borders.Right.Visible = true;
-                                cell.Borders.Bottom.Visible = true;
-                            }
-                        }
-                        catch
-                        {
-                        }
-                    }
-                }
-
-                try { t.GenerateLayout(); } catch { }
-                try { t.RecordGraphicsModified(true); } catch { }
-            }
         }
     }
 }
