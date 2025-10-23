@@ -408,23 +408,39 @@ namespace XingManager.Services
             public IList<CrossingRecord> Records { get; set; } = new List<CrossingRecord>();
         }
 
+        private enum LatLongRowKind
+        {
+            Data,
+            SectionHeader,
+            ColumnHeader
+        }
+
         private struct LatLongRow
         {
-            private LatLongRow(CrossingRecord record, string header)
+            private LatLongRow(LatLongRowKind kind, CrossingRecord record, string header)
             {
+                Kind = kind;
                 Record = record;
                 Header = header;
             }
+
+            public LatLongRowKind Kind { get; }
 
             public CrossingRecord Record { get; }
 
             public string Header { get; }
 
-            public bool IsHeader => !string.IsNullOrEmpty(Header);
+            public bool IsSectionHeader => Kind == LatLongRowKind.SectionHeader;
 
-            public static LatLongRow FromRecord(CrossingRecord record) => new LatLongRow(record, null);
+            public bool IsColumnHeader => Kind == LatLongRowKind.ColumnHeader;
 
-            public static LatLongRow FromHeader(string header) => new LatLongRow(null, header);
+            public bool HasRecord => Kind == LatLongRowKind.Data && Record != null;
+
+            public static LatLongRow FromRecord(CrossingRecord record) => new LatLongRow(LatLongRowKind.Data, record, null);
+
+            public static LatLongRow FromHeader(string header) => new LatLongRow(LatLongRowKind.SectionHeader, null, header);
+
+            public static LatLongRow ColumnHeader() => new LatLongRow(LatLongRowKind.ColumnHeader, null, null);
         }
 
         public Table CreateAndInsertLatLongTable(
@@ -525,7 +541,7 @@ namespace XingManager.Services
                 var rowInfo = orderedRows[i];
                 int row = dataStart + i;
 
-                if (rowInfo.IsHeader)
+                if (rowInfo.IsSectionHeader)
                 {
                     var headerText = rowInfo.Header ?? string.Empty;
 
@@ -539,8 +555,14 @@ namespace XingManager.Services
                     ApplyCellTextColor(headerCell, titleColor);
                     ApplyTitleBorderStyle(headerCell);
 
+                if (rowInfo.IsColumnHeader)
+                {
+                    ApplyLatLongColumnHeaderRow(table, row, HeaderRowHeight, CellTextHeight, boldStyleId, headerColor);
                     continue;
                 }
+
+                if (!rowInfo.HasRecord)
+                    continue;
 
                 var rec = rowInfo.Record;
                 for (int c = 0; c < table.Columns.Count; c++)
@@ -583,6 +605,7 @@ namespace XingManager.Services
                     if (!string.IsNullOrEmpty(header) && sectionRecords.Count > 0)
                     {
                         rows.Add(LatLongRow.FromHeader(header));
+                        rows.Add(LatLongRow.ColumnHeader());
                     }
 
                     foreach (var record in sectionRecords)
@@ -1058,7 +1081,8 @@ namespace XingManager.Services
 
             for (var row = dataRow; row < table.Rows.Count; row++)
             {
-                if (IsLatLongSectionHeaderRow(table, row, zoneColumn, latColumn, longColumn, dwgColumn))
+                if (IsLatLongSectionHeaderRow(table, row, zoneColumn, latColumn, longColumn, dwgColumn) ||
+                    IsLatLongColumnHeaderRow(table, row))
                 {
                     continue;
                 }
@@ -1194,6 +1218,23 @@ namespace XingManager.Services
                 return false;
 
             return descriptionKey.EndsWith("CROSSING INFORMATION", StringComparison.Ordinal);
+        }
+
+        private static bool IsLatLongColumnHeaderRow(Table table, int row)
+        {
+            if (table == null)
+                return false;
+
+            var expected = new[] { "ID", "DESCRIPTION", "LATITUDE", "LONGITUDE" };
+
+            for (int c = 0; c < expected.Length && c < table.Columns.Count; c++)
+            {
+                var text = ReadCellText(table, row, c);
+                if (!string.Equals(text, expected[c], StringComparison.OrdinalIgnoreCase))
+                    return false;
+            }
+
+            return true;
         }
 
         private static IDictionary<int, CrossingRecord> BuildLatLongRowIndexMap(
