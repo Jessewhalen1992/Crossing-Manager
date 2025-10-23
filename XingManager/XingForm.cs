@@ -560,6 +560,7 @@ namespace XingManager
                         if (anyRowUpdated)
                         {
                             try { table.GenerateLayout(); } catch { }
+                            NormalizeTableBorders(table);
                             try { table.RecordGraphicsModified(true); } catch { }
 
                             // Tag this table as LATLONG so future scans/updates classify it correctly
@@ -775,6 +776,7 @@ namespace XingManager
                         if (anyUpdated)
                         {
                             try { table.GenerateLayout(); } catch { }
+                            NormalizeTableBorders(table);
                             try { table.RecordGraphicsModified(true); } catch { }
                         }
                     }
@@ -997,6 +999,8 @@ namespace XingManager
                         if (updated > 0)
                         {
                             try { table.GenerateLayout(); } catch { }
+                            NormalizeTableBorders(table);
+                            try { table.RecordGraphicsModified(true); } catch { }
                             ForceRegenTable(table);
                         }
 
@@ -1010,6 +1014,96 @@ namespace XingManager
 
             try { doc.Editor?.Regen(); } catch { }
             try { AcadApp.UpdateScreen(); } catch { }
+        }
+
+        /// Normalize table borders so data rows have full borders and headings retain underline.
+        private static void NormalizeTableBorders(Table t)
+        {
+            if (t == null) return;
+
+            int rows = t.Rows.Count;
+            int cols = t.Columns.Count;
+
+            int dataStartRow = 0;
+            try
+            {
+                dataStartRow = TableSync.FindLatLongDataStartRow(t);
+                if (dataStartRow < 0) dataStartRow = 0;
+            }
+            catch
+            {
+                dataStartRow = 0;
+            }
+
+            bool IsHeadingRow(int r)
+            {
+                try
+                {
+                    for (int c = 0; c < cols; c++)
+                    {
+                        var cell = t.Cells[r, c];
+                        if (cell == null) continue;
+                        try
+                        {
+                            if (cell.ColumnSpan > 1 || cell.RowSpan > 1)
+                                return true;
+                        }
+                        catch { }
+                    }
+                }
+                catch { }
+
+                try
+                {
+                    var txt = (t.Cells[r, 0]?.TextString ?? string.Empty)
+                        .Trim()
+                        .ToUpperInvariant();
+                    if (txt.Contains("CROSSING INFORMATION"))
+                        return true;
+                }
+                catch { }
+
+                if (r == dataStartRow - 1 && dataStartRow > 0)
+                    return true;
+
+                return false;
+            }
+
+            for (int r = 0; r < rows; r++)
+            {
+                bool heading = IsHeadingRow(r);
+
+                for (int c = 0; c < cols; c++)
+                {
+                    Cell cell = null;
+                    try { cell = t.Cells[r, c]; } catch { cell = null; }
+                    if (cell == null) continue;
+
+                    try
+                    {
+                        if (heading)
+                        {
+                            cell.Borders.Top.Visible = false;
+                            cell.Borders.Left.Visible = false;
+                            cell.Borders.Right.Visible = false;
+                            cell.Borders.Bottom.Visible = true;
+                        }
+                        else
+                        {
+                            cell.Borders.Top.Visible = true;
+                            cell.Borders.Left.Visible = true;
+                            cell.Borders.Right.Visible = true;
+                            cell.Borders.Bottom.Visible = true;
+                        }
+                    }
+                    catch
+                    {
+                    }
+                }
+            }
+
+            try { t.GenerateLayout(); } catch { }
+            try { t.RecordGraphicsModified(true); } catch { }
         }
 
         /// Set a table cell's TextString only if it actually changes; returns true if changed.
@@ -1518,6 +1612,7 @@ namespace XingManager
                             }
 
                             try { table.GenerateLayout(); } catch { }
+                            NormalizeTableBorders(table);
                             try { table.RecordGraphicsModified(true); } catch { }
                             ForceRegenTable(table);
                             break; // done with this table
