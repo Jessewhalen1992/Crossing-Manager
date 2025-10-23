@@ -472,6 +472,7 @@ namespace XingManager.Services
                 ? "WATER CROSSING INFORMATION"
                 : titleOverride;
             var showTitle = includeTitleRow && !string.IsNullOrWhiteSpace(resolvedTitle);
+            var hasSectionColumnHeaders = orderedRows.Any(r => r.IsColumnHeader);
 
             var table = new Table();
             table.SetDatabaseDefaults();
@@ -487,7 +488,7 @@ namespace XingManager.Services
 
             var titleRow = showTitle ? 0 : -1;
             var headerRow = showTitle ? 1 : 0;
-            var dataStart = headerRow + 1;
+            var dataStart = hasSectionColumnHeaders ? headerRow : headerRow + 1;
             table.SetSize(dataStart + orderedRows.Count, 4);
 
             if (table.Columns.Count >= 4)
@@ -503,24 +504,31 @@ namespace XingManager.Services
 
             if (showTitle)
                 table.Rows[titleRow].Height = TitleRowHeight;
-            table.Rows[headerRow].Height = HeaderRowHeight;
 
-            table.Cells[headerRow, 0].TextString = "ID";
-            table.Cells[headerRow, 1].TextString = "DESCRIPTION";
-            table.Cells[headerRow, 2].TextString = "LATITUDE";
-            table.Cells[headerRow, 3].TextString = "LONGITUDE";
+            if (!hasSectionColumnHeaders)
+            {
+                table.Rows[headerRow].Height = HeaderRowHeight;
+
+                table.Cells[headerRow, 0].TextString = "ID";
+                table.Cells[headerRow, 1].TextString = "DESCRIPTION";
+                table.Cells[headerRow, 2].TextString = "LATITUDE";
+                table.Cells[headerRow, 3].TextString = "LONGITUDE";
+            }
 
             var boldStyleId = EnsureBoldTextStyle(db, tr, "XING_BOLD", "Standard");
             var headerColor = Color.FromColorIndex(ColorMethod.ByAci, 254);
             var titleColor = Color.FromColorIndex(ColorMethod.ByAci, 14);
 
-            for (int c = 0; c < table.Columns.Count; c++)
+            if (!hasSectionColumnHeaders)
             {
-                var cell = table.Cells[headerRow, c];
-                cell.TextHeight = CellTextHeight;
-                cell.Alignment = CellAlignment.MiddleCenter;
-                cell.TextStyleId = boldStyleId;
-                cell.BackgroundColor = headerColor;
+                for (int c = 0; c < table.Columns.Count; c++)
+                {
+                    var cell = table.Cells[headerRow, c];
+                    cell.TextHeight = CellTextHeight;
+                    cell.Alignment = CellAlignment.MiddleCenter;
+                    cell.TextStyleId = boldStyleId;
+                    cell.BackgroundColor = headerColor;
+                }
             }
 
             if (showTitle)
@@ -572,6 +580,7 @@ namespace XingManager.Services
                     var cell = table.Cells[row, c];
                     cell.Alignment = CellAlignment.MiddleCenter;
                     cell.TextHeight = CellTextHeight;
+                    ApplyDataCellBorderStyle(cell);
                 }
 
                 table.Cells[row, 0].TextString = NormalizeXKey(rec?.Crossing);
@@ -694,6 +703,32 @@ namespace XingManager.Services
                 SetBorderVisible(bordersObj, "InsideVertical", false);
                 SetBorderVisible(bordersObj, "Outline", false);
                 SetBorderVisible(bordersObj, "Bottom", true);
+            }
+            catch
+            {
+                // purely cosmetic; ignore on unsupported releases
+            }
+        }
+
+        private static void ApplyDataCellBorderStyle(Cell cell)
+        {
+            if (cell == null)
+                return;
+
+            try
+            {
+                var bordersProp = cell.GetType().GetProperty("Borders", BindingFlags.Public | BindingFlags.Instance);
+                var bordersObj = bordersProp?.GetValue(cell, null);
+                if (bordersObj == null)
+                    return;
+
+                SetBorderVisible(bordersObj, "Top", true);
+                SetBorderVisible(bordersObj, "Bottom", true);
+                SetBorderVisible(bordersObj, "Left", true);
+                SetBorderVisible(bordersObj, "Right", true);
+                SetBorderVisible(bordersObj, "InsideHorizontal", true);
+                SetBorderVisible(bordersObj, "InsideVertical", true);
+                SetBorderVisible(bordersObj, "Outline", true);
             }
             catch
             {
