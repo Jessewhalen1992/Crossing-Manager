@@ -11,6 +11,7 @@ using System.IO;
 using System.Linq;
 using System.Text.RegularExpressions;
 using System.Windows.Forms;
+using System.Reflection;
 using XingManager.Models;
 using XingManager.Services;
 using AcadApp = Autodesk.AutoCAD.ApplicationServices.Application;
@@ -1017,13 +1018,76 @@ namespace XingManager
         }
 
         // Set borders on a single cell via grid visibility
+        private static MethodInfo _setGridVisibilityBool;
+        private static MethodInfo _setGridVisibilityEnum;
+        private static Type _visibilityEnumType;
+
         private static void SetCellBorders(Table t, int r, int c, bool top, bool right, bool bottom, bool left)
         {
             if (t == null) return;
-            try { t.SetGridVisibility(r, c, GridLineType.HorizontalTop,    top);    } catch { }
-            try { t.SetGridVisibility(r, c, GridLineType.VerticalRight,    right);  } catch { }
-            try { t.SetGridVisibility(r, c, GridLineType.HorizontalBottom, bottom); } catch { }
-            try { t.SetGridVisibility(r, c, GridLineType.VerticalLeft,     left);   } catch { }
+            TrySetGridVisibility(t, r, c, GridLineType.HorizontalTop, top);
+            TrySetGridVisibility(t, r, c, GridLineType.VerticalRight, right);
+            TrySetGridVisibility(t, r, c, GridLineType.HorizontalBottom, bottom);
+            TrySetGridVisibility(t, r, c, GridLineType.VerticalLeft, left);
+        }
+
+        private static void TrySetGridVisibility(Table t, int row, int col, GridLineType line, bool visible)
+        {
+            if (t == null) return;
+
+            try
+            {
+                var tableType = t.GetType();
+                _setGridVisibilityBool ??= tableType.GetMethod(
+                    "SetGridVisibility",
+                    new[] { typeof(int), typeof(int), typeof(GridLineType), typeof(bool) });
+
+                if (_setGridVisibilityBool != null)
+                {
+                    _setGridVisibilityBool.Invoke(t, new object[] { row, col, line, visible });
+                    return;
+                }
+
+                _visibilityEnumType ??= tableType.Assembly.GetType("Autodesk.AutoCAD.DatabaseServices.Visibility");
+                if (_visibilityEnumType == null)
+                    return;
+
+                _setGridVisibilityEnum ??= tableType.GetMethod(
+                    "SetGridVisibility",
+                    new[] { typeof(int), typeof(int), typeof(GridLineType), _visibilityEnumType });
+
+                if (_setGridVisibilityEnum == null)
+                    return;
+
+                object enumValue = null;
+                try
+                {
+                    var field = _visibilityEnumType.GetField(visible ? "Visible" : "Invisible", BindingFlags.Public | BindingFlags.Static);
+                    enumValue = field?.GetValue(null);
+                }
+                catch
+                {
+                    enumValue = null;
+                }
+
+                if (enumValue == null)
+                {
+                    try
+                    {
+                        enumValue = Enum.Parse(_visibilityEnumType, visible ? "Visible" : "Invisible");
+                    }
+                    catch
+                    {
+                        return;
+                    }
+                }
+
+                _setGridVisibilityEnum.Invoke(t, new[] { (object)row, (object)col, (object)line, enumValue });
+            }
+            catch
+            {
+                // best effort: ignore visibility failures
+            }
         }
 
         private static int TryFindDataStartRow(Table t)

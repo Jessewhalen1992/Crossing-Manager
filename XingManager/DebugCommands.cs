@@ -133,14 +133,14 @@ namespace XingManager
                         }
 
                         for (int r = 0; r < rows; r++)
-                        for (int c = 0; c < cols; c++)
-                        {
-                            bool heading = IsHeading(r);
-                            try { t.SetGridVisibility(r, c, GridLineType.HorizontalTop,    !heading); } catch { }
-                            try { t.SetGridVisibility(r, c, GridLineType.VerticalRight,    !heading); } catch { }
-                            try { t.SetGridVisibility(r, c, GridLineType.HorizontalBottom,  true);     } catch { }
-                            try { t.SetGridVisibility(r, c, GridLineType.VerticalLeft,     !heading); } catch { }
-                        }
+                            for (int c = 0; c < cols; c++)
+                            {
+                                bool heading = IsHeading(r);
+                                TrySetGridVisibility(t, r, c, GridLineType.HorizontalTop, !heading);
+                                TrySetGridVisibility(t, r, c, GridLineType.VerticalRight, !heading);
+                                TrySetGridVisibility(t, r, c, GridLineType.HorizontalBottom, true);
+                                TrySetGridVisibility(t, r, c, GridLineType.VerticalLeft, !heading);
+                            }
 
                         try { t.GenerateLayout(); } catch { }
                         try { t.RecordGraphicsModified(true); } catch { }
@@ -152,4 +152,67 @@ namespace XingManager
             try { doc.Editor?.Regen(); } catch { }
         }
     }
-}
+
+    private static MethodInfo _debugSetGridVisibilityBool;
+        private static MethodInfo _debugSetGridVisibilityEnum;
+        private static Type _debugVisibilityType;
+
+        private static void TrySetGridVisibility(Table t, int row, int col, GridLineType line, bool visible)
+        {
+            if (t == null) return;
+
+            try
+            {
+                var tableType = t.GetType();
+                _debugSetGridVisibilityBool ??= tableType.GetMethod(
+                    "SetGridVisibility",
+                    new[] { typeof(int), typeof(int), typeof(GridLineType), typeof(bool) });
+
+                if (_debugSetGridVisibilityBool != null)
+                {
+                    _debugSetGridVisibilityBool.Invoke(t, new object[] { row, col, line, visible });
+                    return;
+                }
+
+                _debugVisibilityType ??= tableType.Assembly.GetType("Autodesk.AutoCAD.DatabaseServices.Visibility");
+                if (_debugVisibilityType == null)
+                    return;
+
+                _debugSetGridVisibilityEnum ??= tableType.GetMethod(
+                    "SetGridVisibility",
+                    new[] { typeof(int), typeof(int), typeof(GridLineType), _debugVisibilityType });
+
+                if (_debugSetGridVisibilityEnum == null)
+                    return;
+
+                object enumValue = null;
+                try
+                {
+                    var field = _debugVisibilityType.GetField(visible ? "Visible" : "Invisible", BindingFlags.Public | BindingFlags.Static);
+                    enumValue = field?.GetValue(null);
+                }
+                catch
+                {
+                    enumValue = null;
+                }
+
+                if (enumValue == null)
+                {
+                    try
+                    {
+                        enumValue = Enum.Parse(_debugVisibilityType, visible ? "Visible" : "Invisible");
+                    }
+                    catch
+                    {
+                        return;
+                    }
+                }
+
+                _debugSetGridVisibilityEnum.Invoke(t, new[] { (object)row, (object)col, (object)line, enumValue });
+            }
+            catch
+            {
+                // best effort compatibility for different AutoCAD versions
+            }
+        }
+    }
