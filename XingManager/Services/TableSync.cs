@@ -401,7 +401,40 @@ namespace XingManager.Services
         // LAT/LONG TABLE CREATION (kept so XingForm compiles)
         // =====================================================================
 
-        public Table CreateAndInsertLatLongTable(Database db, Transaction tr, BlockTableRecord space, Point3d insertPoint, IList<CrossingRecord> records)
+        public class LatLongSection
+        {
+            public string Header { get; set; }
+
+            public IList<CrossingRecord> Records { get; set; } = new List<CrossingRecord>();
+        }
+
+        private struct LatLongRow
+        {
+            private LatLongRow(CrossingRecord record, string header)
+            {
+                Record = record;
+                Header = header;
+            }
+
+            public CrossingRecord Record { get; }
+
+            public string Header { get; }
+
+            public bool IsHeader => !string.IsNullOrEmpty(Header);
+
+            public static LatLongRow FromRecord(CrossingRecord record) => new LatLongRow(record, null);
+
+            public static LatLongRow FromHeader(string header) => new LatLongRow(null, header);
+        }
+
+        public Table CreateAndInsertLatLongTable(
+            Database db,
+            Transaction tr,
+            BlockTableRecord space,
+            Point3d insertPoint,
+            IList<CrossingRecord> records,
+            string titleOverride = null,
+            IList<LatLongSection> sections = null)
         {
             if (db == null) throw new ArgumentNullException(nameof(db));
             if (tr == null) throw new ArgumentNullException(nameof(tr));
@@ -417,10 +450,7 @@ namespace XingManager.Services
             const double W2 = 90.0;   // Latitude
             const double W3 = 90.0;   // Longitude
 
-            var ordered = (records ?? new List<CrossingRecord>())
-                .Where(r => r != null)
-                .OrderBy(r => r, Comparer<CrossingRecord>.Create(CrossingRecord.CompareByCrossing))
-                .ToList();
+            var orderedRows = BuildLatLongRows(records, sections);
 
             var table = new Table();
             table.SetDatabaseDefaults();
@@ -437,7 +467,7 @@ namespace XingManager.Services
             const int titleRow = 0;
             const int headerRow = 1;
             const int dataStart = 2;
-            table.SetSize(dataStart + ordered.Count, 4);
+            table.SetSize(dataStart + orderedRows.Count, 4);
 
             if (table.Columns.Count >= 4)
             {
@@ -472,9 +502,11 @@ namespace XingManager.Services
             }
 
             // Title
-            table.MergeCells(CellRange.Create(table, titleRow, 0, titleRow, Math.Max(0, table.Columns.Count - 1)));
             var titleCell = table.Cells[titleRow, 0];
-            titleCell.TextString = "WATER CROSSING INFORMATION";
+            table.MergeCells(CellRange.Create(table, titleRow, 0, titleRow, Math.Max(0, table.Columns.Count - 1)));
+            titleCell.TextString = string.IsNullOrWhiteSpace(titleOverride)
+                ? "WATER CROSSING INFORMATION"
+                : titleOverride;
             titleCell.Alignment = CellAlignment.MiddleLeft;
             titleCell.TextHeight = TitleTextHeight;
             titleCell.TextStyleId = boldStyleId;
@@ -514,11 +546,29 @@ namespace XingManager.Services
             catch { /* purely cosmetic; ignore on unsupported releases */ }
 
             // Data rows
-            for (int i = 0; i < ordered.Count; i++)
+            for (int i = 0; i < orderedRows.Count; i++)
             {
-                var rec = ordered[i];
+                var rowInfo = orderedRows[i];
                 int row = dataStart + i;
 
+                if (rowInfo.IsHeader)
+                {
+                    var headerText = rowInfo.Header ?? string.Empty;
+
+                    for (int c = 0; c < table.Columns.Count; c++)
+                    {
+                        var cell = table.Cells[row, c];
+                        cell.Alignment = CellAlignment.MiddleLeft;
+                        cell.TextHeight = TitleTextHeight;
+                        cell.TextStyleId = boldStyleId;
+                        cell.BackgroundColor = headerColor;
+                        cell.TextString = c == 1 ? headerText : string.Empty;
+                    }
+
+                    continue;
+                }
+
+                var rec = rowInfo.Record;
                 for (int c = 0; c < table.Columns.Count; c++)
                 {
                     var cell = table.Cells[row, c];
@@ -538,6 +588,49 @@ namespace XingManager.Services
             _factory.TagTable(tr, table, XingTableType.LatLong.ToString().ToUpperInvariant());
             try { table.GenerateLayout(); } catch { }
             return table;
+        }
+
+        private static List<LatLongRow> BuildLatLongRows(IList<CrossingRecord> records, IList<LatLongSection> sections)
+        {
+            var rows = new List<LatLongRow>();
+
+            if (sections != null && sections.Count > 0)
+            {
+                foreach (var section in sections)
+                {
+                    if (section == null)
+                        continue;
+
+                    var header = section.Header?.Trim();
+                    var sectionRecords = (section.Records ?? new List<CrossingRecord>())
+                        .Where(r => r != null)
+                        .ToList();
+
+                    if (!string.IsNullOrEmpty(header) && sectionRecords.Count > 0)
+                    {
+                        rows.Add(LatLongRow.FromHeader(header));
+                    }
+
+                    foreach (var record in sectionRecords)
+                    {
+                        rows.Add(LatLongRow.FromRecord(record));
+                    }
+                }
+            }
+            else
+            {
+                var ordered = (records ?? new List<CrossingRecord>())
+                    .Where(r => r != null)
+                    .OrderBy(r => r, Comparer<CrossingRecord>.Create(CrossingRecord.CompareByCrossing))
+                    .ToList();
+
+                foreach (var record in ordered)
+                {
+                    rows.Add(LatLongRow.FromRecord(record));
+                }
+            }
+
+            return rows;
         }
         // Portable border visibility setter across AutoCAD releases
         private static void SetBorderVisible(object borders, string memberName, bool on)
@@ -941,6 +1034,11 @@ namespace XingManager.Services
 
             for (var row = dataRow; row < table.Rows.Count; row++)
             {
+                if (IsLatLongSectionHeaderRow(table, row, zoneColumn, latColumn, longColumn, dwgColumn))
+                {
+                    continue;
+                }
+
                 var rawKey = ResolveCrossingKey(table, row, 0);
                 var key = NormalizeKeyForLookup(rawKey);
                 var normalizedCrossing = NormalizeCrossingForMap(rawKey);
@@ -1036,6 +1134,42 @@ namespace XingManager.Services
             }
 
             RefreshTable(table);
+        }
+
+        private static bool IsLatLongSectionHeaderRow(
+            Table table,
+            int row,
+            int zoneColumn,
+            int latColumn,
+            int longColumn,
+            int dwgColumn)
+        {
+            if (table == null)
+                return false;
+
+            var crossingText = ReadCellText(table, row, 0);
+            var descriptionText = ReadCellText(table, row, 1);
+            var zoneText = zoneColumn >= 0 ? ReadCellText(table, row, zoneColumn) : string.Empty;
+            var latText = latColumn >= 0 ? ReadCellText(table, row, latColumn) : string.Empty;
+            var longText = longColumn >= 0 ? ReadCellText(table, row, longColumn) : string.Empty;
+            var dwgText = dwgColumn >= 0 ? ReadCellText(table, row, dwgColumn) : string.Empty;
+
+            if (!string.IsNullOrWhiteSpace(crossingText))
+                return false;
+            if (!string.IsNullOrWhiteSpace(zoneText))
+                return false;
+            if (!string.IsNullOrWhiteSpace(latText))
+                return false;
+            if (!string.IsNullOrWhiteSpace(longText))
+                return false;
+            if (!string.IsNullOrWhiteSpace(dwgText))
+                return false;
+
+            var descriptionKey = NormalizeDescriptionKey(descriptionText);
+            if (string.IsNullOrEmpty(descriptionKey))
+                return false;
+
+            return descriptionKey.EndsWith("CROSSING INFORMATION", StringComparison.Ordinal);
         }
 
         private static IDictionary<int, CrossingRecord> BuildLatLongRowIndexMap(
