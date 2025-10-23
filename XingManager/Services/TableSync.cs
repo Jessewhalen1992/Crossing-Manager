@@ -587,23 +587,11 @@ namespace XingManager.Services
                 table.Cells[row, 1].TextString = rec?.Description ?? string.Empty;
                 table.Cells[row, 2].TextString = rec?.Lat ?? string.Empty;
                 table.Cells[row, 3].TextString = rec?.Long ?? string.Empty;
-            }
 
-            var lastRecordRowIndex = -1;
-            for (int i = orderedRows.Count - 1; i >= 0; i--)
-            {
-                if (!orderedRows[i].HasRecord)
+                if (i == orderedRows.Count - 1 || orderedRows[i + 1].IsSectionHeader || orderedRows[i + 1].IsColumnHeader)
                 {
-                    continue;
+                    ApplyBottomBorderToRow(table, row);
                 }
-
-                lastRecordRowIndex = dataStart + i;
-                break;
-            }
-
-            if (lastRecordRowIndex >= 0)
-            {
-                ApplyBottomBorderToRow(table, lastRecordRowIndex);
             }
 
             space.UpgradeOpen();
