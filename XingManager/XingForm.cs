@@ -1110,27 +1110,27 @@ namespace XingManager
             catch { return 0; }
         }
 
-        private static bool IsSectionTitleRow(Table t, int r)
+        // strip inline MTEXT formatting codes like \A1;, \H2.5x;, \C2;, {…}, etc.
+        private static readonly Regex InlineCode = new Regex(@"\\[A-Za-z][^;]*;|{[^}]*}");
+
+        // These regexes remove MTEXT commands and special codes from cell strings.
+        private static readonly Regex ResidualCode = new Regex(@"\\[^{}]", RegexOptions.Compiled);
+        private static readonly Regex SpecialCode = new Regex("%%[^\\s]+", RegexOptions.Compiled);
+
+        // Strip inline MTEXT formatting commands (\H, \A, \C, etc.) and braces.
+        // This is the method that was missing and causing CS0103.
+        private static string StripMTextFormatting(string value)
         {
-            try
-            {
-                var s = (t.Cells[r, 0]?.TextString ?? string.Empty).Trim();
-                if (string.IsNullOrEmpty(s))
-                    return false;
-
-                return s.IndexOf("CROSSING INFORMATION", StringComparison.OrdinalIgnoreCase) >= 0;
-            }
-            catch
-            {
-                return false;
-            }
+            if (string.IsNullOrEmpty(value)) return string.Empty;
+            // InlineCode is already defined in your XingForm ( \[A-Za-z][^;]*;|{[^}]*} )
+            var withoutCommands = InlineCode.Replace(value, string.Empty);
+            var withoutResidual = ResidualCode.Replace(withoutCommands, string.Empty);
+            var withoutSpecial = SpecialCode.Replace(withoutResidual, string.Empty);
+            return withoutSpecial.Replace("{", string.Empty).Replace("}", string.Empty);
         }
-
         // Normalize all cells: heading rows = underline only; data rows = full box
         private static void NormalizeTableBorders(Table t)
         {
-            if (t == null) return;
-
             int rows = t.Rows.Count;
             int cols = t.Columns.Count;
             int dataStart = TryFindDataStartRow(t);
@@ -1138,7 +1138,13 @@ namespace XingManager
             for (int r = 0; r < rows; r++)
             {
                 bool sectionTitle = IsSectionTitleRow(t, r);
-                bool columnHeader = !sectionTitle && dataStart > 0 && r == dataStart - 1;
+                bool columnHeader =
+                    !sectionTitle &&
+                    (
+                        (dataStart > 0 && r == dataStart - 1) ||
+                        (r > 0 && IsSectionTitleRow(t, r - 1))
+                    );
+
                 for (int c = 0; c < cols; c++)
                 {
                     if (sectionTitle)
@@ -1157,8 +1163,9 @@ namespace XingManager
                 }
             }
 
-            try { t.GenerateLayout(); } catch { }
-            try { t.RecordGraphicsModified(true); } catch { }
+            // Final pass: if the next row is a section title, make sure the current row
+            // has a full-width bottom border so there is no gap.
+            ApplySectionSeparators(t);
         }
 
         /// Set a table cell's TextString only if it actually changes; returns true if changed.
@@ -3325,6 +3332,29 @@ namespace XingManager
 
             return sections;
         }
+        /// <summary>
+        /// Returns true if the specified row is a section title (e.g. "NOVA CROSSING INFORMATION"),
+        /// even when the cell contains MTEXT formatting codes.
+        /// </summary>
+        private static bool IsSectionTitleRow(Table t, int r)
+        {
+            if (t == null || r < 0 || r >= t.Rows.Count)
+                return false;
+
+            try
+            {
+                // Read the raw text from column 0
+                var raw = t.Cells[r, 0]?.TextString ?? string.Empty;
+                // Remove MTEXT formatting commands and braces
+                var plain = StripMTextFormatting(raw).Trim();
+                // Check for the key phrase "CROSSING INFORMATION" (case‑insensitive)
+                return plain.IndexOf("CROSSING INFORMATION", StringComparison.OrdinalIgnoreCase) >= 0;
+            }
+            catch
+            {
+                return false;
+            }
+        }
 
         private void CreateOrUpdateLatLongTable()
         {
@@ -3546,6 +3576,40 @@ namespace XingManager
             else
             {
                 UpdateZoneControlFromState();
+            }
+        }
+        /// <summary>
+        /// After NormalizeTableBorders runs, ensure that every data row (identified by its first cell starting with "X")
+        /// has a bottom border across all columns.
+        /// This provides a separator below the last row of each owner section.
+        /// </summary>
+        private static void ApplySectionSeparators(Table t)
+        {
+            if (t == null) return;
+            int rowCount = t.Rows.Count;
+            int colCount = t.Columns.Count;
+
+            for (int row = 0; row < rowCount - 1; row++)
+            {
+                try
+                {
+                    // Get the text from column 0, strip MTEXT formatting and whitespace
+                    var raw = t.Cells[row, 0]?.TextString ?? string.Empty;
+                    var text = StripMTextFormatting(raw).Trim();
+
+                    // If the row starts with "X" (e.g. X1, X46), treat it as a data row and draw a bottom border
+                    if (!string.IsNullOrEmpty(text) && text.StartsWith("X", StringComparison.OrdinalIgnoreCase))
+                    {
+                        for (int col = 0; col < colCount; col++)
+                        {
+                            TrySetGridVisibility(t, row, col, GridLineType.HorizontalBottom, true);
+                        }
+                    }
+                }
+                catch
+                {
+                    // Ignore rows that can't be inspected; best-effort
+                }
             }
         }
 

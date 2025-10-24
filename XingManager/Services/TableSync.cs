@@ -2147,12 +2147,17 @@ namespace XingManager.Services
             return normalized;
         }
 
+        private static readonly Regex InlineFormatRegex = new Regex(@"\\[^;\\{}]*;", RegexOptions.Compiled);
+        private static readonly Regex ResidualFormatRegex = new Regex(@"\\[^{}]", RegexOptions.Compiled);
+        private static readonly Regex SpecialCodeRegex = new Regex("%%[^\\s]+", RegexOptions.Compiled);
+
+        // Strip inline MTEXT formatting commands (\H, \f, \C, \A, \S etc.)
         private static string StripMTextFormatting(string value)
         {
             if (string.IsNullOrEmpty(value)) return string.Empty;
-            var withoutCommands = MTextFormattingCommandRegex.Replace(value, string.Empty);
-            var withoutResidual = MTextResidualCommandRegex.Replace(withoutCommands, string.Empty);
-            var withoutSpecial = MTextSpecialCodeRegex.Replace(withoutResidual, string.Empty);
+            var withoutCommands = InlineFormatRegex.Replace(value, string.Empty);
+            var withoutResidual = ResidualFormatRegex.Replace(withoutCommands, string.Empty);
+            var withoutSpecial = SpecialCodeRegex.Replace(withoutResidual, string.Empty);
             return withoutSpecial.Replace("{", string.Empty).Replace("}", string.Empty);
         }
 
