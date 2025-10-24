@@ -2232,7 +2232,9 @@ namespace XingManager
 
             if (refs.Count == 0)
             {
-                MessageBox.Show("No DWG_REF values available.", "Crossing Manager",
+                MessageBox.Show(
+                    "No DWG_REF values available.",
+                    "Crossing Manager",
                     MessageBoxButtons.OK, MessageBoxIcon.Information);
                 return;
             }
@@ -2242,7 +2244,8 @@ namespace XingManager
             foreach (var dr in refs)
             {
                 var locs = _records
-                    .Where(r => string.Equals(r.DwgRef ?? string.Empty, dr, StringComparison.OrdinalIgnoreCase))
+                    .Where(r => string.Equals(
+                        r.DwgRef ?? string.Empty, dr, StringComparison.OrdinalIgnoreCase))
                     .Select(r => r.Location ?? string.Empty)
                     .Where(s => !string.IsNullOrWhiteSpace(s))
                     .Distinct(StringComparer.OrdinalIgnoreCase)
@@ -2251,10 +2254,10 @@ namespace XingManager
                 locMap[dr] = locs;
             }
 
-            // Dialog: per DWG_REF -> IncludeAdjacent + LOCATION (if multiple)
             var options = PromptForAllPagesOptions(refs, locMap);
             if (options == null || options.Count == 0) return;
 
+            // Order options by earliest crossing and DwgRef
             options = options
                 .Select(o => new
                 {
@@ -2275,7 +2278,7 @@ namespace XingManager
                 {
                     foreach (var opt in options)
                     {
-                        // 1) Clone layout
+                        // Clone layout from template
                         string actualName;
                         var layoutId = _layoutUtils.CloneLayoutFromTemplate(
                             _doc,
@@ -2284,10 +2287,10 @@ namespace XingManager
                             string.Format(CultureInfo.InvariantCulture, "XING #{0}", opt.DwgRef),
                             out actualName);
 
-                        // 2) Heading
+                        // Update heading text
                         _layoutUtils.UpdatePlanHeadingText(_doc.Database, layoutId, opt.IncludeAdjacent);
 
-                        // 3) LOCATION placeholder
+                        // Replace LOCATION text
                         var loc = opt.SelectedLocation ?? string.Empty;
                         if (!string.IsNullOrWhiteSpace(loc))
                         {
@@ -2297,8 +2300,7 @@ namespace XingManager
                             _layoutUtils.ReplacePlaceholderText(_doc.Database, layoutId, loc);
                         }
 
-                        // 4) Centered insertion of PAGE table
-                        //    Compute center of layout, ask TableSync for table size, then offset to LL insert point.
+                        // Compute center of layout for page table placement
                         Point3d center;
                         using (var tr = _doc.Database.TransactionManager.StartTransaction())
                         {
@@ -2309,8 +2311,7 @@ namespace XingManager
                         var dataRowCount = _records.Count(r =>
                             string.Equals(r.DwgRef ?? string.Empty, opt.DwgRef, StringComparison.OrdinalIgnoreCase));
 
-                        double totalW, totalH;
-                        _tableSync.GetPageTableSize(dataRowCount, out totalW, out totalH);
+                        _tableSync.GetPageTableSize(dataRowCount, out double totalW, out double totalH);
 
                         var waterLatLongRecords = _records
                             .Where(r => string.Equals(r.DwgRef ?? string.Empty, opt.DwgRef, StringComparison.OrdinalIgnoreCase))
@@ -2325,6 +2326,19 @@ namespace XingManager
 
                         var otherSections = BuildOwnerLatLongSections(otherLatLongCandidates, out var otherRowCount);
 
+                        // Sort each section’s records numerically and sort sections by earliest crossing
+                        foreach (var sec in otherSections)
+                        {
+                            sec.Records = sec.Records
+                                .OrderBy(r => BuildCrossingSortKey(r.Crossing))
+                                .ToList();
+                        }
+
+                        otherSections = otherSections
+                            .OrderBy(sec => BuildCrossingSortKey(sec.Records.First().Crossing))
+                            .ToList();
+
+                        // Get sizes of water and other tables
                         double waterTotalW = 0.0, waterTotalH = 0.0;
                         if (waterLatLongRecords.Count > 0)
                         {
@@ -2337,15 +2351,22 @@ namespace XingManager
                             _tableSync.GetLatLongTableSize(otherRowCount, out otherTotalW, out otherTotalH);
                         }
 
-                        var insert = new Point3d(center.X - totalW / 2.0, center.Y - totalH / 2.0, 0.0);
+                        var pageInsert = new Point3d(
+                            center.X - totalW / 2.0,
+                            center.Y - totalH / 2.0,
+                            0.0);
+
                         var waterInsert = waterLatLongRecords.Count > 0
-                            ? new Point3d(center.X - waterTotalW / 2.0, insert.Y + totalH + TableVerticalGap, 0.0)
+                            ? new Point3d(
+                                center.X - waterTotalW / 2.0,
+                                pageInsert.Y + totalH + TableVerticalGap,
+                                0.0)
                             : Point3d.Origin;
 
                         var otherInsert = otherRowCount > 0
                             ? new Point3d(
                                 center.X - otherTotalW / 2.0,
-                                insert.Y + totalH + TableVerticalGap +
+                                pageInsert.Y + totalH + TableVerticalGap +
                                 (waterLatLongRecords.Count > 0 ? waterTotalH + TableVerticalGap : 0.0),
                                 0.0)
                             : Point3d.Origin;
@@ -2355,54 +2376,71 @@ namespace XingManager
                             var layout = (Layout)tr.GetObject(layoutId, OpenMode.ForRead);
                             var btr = (BlockTableRecord)tr.GetObject(layout.BlockTableRecordId, OpenMode.ForWrite);
 
-                            _tableSync.CreateAndInsertPageTable(_doc.Database, tr, btr, insert, opt.DwgRef, _records);
+                            // Insert the main page table
+                            _tableSync.CreateAndInsertPageTable(_doc.Database, tr, btr, pageInsert, opt.DwgRef, _records);
 
+                            // Insert water table if any
                             if (waterLatLongRecords.Count > 0)
-                            {
-                                _tableSync.CreateAndInsertLatLongTable(_doc.Database, tr, btr, waterInsert, waterLatLongRecords);
-                            }
-
-                            if (otherRowCount > 0)
                             {
                                 _tableSync.CreateAndInsertLatLongTable(
                                     _doc.Database,
                                     tr,
                                     btr,
-                                    otherInsert,
-                                    null,
-                                    OtherLatLongTableTitle,
-                                    otherSections,
-                                    includeTitleRow: false);
+                                    waterInsert,
+                                    waterLatLongRecords);
+                            }
+
+                            // Insert each owner’s other table separately
+                            if (otherSections.Count > 0)
+                            {
+                                Point3d nextInsert = otherInsert;
+                                foreach (var sec in otherSections)
+                                {
+                                    _tableSync.GetLatLongTableSize(sec.Records.Count, out _, out double hSec);
+
+                                    _tableSync.CreateAndInsertLatLongTable(
+                                        _doc.Database,
+                                        tr,
+                                        btr,
+                                        nextInsert,
+                                        null,
+                                        OtherLatLongTableTitle,
+                                        new List<TableSync.LatLongSection> { sec },
+                                        includeTitleRow: false);
+
+                                    nextInsert = new Point3d(
+                                        nextInsert.X,
+                                        nextInsert.Y - (hSec + TableVerticalGap),
+                                        nextInsert.Z);
+                                }
                             }
 
                             tr.Commit();
                         }
 
-                        // Optional: switch to the new layout to confirm creation
+                        // Switch to the new layout (optional)
                         _layoutUtils.SwitchToLayout(_doc, actualName);
                     }
 
-                    // After creating all XING pages, reorder them by the numeric part
-                    // of the layout name so that XING #1, XING #2, etc. appear in order.
+                    // Reorder layouts (best effort)
                     try
                     {
                         ReorderXingLayouts();
                     }
                     catch
                     {
-                        // best effort: if reordering fails, don’t abort page creation
+                        // ignore errors
                     }
                 }
             }
             catch (FileNotFoundException)
             {
-                MessageBox.Show($"Template not found: {TemplatePath}", "Crossing Manager",
-                    MessageBoxButtons.OK, MessageBoxIcon.Error);
+                MessageBox.Show($"Template not found: {TemplatePath}",
+                    "Crossing Manager", MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
             catch (Exception ex)
             {
-                MessageBox.Show(ex.Message, "Crossing Manager",
-                    MessageBoxButtons.OK, MessageBoxIcon.Error);
+                MessageBox.Show(ex.Message, "Crossing Manager", MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
         }
 
@@ -2586,6 +2624,9 @@ namespace XingManager
             }
         }
 
+        // Create separate LAT/LONG tables for each owner and stack them vertically.
+        // Create separate LAT/LONG tables for each owner and stack them in ascending X order.
+        // Create separate LAT/LONG tables for each owner, sorted by crossing number, and stack them vertically.
         private void GenerateOtherLatLongTables()
         {
             var eligibleRecords = _records
@@ -2597,15 +2638,33 @@ namespace XingManager
 
             if (totalRowCount == 0)
             {
-                MessageBox.Show("No OTHER LAT/LONG data available to create tables.", "Crossing Manager",
+                MessageBox.Show(
+                    "No OTHER LAT/LONG data available to create tables.",
+                    "Crossing Manager",
                     MessageBoxButtons.OK, MessageBoxIcon.Information);
                 return;
             }
 
+            // Sort each section’s records by crossing number (ascending)
+            foreach (var sec in sections)
+            {
+                sec.Records = sec.Records
+                    .OrderBy(r => BuildCrossingSortKey(r.Crossing))
+                    .ToList();
+            }
+
+            // Sort sections by the earliest crossing key in each section
+            sections = sections
+                .OrderBy(sec => BuildCrossingSortKey(
+                    sec.Records.First().Crossing))
+                .ToList();
+
             var editor = _doc.Editor;
             if (editor == null)
             {
-                MessageBox.Show("Unable to access the AutoCAD editor.", "Crossing Manager",
+                MessageBox.Show(
+                    "Unable to access the AutoCAD editor.",
+                    "Crossing Manager",
                     MessageBoxButtons.OK, MessageBoxIcon.Error);
                 return;
             }
@@ -2623,12 +2682,14 @@ namespace XingManager
                     var layoutManager = LayoutManager.Current;
                     if (layoutManager != null)
                     {
-                        var layoutDict = (DBDictionary)tr.GetObject(_doc.Database.LayoutDictionaryId, OpenMode.ForRead);
+                        var layoutDict = (DBDictionary)tr.GetObject(
+                            _doc.Database.LayoutDictionaryId, OpenMode.ForRead);
                         if (layoutDict.Contains(layoutManager.CurrentLayout))
                         {
                             var layoutId = layoutDict.GetAt(layoutManager.CurrentLayout);
                             var layout = (Layout)tr.GetObject(layoutId, OpenMode.ForRead);
-                            btr = (BlockTableRecord)tr.GetObject(layout.BlockTableRecordId, OpenMode.ForWrite);
+                            btr = (BlockTableRecord)tr.GetObject(
+                                layout.BlockTableRecordId, OpenMode.ForWrite);
                         }
                     }
                 }
@@ -2639,18 +2700,32 @@ namespace XingManager
 
                 if (btr == null)
                 {
-                    btr = (BlockTableRecord)tr.GetObject(_doc.Database.CurrentSpaceId, OpenMode.ForWrite);
+                    btr = (BlockTableRecord)tr.GetObject(
+                        _doc.Database.CurrentSpaceId, OpenMode.ForWrite);
                 }
 
-                _tableSync.CreateAndInsertLatLongTable(
-                    _doc.Database,
-                    tr,
-                    btr,
-                    pointRes.Value,
-                    null,
-                    OtherLatLongTableTitle,
-                    sections,
-                    includeTitleRow: false);
+                Point3d insertPoint = pointRes.Value;
+                const double SectionGap = 10.0; // vertical gap between tables
+
+                foreach (var section in sections)
+                {
+                    _tableSync.GetLatLongTableSize(section.Records.Count, out _, out double height);
+
+                    _tableSync.CreateAndInsertLatLongTable(
+                        _doc.Database,
+                        tr,
+                        btr,
+                        insertPoint,
+                        null,
+                        OtherLatLongTableTitle,
+                        new List<TableSync.LatLongSection> { section },
+                        includeTitleRow: false);
+
+                    insertPoint = new Point3d(
+                        insertPoint.X,
+                        insertPoint.Y - height - SectionGap,
+                        insertPoint.Z);
+                }
 
                 tr.Commit();
             }
@@ -2845,7 +2920,9 @@ namespace XingManager
 
             if (!choices.Any())
             {
-                MessageBox.Show("No DWG_REF values available.", "Crossing Manager",
+                MessageBox.Show(
+                    "No DWG_REF values available.",
+                    "Crossing Manager",
                     MessageBoxButtons.OK, MessageBoxIcon.Information);
                 return;
             }
@@ -2866,34 +2943,36 @@ namespace XingManager
                 string actualName;
                 ObjectId layoutId;
 
-                // --- lock for all DB changes here ---
+                // Clone layout and set up heading/location
                 using (_doc.LockDocument())
                 {
                     layoutId = _layoutUtils.CloneLayoutFromTemplate(
                         _doc,
                         TemplatePath,
                         GetTemplateLayoutNameForDwgRef(options.DwgRef),
-                        string.Format(CultureInfo.InvariantCulture, "XING #{0}", options.DwgRef),
+                        string.Format(
+                            CultureInfo.InvariantCulture,
+                            "XING #{0}",
+                            options.DwgRef),
                         out actualName);
 
-                    // Update heading + location while still locked
                     _layoutUtils.UpdatePlanHeadingText(_doc.Database, layoutId, options.IncludeAdjacent);
 
                     var locationText = BuildLocationText(options.DwgRef);
                     if (!string.IsNullOrEmpty(locationText))
                         _layoutUtils.ReplacePlaceholderText(_doc.Database, layoutId, locationText);
 
-                    // Safe to switch layouts while locked
                     _layoutUtils.SwitchToLayout(_doc, actualName);
                 }
-                // --- end lock ---
 
+                // Collect water lat/long records
                 var waterLatLongRecords = _records
                     .Where(r => string.Equals(r.DwgRef ?? string.Empty, options.DwgRef, StringComparison.OrdinalIgnoreCase))
                     .Where(HasWaterLatLongData)
                     .OrderBy(r => r, Comparer<CrossingRecord>.Create(CrossingRecord.CompareByCrossing))
                     .ToList();
 
+                // Collect other lat/long records
                 var otherLatLongCandidates = _records
                     .Where(r => string.Equals(r.DwgRef ?? string.Empty, options.DwgRef, StringComparison.OrdinalIgnoreCase))
                     .Where(HasOtherLatLongData)
@@ -2901,23 +2980,46 @@ namespace XingManager
 
                 var otherSections = BuildOwnerLatLongSections(otherLatLongCandidates, out var otherRowCount);
 
-                // Get insertion point (no lock needed)
-                var pointRes = _doc.Editor.GetPoint("\nSpecify insertion point for Crossing Page Table:");
-                if (pointRes.Status != PromptStatus.OK) return;
+                // Sort each section’s records by crossing number
+                foreach (var sec in otherSections)
+                {
+                    sec.Records = sec.Records
+                        .OrderBy(r => BuildCrossingSortKey(r.Crossing))
+                        .ToList();
+                }
 
-                // Lock again only for the table creation
+                // Sort sections by their earliest crossing key
+                otherSections = otherSections
+                    .OrderBy(sec => BuildCrossingSortKey(sec.Records.First().Crossing))
+                    .ToList();
+
+                // Insert PAGE table
+                var pagePrompt = _doc.Editor.GetPoint(
+                    "\nSpecify insertion point for Crossing Page Table:");
+                if (pagePrompt.Status != PromptStatus.OK) return;
+
                 using (_doc.LockDocument())
                 using (var tr = _doc.Database.TransactionManager.StartTransaction())
                 {
                     var layout = (Layout)tr.GetObject(layoutId, OpenMode.ForRead);
                     var btr = (BlockTableRecord)tr.GetObject(layout.BlockTableRecordId, OpenMode.ForWrite);
-                    _tableSync.CreateAndInsertPageTable(_doc.Database, tr, btr, pointRes.Value, options.DwgRef, _records);
+
+                    _tableSync.CreateAndInsertPageTable(
+                        _doc.Database,
+                        tr,
+                        btr,
+                        pagePrompt.Value,
+                        options.DwgRef,
+                        _records);
+
                     tr.Commit();
                 }
 
+                // Insert WATER table (if any)
                 if (waterLatLongRecords.Count > 0)
                 {
-                    var latPrompt = _doc.Editor.GetPoint("\nSpecify insertion point for WATER LAT/LONG table:");
+                    var latPrompt = _doc.Editor.GetPoint(
+                        "\nSpecify insertion point for WATER LAT/LONG table:");
                     if (latPrompt.Status == PromptStatus.OK)
                     {
                         using (_doc.LockDocument())
@@ -2925,15 +3027,24 @@ namespace XingManager
                         {
                             var layout = (Layout)tr.GetObject(layoutId, OpenMode.ForRead);
                             var btr = (BlockTableRecord)tr.GetObject(layout.BlockTableRecordId, OpenMode.ForWrite);
-                            _tableSync.CreateAndInsertLatLongTable(_doc.Database, tr, btr, latPrompt.Value, waterLatLongRecords);
+
+                            _tableSync.CreateAndInsertLatLongTable(
+                                _doc.Database,
+                                tr,
+                                btr,
+                                latPrompt.Value,
+                                waterLatLongRecords);
+
                             tr.Commit();
                         }
                     }
                 }
 
-                if (otherRowCount > 0)
+                // Insert separate OTHER tables (if any)
+                if (otherSections.Count > 0)
                 {
-                    var otherPrompt = _doc.Editor.GetPoint("\nSpecify insertion point for OTHER LAT/LONG table:");
+                    var otherPrompt = _doc.Editor.GetPoint(
+                        "\nSpecify insertion point for OTHER LAT/LONG table:");
                     if (otherPrompt.Status == PromptStatus.OK)
                     {
                         using (_doc.LockDocument())
@@ -2941,15 +3052,31 @@ namespace XingManager
                         {
                             var layout = (Layout)tr.GetObject(layoutId, OpenMode.ForRead);
                             var btr = (BlockTableRecord)tr.GetObject(layout.BlockTableRecordId, OpenMode.ForWrite);
-                            _tableSync.CreateAndInsertLatLongTable(
-                                _doc.Database,
-                                tr,
-                                btr,
-                                otherPrompt.Value,
-                                null,
-                                OtherLatLongTableTitle,
-                                otherSections,
-                                includeTitleRow: false);
+
+                            const double SectionGap = 10.0;
+                            Point3d nextInsert = otherPrompt.Value;
+
+                            foreach (var sec in otherSections)
+                            {
+                                _tableSync.GetLatLongTableSize(sec.Records.Count, out _, out double h);
+
+                                _tableSync.CreateAndInsertLatLongTable(
+                                    _doc.Database,
+                                    tr,
+                                    btr,
+                                    nextInsert,
+                                    null,
+                                    OtherLatLongTableTitle,
+                                    new List<TableSync.LatLongSection> { sec },
+                                    includeTitleRow: false);
+
+                                // move down by table height + gap
+                                nextInsert = new Point3d(
+                                    nextInsert.X,
+                                    nextInsert.Y - (h + SectionGap),
+                                    nextInsert.Z);
+                            }
+
                             tr.Commit();
                         }
                     }
@@ -2957,13 +3084,12 @@ namespace XingManager
             }
             catch (FileNotFoundException)
             {
-                MessageBox.Show($"Template not found: {TemplatePath}", "Crossing Manager",
-                    MessageBoxButtons.OK, MessageBoxIcon.Error);
+                MessageBox.Show($"Template not found: {TemplatePath}",
+                    "Crossing Manager", MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
             catch (Exception ex)
             {
-                MessageBox.Show(ex.Message, "Crossing Manager",
-                    MessageBoxButtons.OK, MessageBoxIcon.Error);
+                MessageBox.Show(ex.Message, "Crossing Manager", MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
         }
 
