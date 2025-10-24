@@ -44,10 +44,26 @@ namespace XingManager.Services
                     ? group[0].Crossing
                     : group[0].CrossingKey;
 
-                using (var dialog = new LatLongDuplicateResolverDialog(group, displayName, i + 1, groups.Count))
+                // NEW: auto-resolve if all duplicate candidates have identical LAT and LONG
+                bool allSame = group.All(c =>
+                    string.Equals(Normalize(c.Lat), Normalize(group[0].Lat), StringComparison.OrdinalIgnoreCase) &&
+                    string.Equals(Normalize(c.Long), Normalize(group[0].Long), StringComparison.OrdinalIgnoreCase));
+
+                if (allSame)
                 {
-                    if (ModelessDialogRunner.ShowDialog(dialog) != DialogResult.OK)
-                        return false;
+                    // Mark the first candidate as canonical, clear the rest
+                    group[0].Canonical = true;
+                    for (int j = 1; j < group.Count; j++)
+                        group[j].Canonical = false;
+                }
+                else
+                {
+                    // Present dialog to choose canonical value
+                    using (var dialog = new LatLongDuplicateResolverDialog(group, displayName, i + 1, groups.Count))
+                    {
+                        if (ModelessDialogRunner.ShowDialog(dialog) != DialogResult.OK)
+                            return false;
+                    }
                 }
 
                 var selected = group.FirstOrDefault(c => c.Canonical);
