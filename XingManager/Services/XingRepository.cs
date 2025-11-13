@@ -450,7 +450,7 @@ namespace XingManager.Services
                 new TypedValue((int)DxfCode.Text, zone ?? string.Empty));
         }
 
-        private static void CollectLatLongRows(Table table, IList<LatLongRowInfo> rows)
+        internal static void CollectLatLongRows(Table table, IList<LatLongRowInfo> rows)
         {
             if (table == null || rows == null)
                 return;
@@ -511,7 +511,7 @@ namespace XingManager.Services
             }
         }
 
-        private static void ApplyLatLongRows(IEnumerable<LatLongRowInfo> rows, IDictionary<string, CrossingRecord> records)
+        internal static void ApplyLatLongRows(IEnumerable<LatLongRowInfo> rows, IDictionary<string, CrossingRecord> records)
         {
             if (rows == null || records == null)
                 return;
@@ -684,7 +684,7 @@ namespace XingManager.Services
             return null;
         }
 
-        private static bool IsLatLongTable(Table table)
+        internal static bool IsLatLongTable(Table table)
         {
             if (table == null)
                 return false;
@@ -825,7 +825,7 @@ namespace XingManager.Services
             return token.Number > 0;
         }
 
-        private sealed class LatLongRowInfo
+        internal sealed class LatLongRowInfo
         {
             public ObjectId TableId { get; set; }
             public int RowIndex { get; set; }
