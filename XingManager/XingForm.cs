@@ -1248,7 +1248,7 @@ namespace XingManager
 
                 if (kind == TableSync.XingTableType.LatLong)
                 {
-                    ed.WriteMessage("\n[CrossingManager] Lat/Long table detected; importing coordinates.");
+                    ed.WriteMessage("\n[CrossingManager] Lat/Long table detected; merging coordinates into the grid.");
                     gridChanged = MergeLatLongTableIntoGrid(table, ed);
                 }
                 else
@@ -1418,9 +1418,6 @@ namespace XingManager
                 ed.WriteMessage("\n[CrossingManager] Duplicate X entries detected in table: " + string.Join(", ", duplicateKeys));
             }
 
-            var hasZoneColumn = (table?.Columns?.Count ?? 0) >= 5;
-            var hasDwgColumn = (table?.Columns?.Count ?? 0) >= 6;
-
             int matched = 0, updated = 0, added = 0, noMatch = 0;
             var matchedKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
@@ -1440,21 +1437,12 @@ namespace XingManager
 
                 bool changed = false;
 
-                var srcDesc = src.Description ?? string.Empty;
-                if (!string.Equals(rec.Description, srcDesc, StringComparison.Ordinal))
+                var srcDesc = (src.Description ?? string.Empty).Trim();
+                if (!string.IsNullOrWhiteSpace(srcDesc) &&
+                    !string.Equals(rec.Description?.Trim() ?? string.Empty, srcDesc, StringComparison.Ordinal))
                 {
                     rec.Description = srcDesc;
                     changed = true;
-                }
-
-                if (hasDwgColumn)
-                {
-                    var srcDwg = src.DwgRef ?? string.Empty;
-                    if (!string.Equals(rec.DwgRef, srcDwg, StringComparison.Ordinal))
-                    {
-                        rec.DwgRef = srcDwg;
-                        changed = true;
-                    }
                 }
 
                 var srcLat = (src.Lat ?? string.Empty).Trim();
@@ -1473,15 +1461,12 @@ namespace XingManager
                     changed = true;
                 }
 
-                var srcZone = src.Zone ?? string.Empty;
-                if (hasZoneColumn || !string.IsNullOrWhiteSpace(srcZone))
+                var srcZone = (src.Zone ?? string.Empty).Trim();
+                var recZone = (rec.Zone ?? string.Empty).Trim();
+                if (!string.IsNullOrWhiteSpace(srcZone) && !string.Equals(recZone, srcZone, StringComparison.Ordinal))
                 {
-                    var recZone = (rec.Zone ?? string.Empty).Trim();
-                    if (!string.Equals(recZone, srcZone, StringComparison.Ordinal))
-                    {
-                        rec.Zone = srcZone;
-                        changed = true;
-                    }
+                    rec.Zone = srcZone;
+                    changed = true;
                 }
 
                 matched++;
@@ -1511,10 +1496,10 @@ namespace XingManager
                 {
                     Crossing = string.IsNullOrWhiteSpace(src.Crossing) ? kvp.Key : src.Crossing,
                     Description = src.Description ?? string.Empty,
-                    DwgRef = hasDwgColumn ? (src.DwgRef ?? string.Empty) : string.Empty,
+                    DwgRef = string.Empty,
                     Lat = (src.Lat ?? string.Empty).Trim(),
                     Long = (src.Long ?? string.Empty).Trim(),
-                    Zone = (hasZoneColumn || !string.IsNullOrWhiteSpace(src.Zone)) ? (src.Zone ?? string.Empty) : string.Empty,
+                    Zone = (src.Zone ?? string.Empty).Trim(),
                     Owner = string.Empty,
                     Location = string.Empty
                 };
@@ -1526,12 +1511,9 @@ namespace XingManager
 
             ed?.WriteMessage($"\n[CrossingManager] Match Table -> lat/long merge: matched={matched}, updated={updated}, added={added}, noMatch={noMatch}");
 
-            var duplicatesOk = _duplicateResolver.ResolveDuplicates(_records, _contexts);
-            var latDuplicatesOk = _latLongDuplicateResolver.ResolveDuplicates(_records, _contexts);
-            if (!duplicatesOk || !latDuplicatesOk)
-            {
-                ed?.WriteMessage("\n[CrossingManager] Duplicate resolution may be incomplete; review results.");
-            }
+            _records.ResetBindings();
+            gridCrossings.Refresh();
+            _isDirty = true;
 
             return (updated > 0) || (added > 0);
         }
