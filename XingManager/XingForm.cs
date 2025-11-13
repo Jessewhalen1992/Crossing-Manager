@@ -1394,128 +1394,58 @@ namespace XingManager
 
         private bool MergeLatLongTableIntoGrid(Table table, Editor ed)
         {
-            if (table == null)
-                return false;
+            if (table == null) return false;
 
-            TableMatcher.BuildIndexesFromTable(
-                table,
-                TableSync.XingTableType.LatLong,
-                out var byKey,
-                out _,
-                out _,
-                out var duplicateKeys,
-                msg =>
-                {
-                    if (ed != null && !string.IsNullOrEmpty(msg))
-                        ed.WriteMessage($"\n[CrossingManager] {msg}");
-                });
+            // Use XingRepository to parse lat/long rows from the selected table.
+            var rows = new List<XingRepository.LatLongRowInfo>();
+            XingRepository.CollectLatLongRows(table, rows);
 
-            if (byKey == null)
-                byKey = new Dictionary<string, CrossingRecord>(StringComparer.OrdinalIgnoreCase);
-
-            if (duplicateKeys != null && duplicateKeys.Count > 0 && ed != null)
+            // Build a lookup dictionary from CrossingRecord.CrossingKey to CrossingRecord.
+            var recordMap = new Dictionary<string, CrossingRecord>(StringComparer.OrdinalIgnoreCase);
+            foreach (var record in _records)
             {
-                ed.WriteMessage("\n[CrossingManager] Duplicate X entries detected in table: " + string.Join(", ", duplicateKeys));
+                if (record == null) continue;
+
+                var key = TableSync.NormalizeKeyForLookup(record.Crossing);
+                if (string.IsNullOrEmpty(key) || recordMap.ContainsKey(key))
+                    continue;
+
+                recordMap[key] = record;
             }
 
-            int matched = 0, updated = 0, added = 0, noMatch = 0;
-            var matchedKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            // Apply the lat/long rows to the existing records (this updates Lat, Long, Zone, DwgRef).
+            XingRepository.ApplyLatLongRows(rows, recordMap);
 
-            foreach (var rec in _records)
+            // Add any new records for rows that didn’t match existing crossings.
+            foreach (var row in rows)
             {
-                if (rec == null)
-                    continue;
-
-                var key = TableSync.NormalizeKeyForLookup(rec.Crossing);
-                if (string.IsNullOrEmpty(key) || !byKey.TryGetValue(key, out var src) || src == null)
-                {
-                    if (!string.IsNullOrWhiteSpace(rec.Crossing))
-                        ed?.WriteMessage($"\n[CrossingManager] [!] {rec.Crossing}: no matching X in table.");
-                    noMatch++;
-                    continue;
-                }
-
-                bool changed = false;
-
-                var srcDesc = (src.Description ?? string.Empty).Trim();
-                if (!string.IsNullOrWhiteSpace(srcDesc) &&
-                    !string.Equals(rec.Description?.Trim() ?? string.Empty, srcDesc, StringComparison.Ordinal))
-                {
-                    rec.Description = srcDesc;
-                    changed = true;
-                }
-
-                var srcLat = (src.Lat ?? string.Empty).Trim();
-                var recLat = (rec.Lat ?? string.Empty).Trim();
-                if (!string.IsNullOrWhiteSpace(srcLat) && !string.Equals(recLat, srcLat, StringComparison.Ordinal))
-                {
-                    rec.Lat = srcLat;
-                    changed = true;
-                }
-
-                var srcLong = (src.Long ?? string.Empty).Trim();
-                var recLong = (rec.Long ?? string.Empty).Trim();
-                if (!string.IsNullOrWhiteSpace(srcLong) && !string.Equals(recLong, srcLong, StringComparison.Ordinal))
-                {
-                    rec.Long = srcLong;
-                    changed = true;
-                }
-
-                var srcZone = (src.Zone ?? string.Empty).Trim();
-                var recZone = (rec.Zone ?? string.Empty).Trim();
-                if (!string.IsNullOrWhiteSpace(srcZone) && !string.Equals(recZone, srcZone, StringComparison.Ordinal))
-                {
-                    rec.Zone = srcZone;
-                    changed = true;
-                }
-
-                matched++;
-                matchedKeys.Add(key);
-
-                if (changed)
-                {
-                    updated++;
-                    ed?.WriteMessage($"\n[CrossingManager] [U] {rec.Crossing}: lat/long updated from table.");
-                }
-                else
-                {
-                    ed?.WriteMessage($"\n[CrossingManager] [=] {rec.Crossing}: lat/long already matches table.");
-                }
-            }
-
-            foreach (var kvp in byKey)
-            {
-                if (matchedKeys.Contains(kvp.Key))
-                    continue;
-
-                var src = kvp.Value;
-                if (src == null)
+                var key = TableSync.NormalizeKeyForLookup(row.Crossing);
+                if (string.IsNullOrEmpty(key) || recordMap.ContainsKey(key))
                     continue;
 
                 var newRecord = new CrossingRecord
                 {
-                    Crossing = string.IsNullOrWhiteSpace(src.Crossing) ? kvp.Key : src.Crossing,
-                    Description = src.Description ?? string.Empty,
-                    DwgRef = string.Empty,
-                    Lat = (src.Lat ?? string.Empty).Trim(),
-                    Long = (src.Long ?? string.Empty).Trim(),
-                    Zone = (src.Zone ?? string.Empty).Trim(),
+                    Crossing = string.IsNullOrWhiteSpace(row.Crossing) ? key : row.Crossing,
+                    Description = row.Description ?? string.Empty,
+                    DwgRef = row.DwgRef ?? string.Empty,
+                    Lat = row.Latitude?.Trim() ?? string.Empty,
+                    Long = row.Longitude?.Trim() ?? string.Empty,
+                    Zone = row.Zone?.Trim() ?? string.Empty,
                     Owner = string.Empty,
                     Location = string.Empty
                 };
-
                 _records.Add(newRecord);
-                added++;
-                ed?.WriteMessage($"\n[CrossingManager] [+] {newRecord.Crossing}: added to grid from lat/long table.");
+                recordMap[key] = newRecord;
+                ed?.WriteMessage($"\n[CrossingManager] [+] {newRecord.Crossing}: added from lat/long table.");
             }
 
-            ed?.WriteMessage($"\n[CrossingManager] Match Table -> lat/long merge: matched={matched}, updated={updated}, added={added}, noMatch={noMatch}");
-
+            // Refresh the grid
             _records.ResetBindings();
             gridCrossings.Refresh();
             _isDirty = true;
 
-            return (updated > 0) || (added > 0);
+            // Return true if any record was updated or added
+            return rows.Count > 0;
         }
 
         /// Read Column A strictly from the block attribute living on the cell *content*.
