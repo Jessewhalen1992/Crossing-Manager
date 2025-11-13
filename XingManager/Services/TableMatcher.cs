@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Text.RegularExpressions;
 using Autodesk.AutoCAD.ApplicationServices;
 using Autodesk.AutoCAD.DatabaseServices;
 using Autodesk.AutoCAD.EditorInput;
@@ -43,6 +44,21 @@ namespace XingManager.Services
             "DWG_REF","DWGREF","DWGREFNO","DWGREFNUMBER"
         }, StringComparer.OrdinalIgnoreCase);
 
+        private static readonly ISet<string> LatAttributeTags = new HashSet<string>(new[]
+        {
+            "LAT","LATITUDE"
+        }, StringComparer.OrdinalIgnoreCase);
+
+        private static readonly ISet<string> LongAttributeTags = new HashSet<string>(new[]
+        {
+            "LONG","LONGITUDE"
+        }, StringComparer.OrdinalIgnoreCase);
+
+        private static readonly ISet<string> ZoneAttributeTags = new HashSet<string>(new[]
+        {
+            "ZONE","ZONE_LABEL"
+        }, StringComparer.OrdinalIgnoreCase);
+
         // --- simple normalizer for composite matching keys ---
         private static string N(string s)
         {
@@ -65,7 +81,7 @@ namespace XingManager.Services
             var ed = doc.Editor;
             try
             {
-                var options = new PromptEntityOptions("\nSelect a crossing table (Main/Page):")
+                var options = new PromptEntityOptions("\nSelect a crossing table (Main/Page/LatLong):")
                 {
                     AllowNone = false
                 };
@@ -96,11 +112,6 @@ namespace XingManager.Services
                         Log(ed, "Selected table type could not be determined. Command aborted.");
                         return;
                     }
-                    if (tableType == TableSync.XingTableType.LatLong)
-                    {
-                        Log(ed, "Lat/Long tables are not supported by MATCH TABLE.");
-                        return;
-                    }
                     Log(ed, $"Table type detected: {tableType}.");
 
                     // Build lookup dictionaries FROM the selected table (this is the "source of truth")
@@ -117,6 +128,8 @@ namespace XingManager.Services
                         msg => Log(ed, msg));
 
                     Log(ed, $"Indexed table rows -> byKey={byKey.Count}, byComposite={byComposite.Count}");
+
+                    var repository = new XingRepository(doc);
 
                     // Collect extents of all tables so we can ignore blocks embedded in tables
                     var db = doc.Database;
@@ -171,7 +184,7 @@ namespace XingManager.Services
                             {
                                 ProcessBlock(
                                     ed, br, tr, tableType,
-                                    byKey, byComposite, byCompositeXKey,
+                                    byKey, byComposite, byCompositeXKey, repository,
                                     ref matched, ref updated, ref skippedNoKey, ref skippedNoMatch, ref matchedByComposite);
                             }
                             catch (System.Exception ex)
@@ -204,6 +217,7 @@ namespace XingManager.Services
             IDictionary<string, CrossingRecord> byKey,
             IDictionary<string, CrossingRecord> byComposite,
             IDictionary<string, string> byCompositeXKey,
+            XingRepository repository,
             ref int matched,
             ref int updated,
             ref int skippedNoKey,
@@ -287,13 +301,74 @@ namespace XingManager.Services
                 changed |= SetAttributeIfExists(br, tr, CrossingAttributeTags, crossingToWrite, null);
 
             // From table to block
-            changed |= SetAttributeIfExists(br, tr, OwnerAttributeTags, record.Owner, null);
-            changed |= SetAttributeIfExists(br, tr, DescriptionAttributeTags, record.Description, null);
-
-            if (tableType == TableSync.XingTableType.Main)
+            if (tableType == TableSync.XingTableType.LatLong)
             {
-                changed |= SetAttributeIfExists(br, tr, LocationAttributeTags, record.Location, null);
-                changed |= SetAttributeIfExists(br, tr, DwgRefAttributeTags, record.DwgRef, null);
+                if (!string.IsNullOrWhiteSpace(record.Description))
+                    changed |= SetAttributeIfExists(br, tr, DescriptionAttributeTags, record.Description, null);
+
+                var hasLat = !string.IsNullOrWhiteSpace(record.Lat);
+                var hasLong = !string.IsNullOrWhiteSpace(record.Long);
+                var hasZone = !string.IsNullOrWhiteSpace(record.Zone);
+
+                if (hasLat || hasLong || hasZone)
+                {
+                    if (repository != null)
+                    {
+                        var shouldWriteLatLong = true;
+                        string existingLat = string.Empty;
+                        string existingLong = string.Empty;
+                        string existingZone = string.Empty;
+                        var hadExisting = repository.TryGetLatLong(br, tr, out existingLat, out existingLong, out existingZone);
+                        string desiredLat = hasLat ? record.Lat?.Trim() : (hadExisting ? existingLat?.Trim() : null);
+                        string desiredLong = hasLong ? record.Long?.Trim() : (hadExisting ? existingLong?.Trim() : null);
+                        string desiredZone = hasZone ? record.Zone?.Trim() : (hadExisting ? existingZone?.Trim() : null);
+
+                        if (!hadExisting && !hasLat && !hasLong)
+                        {
+                            shouldWriteLatLong = false;
+                        }
+                        else if (hadExisting)
+                        {
+                            shouldWriteLatLong =
+                                !ValuesEqual(existingLat, desiredLat) ||
+                                !ValuesEqual(existingLong, desiredLong) ||
+                                !ValuesEqual(existingZone, desiredZone);
+                        }
+                        else
+                        {
+                            shouldWriteLatLong = true;
+                        }
+
+                        if (shouldWriteLatLong)
+                        {
+                            repository.SetLatLong(
+                                br,
+                                tr,
+                                desiredLat ?? string.Empty,
+                                desiredLong ?? string.Empty,
+                                desiredZone ?? string.Empty);
+                            changed = true;
+                        }
+                    }
+
+                    if (hasLat)
+                        changed |= SetAttributeIfExists(br, tr, LatAttributeTags, record.Lat, null);
+                    if (hasLong)
+                        changed |= SetAttributeIfExists(br, tr, LongAttributeTags, record.Long, null);
+                    if (hasZone)
+                        changed |= SetAttributeIfExists(br, tr, ZoneAttributeTags, record.Zone, null);
+                }
+            }
+            else
+            {
+                changed |= SetAttributeIfExists(br, tr, OwnerAttributeTags, record.Owner, null);
+                changed |= SetAttributeIfExists(br, tr, DescriptionAttributeTags, record.Description, null);
+
+                if (tableType == TableSync.XingTableType.Main)
+                {
+                    changed |= SetAttributeIfExists(br, tr, LocationAttributeTags, record.Location, null);
+                    changed |= SetAttributeIfExists(br, tr, DwgRefAttributeTags, record.DwgRef, null);
+                }
             }
 
             if (changed)
@@ -350,7 +425,15 @@ namespace XingManager.Services
             var rows = table.Rows.Count;
             var cols = table.Columns.Count;
 
-            for (int row = 0; row < rows; row++)
+            var dataStartRow = 0;
+            if (tableType == TableSync.XingTableType.LatLong)
+            {
+                var start = TableSync.FindLatLongDataStartRow(table);
+                if (start > 0)
+                    dataStartRow = start;
+            }
+
+            for (int row = dataStartRow; row < rows; row++)
             {
                 // Column A: read CROSSING from the block cell (falls back to text). :contentReference[oaicite:4]{index=4}
                 var rawKey = TableSync.ResolveCrossingKey(table, row, 0);
@@ -362,14 +445,49 @@ namespace XingManager.Services
                 }
 
                 // Adjacent cells
-                var owner = (cols > 1) ? ReadCellValue(table, row, 1) : string.Empty;
-                var desc = (cols > 2) ? ReadCellValue(table, row, 2) : string.Empty;
+                string owner = string.Empty;
+                string desc = string.Empty;
+                string loc = string.Empty;
+                string dwg = string.Empty;
+                string lat = string.Empty;
+                string lng = string.Empty;
+                string zone = string.Empty;
 
-                string loc = string.Empty, dwg = string.Empty;
-                if (tableType == TableSync.XingTableType.Main)
+                if (tableType == TableSync.XingTableType.LatLong)
                 {
-                    loc = (cols > 3) ? ReadCellValue(table, row, 3) : string.Empty;
-                    dwg = (cols > 4) ? ReadCellValue(table, row, 4) : string.Empty;
+                    desc = (cols > 1) ? ReadCellValue(table, row, 1) : string.Empty;
+
+                    var hasExtendedLayout = cols >= 5;
+                    var zoneColumn = hasExtendedLayout ? 2 : -1;
+                    var latColumn = hasExtendedLayout ? 3 : (cols > 2 ? 2 : -1);
+                    var longColumn = hasExtendedLayout ? 4 : (cols > 3 ? 3 : -1);
+                    var dwgColumn = cols >= 6 ? 5 : -1;
+
+                    var zoneLabel = zoneColumn >= 0 ? ReadCellValue(table, row, zoneColumn) : string.Empty;
+                    zone = ExtractZoneValue(zoneLabel);
+                    lat = latColumn >= 0 ? ReadCellValue(table, row, latColumn) : string.Empty;
+                    lng = longColumn >= 0 ? ReadCellValue(table, row, longColumn) : string.Empty;
+                    dwg = dwgColumn >= 0 ? ReadCellValue(table, row, dwgColumn) : string.Empty;
+
+                    if (string.IsNullOrWhiteSpace(desc) &&
+                        string.IsNullOrWhiteSpace(lat) &&
+                        string.IsNullOrWhiteSpace(lng) &&
+                        string.IsNullOrWhiteSpace(zone) &&
+                        string.IsNullOrWhiteSpace(dwg))
+                    {
+                        continue;
+                    }
+                }
+                else
+                {
+                    owner = (cols > 1) ? ReadCellValue(table, row, 1) : string.Empty;
+                    desc = (cols > 2) ? ReadCellValue(table, row, 2) : string.Empty;
+
+                    if (tableType == TableSync.XingTableType.Main)
+                    {
+                        loc = (cols > 3) ? ReadCellValue(table, row, 3) : string.Empty;
+                        dwg = (cols > 4) ? ReadCellValue(table, row, 4) : string.Empty;
+                    }
                 }
 
                 var rec = new CrossingRecord
@@ -378,7 +496,10 @@ namespace XingManager.Services
                     Owner = owner,
                     Description = desc,
                     Location = loc,
-                    DwgRef = dwg
+                    DwgRef = dwg,
+                    Lat = lat,
+                    Long = lng,
+                    Zone = zone
                 };
 
                 if (byKey.ContainsKey(normalized))
@@ -391,14 +512,17 @@ namespace XingManager.Services
                 }
 
                 // Composite key (to match blocks even when X is off)
-                var composite = (tableType == TableSync.XingTableType.Main)
-                    ? CompositeKeyMain(owner, desc, loc, dwg)
-                    : CompositeKeyPage(owner, desc);
-
-                if (!string.IsNullOrWhiteSpace(composite) && !byComposite.ContainsKey(composite))
+                if (tableType != TableSync.XingTableType.LatLong)
                 {
-                    byComposite[composite] = rec;
-                    byCompositeXKey[composite] = normalized;
+                    var composite = (tableType == TableSync.XingTableType.Main)
+                        ? CompositeKeyMain(owner, desc, loc, dwg)
+                        : CompositeKeyPage(owner, desc);
+
+                    if (!string.IsNullOrWhiteSpace(composite) && !byComposite.ContainsKey(composite))
+                    {
+                        byComposite[composite] = rec;
+                        byCompositeXKey[composite] = normalized;
+                    }
                 }
             }
 
@@ -446,6 +570,36 @@ namespace XingManager.Services
                 }
             }
             return changed;
+        }
+
+        private static string ExtractZoneValue(string zoneLabel)
+        {
+            if (string.IsNullOrWhiteSpace(zoneLabel))
+                return string.Empty;
+
+            var normalized = TableSync.NormalizeText(zoneLabel) ?? string.Empty;
+            normalized = normalized.Trim();
+            if (normalized.Length == 0)
+                return string.Empty;
+
+            var match = Regex.Match(normalized, "(\\d+)");
+            if (match.Success)
+                return match.Groups[1].Value.TrimStart('0');
+
+            if (normalized.StartsWith("ZONE", StringComparison.OrdinalIgnoreCase))
+            {
+                var remainder = normalized.Substring(4).Trim();
+                return remainder.Length > 0 ? remainder : string.Empty;
+            }
+
+            return normalized;
+        }
+
+        private static bool ValuesEqual(string left, string right)
+        {
+            var leftNorm = (left ?? string.Empty).Trim();
+            var rightNorm = (right ?? string.Empty).Trim();
+            return string.Equals(leftNorm, rightNorm, StringComparison.OrdinalIgnoreCase);
         }
 
         private static string GetEffectiveBlockName(BlockReference br, Transaction tr)
