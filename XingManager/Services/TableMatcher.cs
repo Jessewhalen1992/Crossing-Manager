@@ -406,7 +406,7 @@ namespace XingManager.Services
         ///  byCompositeXKey : composite -> "X#" (normalized)
         /// Tracks duplicate X#s encountered in duplicateKeys.
         /// </summary>
-        private static void BuildIndexesFromTable(
+        internal static void BuildIndexesFromTable(
             Table table,
             TableSync.XingTableType tableType,
             out Dictionary<string, CrossingRecord> byKey,
