@@ -1251,7 +1251,7 @@ namespace XingManager
                     return false;
                 }
 
-                var byX = new Dictionary<string, (string Owner, string Desc, string Loc, string Dwg, int Row)>(StringComparer.OrdinalIgnoreCase);
+                var byX = new Dictionary<string, (string Raw, string Owner, string Desc, string Loc, string Dwg, int Row)>(StringComparer.OrdinalIgnoreCase);
 
                 ed.WriteMessage("\n[CrossingManager] --- TABLE VALUES (parsed) ---");
                 for (int r = 0; r < table.Rows.Count; r++)
@@ -1274,7 +1274,7 @@ namespace XingManager
                     ed.WriteMessage($"\n[CrossingManager] [T] row {r}: X='{xKey}' owner='{owner}' desc='{desc}' loc='{loc}' dwg='{dwg}'");
 
                     if (!byX.ContainsKey(xKey))
-                        byX[xKey] = (owner, desc, loc, dwg, r);
+                        byX[xKey] = (xRaw?.Trim() ?? string.Empty, owner, desc, loc, dwg, r);
                     else
                         ed.WriteMessage($"\n[CrossingManager] [!] Duplicate X '{xKey}' in table (row {r}). First occurrence kept.");
                 }
@@ -1282,7 +1282,8 @@ namespace XingManager
                 ed.WriteMessage($"\n[CrossingManager] Table rows indexed by X = {byX.Count}");
                 ed.WriteMessage("\n[CrossingManager] --- TABLE→FORM UPDATES (X-only) ---");
 
-                int matched = 0, updated = 0, noMatch = 0;
+                int matched = 0, updated = 0, added = 0, noMatch = 0;
+                var matchedKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
                 foreach (var rec in _records)
                 {
@@ -1312,6 +1313,7 @@ namespace XingManager
                     }
 
                     matched++;
+                    matchedKeys.Add(xKey);
                     if (changed)
                     {
                         updated++;
@@ -1323,13 +1325,42 @@ namespace XingManager
                     }
                 }
 
+                foreach (var kvp in byX)
+                {
+                    if (matchedKeys.Contains(kvp.Key))
+                        continue;
+
+                    var src = kvp.Value;
+                    var crossingLabel = string.IsNullOrWhiteSpace(src.Raw) ? kvp.Key : src.Raw;
+                    var newRecord = new CrossingRecord
+                    {
+                        Crossing = crossingLabel,
+                        Owner = src.Owner,
+                        Description = src.Desc,
+                        Location = src.Loc,
+                        DwgRef = src.Dwg
+                    };
+
+                    if (kind != TableSync.XingTableType.Main)
+                    {
+                        newRecord.Location = string.Empty;
+                        newRecord.DwgRef = string.Empty;
+                    }
+
+                    _records.Add(newRecord);
+                    added++;
+                    ed.WriteMessage($"\n[CrossingManager] [+] {newRecord.Crossing}: added to grid from table (row {src.Row}).");
+                }
+
+                _records.ResetBindings();
+
                 tr.Commit();
                 gridCrossings.Refresh();
                 _isDirty = true;
 
-                ed.WriteMessage($"\n[CrossingManager] Match Table -> grid only (X-only): matched={matched}, updated={updated}, noMatch={noMatch}");
+                ed.WriteMessage($"\n[CrossingManager] Match Table -> grid only (X-only): matched={matched}, updated={updated}, added={added}, noMatch={noMatch}");
 
-                gridChanged = (updated > 0);
+                gridChanged = (updated > 0) || (added > 0);
             } // end read/lock
 
             // === Persist to DWG + tables if requested ===
