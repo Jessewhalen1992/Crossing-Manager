@@ -156,7 +156,7 @@ namespace XingManager.Services
             }
             catch (System.Exception ex)
             {
-                doc.Editor.WriteMessage("\nUnable to switch layout: {0}", ex.Message);
+                CommandLogger.Log(doc.Editor, $"Unable to switch layout: {ex.Message}");
             }
         }
 
