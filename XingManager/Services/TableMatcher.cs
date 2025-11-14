@@ -79,21 +79,23 @@ namespace XingManager.Services
             if (doc == null) return;
 
             var ed = doc.Editor;
-            try
+            using (Logger.Scope(ed, "match_table"))
             {
-                var options = new PromptEntityOptions("\nSelect a crossing table (Main/Page/LatLong):")
+                try
                 {
-                    AllowNone = false
-                };
-                options.SetRejectMessage("\nEntity must be a table.");
-                options.AddAllowedClass(typeof(Table), true);
+                    var options = new PromptEntityOptions("\nSelect a crossing table (Main/Page/LatLong):")
+                    {
+                        AllowNone = false
+                    };
+                    options.SetRejectMessage("\nEntity must be a table.");
+                    options.AddAllowedClass(typeof(Table), true);
 
-                var selection = ed.GetEntity(options);
-                if (selection.Status != PromptStatus.OK)
-                {
-                    Log(ed, "MATCH TABLE cancelled.");
-                    return;
-                }
+                    var selection = ed.GetEntity(options);
+                    if (selection.Status != PromptStatus.OK)
+                    {
+                        Logger.Info(ed, "match_table status=cancelled");
+                        return;
+                    }
 
                 using (doc.LockDocument())
                 using (var tr = doc.TransactionManager.StartTransaction())
@@ -101,7 +103,7 @@ namespace XingManager.Services
                     var table = tr.GetObject(selection.ObjectId, OpenMode.ForRead) as Table;
                     if (table == null)
                     {
-                        Log(ed, "Selected entity is not a table.");
+                        Logger.Warn(ed, "match_table status=aborted reason=not_table");
                         return;
                     }
 
@@ -109,10 +111,10 @@ namespace XingManager.Services
                     var tableType = DetectTableType(table, tr);
                     if (tableType == TableSync.XingTableType.Unknown)
                     {
-                        Log(ed, "Selected table type could not be determined. Command aborted.");
+                        Logger.Warn(ed, "match_table status=aborted reason=unknown_table_type");
                         return;
                     }
-                    Log(ed, $"Table type detected: {tableType}.");
+                    Logger.Info(ed, $"table_detected type={tableType}");
 
                     // Build lookup dictionaries FROM the selected table (this is the "source of truth")
                     HashSet<string> duplicateKeys;
@@ -121,13 +123,13 @@ namespace XingManager.Services
                     BuildIndexesFromTable(
                         table,
                         tableType,
+                        ed,
                         out byKey,
                         out byComposite,
                         out byCompositeXKey,
-                        out duplicateKeys,
-                        msg => Log(ed, msg));
+                        out duplicateKeys);
 
-                    Log(ed, $"Indexed table rows -> byKey={byKey.Count}, byComposite={byComposite.Count}");
+                    Logger.Info(ed, $"indexed byKey={byKey.Count} byComposite={byComposite.Count} dupes={duplicateKeys.Count}");
 
                     // --------------------------------------------------------------------------------------
                     // When matching against a Main/Page table, enrich the in-memory records with LAT/LONG
@@ -146,6 +148,7 @@ namespace XingManager.Services
                         {
                             // Collect LAT/LONG information from other tables
                             var latLongByKey = new Dictionary<string, CrossingRecord>(StringComparer.OrdinalIgnoreCase);
+                            var tableEnriched = 0;
                             var dbForLat = doc.Database;
                             var btable = (BlockTable)tr.GetObject(dbForLat.BlockTableId, OpenMode.ForRead);
                             foreach (ObjectId btrId2 in btable)
@@ -171,11 +174,12 @@ namespace XingManager.Services
                                     BuildIndexesFromTable(
                                         tObj,
                                         tType,
+                                        ed,
                                         out var llByKey,
                                         out var llByComposite,
                                         out var llByCompositeX,
                                         out var llDupes,
-                                        msg => { });
+                                        logDuplicates: false);
                                     foreach (var kv in llByKey)
                                     {
                                         if (!latLongByKey.TryGetValue(kv.Key, out var merged))
@@ -201,25 +205,39 @@ namespace XingManager.Services
                                 if (byKey.TryGetValue(kv.Key, out var recTarget))
                                 {
                                     var llRec = kv.Value;
+                                    var changedFromTable = false;
                                     if (string.IsNullOrWhiteSpace(recTarget.Lat) && !string.IsNullOrWhiteSpace(llRec.Lat))
+                                    {
                                         recTarget.Lat = llRec.Lat;
+                                        changedFromTable = true;
+                                    }
                                     if (string.IsNullOrWhiteSpace(recTarget.Long) && !string.IsNullOrWhiteSpace(llRec.Long))
+                                    {
                                         recTarget.Long = llRec.Long;
+                                        changedFromTable = true;
+                                    }
                                     if (string.IsNullOrWhiteSpace(recTarget.Zone) && !string.IsNullOrWhiteSpace(llRec.Zone))
+                                    {
                                         recTarget.Zone = llRec.Zone;
+                                        changedFromTable = true;
+                                    }
+                                    if (changedFromTable)
+                                        tableEnriched++;
                                 }
                             }
+                            Logger.Info(ed, $"enriched_from source=latlong_tables keys={tableEnriched}");
                         }
                         catch (System.Exception exTables)
                         {
                             // Best effort: do not abort if we cannot enrich from tables
-                            Log(ed, $"Warning: unable to enrich LAT/LONG from tables: {exTables.Message}");
+                            Logger.Warn(ed, $"enrich_latlong_from_tables_failed err={exTables.Message}");
                         }
 
                         try
                         {
                             // Secondly, harvest LAT/LONG values from existing XING blocks via repository scan
                             var scanResult = new XingRepository(doc).ScanCrossings();
+                            var blockEnriched = 0;
                             foreach (var record in scanResult.Records ?? new List<CrossingRecord>())
                             {
                                 // Normalize the key using the same normalizer as BuildIndexesFromTable
@@ -230,19 +248,32 @@ namespace XingManager.Services
                                 if (byKey.TryGetValue(normalized, out var target))
                                 {
                                     // Only populate missing fields; avoid overwriting values from the selected table
+                                    var changedFromBlocks = false;
                                     if (string.IsNullOrWhiteSpace(target.Lat) && !string.IsNullOrWhiteSpace(record.Lat))
+                                    {
                                         target.Lat = record.Lat;
+                                        changedFromBlocks = true;
+                                    }
                                     if (string.IsNullOrWhiteSpace(target.Long) && !string.IsNullOrWhiteSpace(record.Long))
+                                    {
                                         target.Long = record.Long;
+                                        changedFromBlocks = true;
+                                    }
                                     if (string.IsNullOrWhiteSpace(target.Zone) && !string.IsNullOrWhiteSpace(record.Zone))
+                                    {
                                         target.Zone = record.Zone;
+                                        changedFromBlocks = true;
+                                    }
+                                    if (changedFromBlocks)
+                                        blockEnriched++;
                                 }
                             }
+                            Logger.Info(ed, $"enriched_from source=blocks keys={blockEnriched}");
                         }
                         catch (System.Exception exScan)
                         {
                             // Best effort: do not abort the command on scan failures; just log the issue.
-                            Log(ed, $"Warning: unable to enrich LAT/LONG values from scan: {exScan.Message}");
+                            Logger.Warn(ed, $"enrich_latlong_from_blocks_failed err={exScan.Message}");
                         }
                     }
 
@@ -307,22 +338,20 @@ namespace XingManager.Services
                             catch (System.Exception ex)
                             {
                                 errors++;
-                                Log(ed, $"Block {br.Handle}: {ex.Message}");
+                                Logger.Error(ed, $"block handle={br.Handle} err={ex.Message}");
                             }
                         }
                     }
 
                     tr.Commit();
 
-                    if (duplicateKeys.Count > 0)
-                        Log(ed, "Duplicate X keys in table ignored: " + string.Join(", ", duplicateKeys));
-
-                    Log(ed, $"MATCH TABLE summary -> XING2: {totalXing2}, matched: {matched}, matched(composite): {matchedByComposite}, updated: {updated}, skipped(no key): {skippedNoKey}, skipped(no match): {skippedNoMatch}, errors: {errors}.");
+                    Logger.Info(ed, $"summary xing2_total={totalXing2} matched_key={matched} matched_composite={matchedByComposite} updated={updated} skipped_no_key={skippedNoKey} skipped_no_match={skippedNoMatch} errors={errors}");
                 }
-            }
-            catch (System.Exception ex)
-            {
-                Log(ed, $"MATCH TABLE failed: {ex.Message}");
+                }
+                catch (System.Exception ex)
+                {
+                    Logger.Error(ed, $"match_table_failed err={ex.Message}");
+                }
             }
         }
 
@@ -379,7 +408,7 @@ namespace XingManager.Services
                     record = rowRec;
                     matchedViaComposite = true;
                     matchedByComposite++;
-                    Log(ed, $"Block {handle}: matched by composite.");
+                    Logger.Debug(ed, $"block handle={handle} match=composite");
                 }
             }
 
@@ -388,12 +417,12 @@ namespace XingManager.Services
                 if (string.IsNullOrEmpty(normalizedKey))
                 {
                     skippedNoKey++;
-                    Log(ed, $"Block {handle}: missing/invalid CROSSING.");
+                    Logger.Info(ed, $"block handle={handle} skip reason=no_key");
                 }
                 else
                 {
                     skippedNoMatch++;
-                    Log(ed, $"Block {handle}: key '{keyValue}' not found in the selected table.");
+                    Logger.Info(ed, $"block handle={handle} skip reason=no_match key={keyValue}");
                 }
                 return;
             }
@@ -444,11 +473,11 @@ namespace XingManager.Services
             {
                 updated++;
                 br.RecordGraphicsModified(true);
-                Log(ed, $"Block {handle}: attributes updated from table.");
+                Logger.Info(ed, $"block handle={handle} updated=true");
             }
             else
             {
-                Log(ed, $"Block {handle}: already aligned with table.");
+                Logger.Debug(ed, $"block handle={handle} updated=false");
             }
         }
 
@@ -477,11 +506,12 @@ namespace XingManager.Services
         public static void BuildIndexesFromTable(
             Table table,
             TableSync.XingTableType tableType,
+            Editor ed,
             out Dictionary<string, CrossingRecord> byKey,
             out Dictionary<string, CrossingRecord> byComposite,
             out Dictionary<string, string> byCompositeXKey,
             out HashSet<string> duplicateKeys,
-            Action<string> log)
+            bool logDuplicates = true)
         {
             byKey = new Dictionary<string, CrossingRecord>(StringComparer.OrdinalIgnoreCase);
             byComposite = new Dictionary<string, CrossingRecord>(StringComparer.OrdinalIgnoreCase);
@@ -594,8 +624,8 @@ namespace XingManager.Services
                 }
             }
 
-            if (duplicateKeys.Count > 0 && log != null)
-                log("Table has duplicate X keys: " + string.Join(", ", duplicateKeys));
+            if (logDuplicates && duplicateKeys.Count > 0)
+                Logger.Warn(ed, $"table_duplicate_keys count={duplicateKeys.Count} keys={string.Join(",", duplicateKeys)}");
         }
 
         // ---------- Local cell/attribute helpers ----------
@@ -692,12 +722,5 @@ namespace XingManager.Services
             catch { return string.Empty; }
         }
 
-        private static void Log(Editor ed, string message)
-        {
-            if (string.IsNullOrWhiteSpace(message))
-                return;
-
-            CommandLogger.Log(ed, message);
-        }
     }
 }

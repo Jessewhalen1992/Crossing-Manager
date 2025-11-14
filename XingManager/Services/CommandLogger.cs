@@ -101,14 +101,7 @@ namespace XingManager.Services
             if (!alsoToCommandBar || editor == null)
                 return;
 
-            try
-            {
-                editor.WriteMessage("\n[CrossingManager] " + message);
-            }
-            catch
-            {
-                // Ignore command bar logging failures.
-            }
+            Logger.Info(editor, message);
         }
 
         public static string LogFilePath => _logFilePath;

@@ -2,6 +2,7 @@ using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.Reflection;
+using Autodesk.AutoCAD.ApplicationServices;
 using Autodesk.AutoCAD.DatabaseServices;
 
 namespace XingManager.Services
@@ -42,6 +43,7 @@ namespace XingManager.Services
                 }
             }
 
+            DebugLog($"table_cell_probe row={row} col={col} tag={tag} status=no_match");
             return string.Empty;
         }
 
@@ -79,9 +81,10 @@ namespace XingManager.Services
 
                     for (int i = 3; i < p.Length; i++) args[i] = p[i].IsOptional ? Type.Missing : null;
 
-                    try { return Convert.ToString(mi.Invoke(t, args)); } catch { }
+                    try { return Convert.ToString(mi.Invoke(t, args)); } catch (Exception ex) { DebugLog($"table_cell_probe reflection_fail mode=direct method={mi.Name} err={ex.Message}"); }
                 }
             }
+            DebugLog($"table_cell_probe reflection_miss mode=direct row={row} col={col} tag={tag}");
             return string.Empty;
         }
 
@@ -105,9 +108,10 @@ namespace XingManager.Services
 
                     for (int i = 4; i < p.Length; i++) args[i] = p[i].IsOptional ? Type.Missing : null;
 
-                    try { return Convert.ToString(mi.Invoke(t, args)); } catch { }
+                    try { return Convert.ToString(mi.Invoke(t, args)); } catch (Exception ex) { DebugLog($"table_cell_probe reflection_fail mode=indexed method={mi.Name} err={ex.Message}"); }
                 }
             }
+            DebugLog($"table_cell_probe reflection_miss mode=indexed row={row} col={col} idx={contentIndex} tag={tag}");
             return string.Empty;
         }
 
@@ -151,6 +155,15 @@ namespace XingManager.Services
                     if (ad != null && !string.IsNullOrWhiteSpace(ad.Tag)) yield return ad.Tag.Trim();
                 }
             }
+        }
+
+        private static void DebugLog(string message)
+        {
+            if (string.IsNullOrWhiteSpace(message))
+                return;
+
+            var ed = Application.DocumentManager?.MdiActiveDocument?.Editor;
+            Logger.Debug(ed, message);
         }
     }
 }
