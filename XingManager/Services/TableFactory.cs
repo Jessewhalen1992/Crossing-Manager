@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using Autodesk.AutoCAD.ApplicationServices;
 using Autodesk.AutoCAD.DatabaseServices;
 using XingManager.Models;
 
@@ -54,6 +55,8 @@ namespace XingManager.Services
         {
             var recordList = PrepareRecordList(records);
 
+            var ed = Application.DocumentManager?.MdiActiveDocument?.Editor;
+
             var table = new Table
             {
                 TableStyle = EnsureTableStyle(db, tr),
@@ -92,6 +95,7 @@ namespace XingManager.Services
             }
 
             table.GenerateLayout();
+            Logger.Info(ed, $"create_table kind=MAIN rows={recordList.Count}");
             return table;
         }
 
@@ -100,6 +104,8 @@ namespace XingManager.Services
             var filtered = PrepareRecordList(records)
                 .Where(r => string.Equals((r.DwgRef ?? string.Empty).Trim(), (dwgRef ?? string.Empty).Trim(), StringComparison.OrdinalIgnoreCase))
                 .ToList();
+
+            var ed = Application.DocumentManager?.MdiActiveDocument?.Editor;
 
             var table = new Table
             {
@@ -131,6 +137,7 @@ namespace XingManager.Services
             }
 
             table.GenerateLayout();
+            Logger.Info(ed, $"create_table kind=PAGE rows={filtered.Count} dwg={dwgRef}");
             return table;
         }
 
@@ -171,6 +178,8 @@ namespace XingManager.Services
             }
 
             xrec.Data = new ResultBuffer(new TypedValue((int)DxfCode.Text, tableType));
+            var ed = Application.DocumentManager?.MdiActiveDocument?.Editor;
+            Logger.Info(ed, $"tag_table handle={table.ObjectId.Handle} type={tableType}");
         }
 
         private static List<CrossingRecord> PrepareRecordList(IEnumerable<CrossingRecord> records)

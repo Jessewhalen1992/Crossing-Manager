@@ -24,7 +24,9 @@ namespace XingManager.Services
             if (records == null)
                 throw new ArgumentNullException(nameof(records));
 
+            var ed = Application.DocumentManager?.MdiActiveDocument?.Editor;
             var candidates = BuildCandidateList(records, contexts);
+            Logger.Info(ed, $"dup_latlong candidates={candidates.Count}");
             if (!candidates.Any())
                 return true;
 
@@ -33,6 +35,9 @@ namespace XingManager.Services
                 .Select(g => g.ToList())
                 .Where(group => group.Count > 1)
                 .ToList();
+
+            Logger.Info(ed, $"dup_latlong groups={groups.Count}");
+            var autoResolvedCount = 0;
 
             // Track which crossings we actually changed so we can push to DWG tables
             var changed = new List<(string CrossingKey, LatLongCandidate Canonical)>();
@@ -55,6 +60,8 @@ namespace XingManager.Services
                     group[0].Canonical = true;
                     for (int j = 1; j < group.Count; j++)
                         group[j].Canonical = false;
+                    autoResolvedCount++;
+                    Logger.Info(ed, $"dup_latlong autoresolved crossing={displayName}");
                 }
                 else
                 {
@@ -106,6 +113,8 @@ namespace XingManager.Services
                 changed.Add((record.CrossingKey, selected));
             }
 
+            Logger.Info(ed, $"dup_latlong summary groups={groups.Count} autoresolved={autoResolvedCount} manual={groups.Count - autoResolvedCount}");
+
             // ------------------------------------------------------------------
             // Critical part: immediately push chosen LAT/LONG into DWG tables.
             // This prevents the UI from "snapping back" when it refreshes from DWG.
@@ -115,9 +124,11 @@ namespace XingManager.Services
                 try
                 {
                     ApplyLatLongChoicesToDrawingTables(records, changed);
+                    Logger.Info(ed, $"dwg_writeback latlong changed={changed.Count}");
                 }
-                catch
+                catch (Exception ex)
                 {
+                    Logger.Warn(ed, $"dwg_writeback latlong err={ex.Message}");
                     // Do not fail duplicate resolution if DWG write-back had an issue.
                     // The normal TableSync pass will still try to push changes later.
                 }

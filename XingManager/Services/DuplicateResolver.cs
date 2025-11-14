@@ -4,6 +4,7 @@ using System.Drawing;
 using System.Globalization;
 using System.Linq;                    // <-- needed for Where/Select/GroupBy
 using System.Windows.Forms;
+using Autodesk.AutoCAD.ApplicationServices;
 using Autodesk.AutoCAD.DatabaseServices;
 using WinFormsFlowDirection = System.Windows.Forms.FlowDirection;
 using XingManager.Models;
@@ -45,8 +46,10 @@ namespace XingManager.Services
             if (records == null)
                 throw new ArgumentNullException("records");
 
+            var ed = Application.DocumentManager?.MdiActiveDocument?.Editor;
             // Build the flat list shown in the dialog (skips IgnoreForDuplicates instances)
             var duplicateCandidates = BuildCandidateList(records, contexts);
+            Logger.Info(ed, $"dup_blocks candidates={duplicateCandidates.Count}");
             if (!duplicateCandidates.Any())
                 return true; // nothing to resolve
 
@@ -56,6 +59,9 @@ namespace XingManager.Services
                 .Select(g => g.ToList())
                 .Where(group => group.Count > 1)
                 .ToList();
+
+            Logger.Info(ed, $"dup_blocks groups={duplicateGroups.Count}");
+            var resolvedGroups = 0;
 
             for (var i = 0; i < duplicateGroups.Count; i++)
             {
@@ -73,7 +79,14 @@ namespace XingManager.Services
                 // The one the user ticked
                 var selected = group.FirstOrDefault(c => c.Canonical);
                 if (selected == null)
+                {
+                    Logger.Debug(ed, $"dup_blocks group crossing={displayName} canonical=none members={group.Count}");
                     continue;
+                }
+
+                resolvedGroups++;
+                var canonicalHandle = !selected.ObjectId.IsNull ? selected.ObjectId.Handle.ToString() : "null";
+                Logger.Debug(ed, $"dup_blocks group crossing={displayName} canonical={canonicalHandle} members={group.Count}");
 
                 // Find & update the record (canonical snapshot)
                 var record = records.First(r =>
@@ -107,6 +120,8 @@ namespace XingManager.Services
                     }
                 }
             }
+
+            Logger.Info(ed, $"dup_blocks summary groups={duplicateGroups.Count} resolved={resolvedGroups} skipped={duplicateGroups.Count - resolvedGroups}");
 
             return true;
         }

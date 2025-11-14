@@ -85,66 +85,69 @@ namespace XingManager.Services
 
             var db = doc.Database;
             _ed = doc.Editor;
-            var byKey = records.ToDictionary(r => r.CrossingKey, r => r, StringComparer.OrdinalIgnoreCase);
-
-            using (doc.LockDocument())
-            using (var tr = db.TransactionManager.StartTransaction())
+            using (Logger.Scope(_ed, "update_all_tables", $"records={records.Count}"))
             {
-                var blockTable = (BlockTable)tr.GetObject(db.BlockTableId, OpenMode.ForRead);
+                var byKey = records.ToDictionary(r => r.CrossingKey, r => r, StringComparer.OrdinalIgnoreCase);
 
-                foreach (ObjectId btrId in blockTable)
+                using (doc.LockDocument())
+                using (var tr = db.TransactionManager.StartTransaction())
                 {
-                    var btr = (BlockTableRecord)tr.GetObject(btrId, OpenMode.ForRead);
-                    foreach (ObjectId entId in btr)
+                    var blockTable = (BlockTable)tr.GetObject(db.BlockTableId, OpenMode.ForRead);
+
+                    foreach (ObjectId btrId in blockTable)
                     {
-                        var table = tr.GetObject(entId, OpenMode.ForRead) as Table;
-                        if (table == null) continue;
-
-                        var type = IdentifyTable(table, tr);
-                        var typeLabel = type.ToString().ToUpperInvariant();
-
-                        if (type == XingTableType.Unknown)
+                        var btr = (BlockTableRecord)tr.GetObject(btrId, OpenMode.ForRead);
+                        foreach (ObjectId entId in btr)
                         {
-                            Log(string.Format(CultureInfo.InvariantCulture, "Table {0}: {1} matched=0 updated=0", entId.Handle, typeLabel));
-                            var headerLog = BuildHeaderLog(table);
-                            if (!string.IsNullOrEmpty(headerLog))
-                            {
-                                Log(string.Format(CultureInfo.InvariantCulture, "Table {0}: {1} {2}", entId.Handle, typeLabel, headerLog));
-                            }
-                            continue;
-                        }
+                            var table = tr.GetObject(entId, OpenMode.ForRead) as Table;
+                            if (table == null) continue;
 
-                        table.UpgradeOpen();
-                        var matched = 0;
-                        var updated = 0;
+                            var type = IdentifyTable(table, tr);
+                            var typeLabel = type.ToString().ToUpperInvariant();
 
-                        try
-                        {
-                            switch (type)
+                            if (type == XingTableType.Unknown)
                             {
-                                case XingTableType.Main:
-                                    UpdateMainTable(table, byKey, out matched, out updated);
-                                    break;
-                                case XingTableType.Page:
-                                    UpdatePageTable(table, byKey, out matched, out updated);
-                                    break;
-                                case XingTableType.LatLong:
-                                    var rowIndexMap = BuildLatLongRowIndexMap(table.ObjectId, byKey?.Values);
-                                    UpdateLatLongTable(table, byKey, out matched, out updated, rowIndexMap);
-                                    break;
+                                Logger.Info(_ed, $"table handle={entId.Handle} type={typeLabel} matched=0 updated=0 reason=unknown_type");
+                                var headerLog = BuildHeaderLog(table);
+                                if (!string.IsNullOrEmpty(headerLog))
+                                {
+                                    Logger.Debug(_ed, $"table handle={entId.Handle} header={headerLog}");
+                                }
+                                continue;
                             }
 
-                            _factory.TagTable(tr, table, typeLabel);
-                            Log(string.Format(CultureInfo.InvariantCulture, "Table {0}: {1} matched={2} updated={3}", entId.Handle, typeLabel, matched, updated));
-                        }
-                        catch (Exception ex)
-                        {
-                            Log(string.Format(CultureInfo.InvariantCulture, "Failed to update table {0}: {1}", entId.Handle, ex.Message));
+                            table.UpgradeOpen();
+                            var matched = 0;
+                            var updated = 0;
+
+                            try
+                            {
+                                switch (type)
+                                {
+                                    case XingTableType.Main:
+                                        UpdateMainTable(table, byKey, out matched, out updated);
+                                        break;
+                                    case XingTableType.Page:
+                                        UpdatePageTable(table, byKey, out matched, out updated);
+                                        break;
+                                    case XingTableType.LatLong:
+                                        var rowIndexMap = BuildLatLongRowIndexMap(table.ObjectId, byKey?.Values);
+                                        UpdateLatLongTable(table, byKey, out matched, out updated, rowIndexMap);
+                                        break;
+                                }
+
+                                _factory.TagTable(tr, table, typeLabel);
+                                Logger.Info(_ed, $"table handle={entId.Handle} type={typeLabel} matched={matched} updated={updated}");
+                            }
+                            catch (Exception ex)
+                            {
+                                Logger.Warn(_ed, $"table handle={entId.Handle} type={typeLabel} err={ex.Message}");
+                            }
                         }
                     }
-                }
 
-                tr.Commit();
+                    tr.Commit();
+                }
             }
         }
 
@@ -210,11 +213,8 @@ namespace XingManager.Services
 
                         _factory.TagTable(tr, table, XingTableType.LatLong.ToString().ToUpperInvariant());
 
-                        var suffix = identifiedType == XingTableType.LatLong ? string.Empty : " (legacy)";
-                        Log(string.Format(
-                            CultureInfo.InvariantCulture,
-                            "Table {0}: LATLONG{1} matched={2} updated={3}",
-                            table.ObjectId.Handle, suffix, matched, updated));
+                        var variant = identifiedType == XingTableType.LatLong ? "standard" : "legacy";
+                        Logger.Info(_ed, $"table handle={table.ObjectId.Handle} type=LATLONG variant={variant} matched={matched} updated={updated}");
 
                         if (updated > 0)
                         {
@@ -224,11 +224,7 @@ namespace XingManager.Services
                     }
                     catch (Exception ex)
                     {
-                        Log(string.Format(
-                            CultureInfo.InvariantCulture,
-                            "Failed to update LAT/LONG table {0}: {1}",
-                            table.ObjectId.Handle,
-                            ex.Message));
+                        Logger.Warn(_ed, $"table handle={table.ObjectId.Handle} type=LATLONG err={ex.Message}");
                     }
                 }
 
@@ -1048,7 +1044,7 @@ namespace XingManager.Services
 
                 if (record == null)
                 {
-                    Log(string.Format(CultureInfo.InvariantCulture, "Row {0} -> NO MATCH (key='{1}')", row, rawKey));
+                    Logger.Debug(_ed, $"table handle={table.ObjectId.Handle} row={row} status=no_match key={rawKey}");
                     continue;
                 }
 
@@ -1086,7 +1082,7 @@ namespace XingManager.Services
                 if (rowUpdated)
                 {
                     updated++;
-                    Log(string.Format(CultureInfo.InvariantCulture, "Row {0} -> UPDATED (key='{1}')", row, logKey));
+                    Logger.Debug(_ed, $"table handle={table.ObjectId.Handle} row={row} status=updated key={logKey}");
                 }
             }
 
@@ -1120,7 +1116,7 @@ namespace XingManager.Services
 
                 if (record == null)
                 {
-                    Log(string.Format(CultureInfo.InvariantCulture, "Row {0} -> NO MATCH (key='{1}')", row, rawKey));
+                    Logger.Debug(_ed, $"table handle={table.ObjectId.Handle} row={row} status=no_match key={rawKey}");
                     continue;
                 }
 
@@ -1148,7 +1144,7 @@ namespace XingManager.Services
                 if (rowUpdated)
                 {
                     updated++;
-                    Log(string.Format(CultureInfo.InvariantCulture, "Row {0} -> UPDATED (key='{1}')", row, logKey));
+                    Logger.Debug(_ed, $"table handle={table.ObjectId.Handle} row={row} status=updated key={logKey}");
                 }
             }
 
@@ -1232,7 +1228,7 @@ namespace XingManager.Services
 
                 if (record == null)
                 {
-                    Log(string.Format(CultureInfo.InvariantCulture, "Row {0} -> NO MATCH (key='{1}')", row, rawKey));
+                    Logger.Debug(_ed, $"table handle={table.ObjectId.Handle} row={row} status=no_match key={rawKey}");
                     continue;
                 }
 
@@ -1292,7 +1288,7 @@ namespace XingManager.Services
                 if (rowUpdated)
                 {
                     updated++;
-                    Log(string.Format(CultureInfo.InvariantCulture, "Row {0} -> UPDATED (key='{1}')", row, logKey));
+                    Logger.Debug(_ed, $"table handle={table.ObjectId.Handle} row={row} status=updated key={logKey}");
                 }
             }
 
@@ -2025,15 +2021,6 @@ namespace XingManager.Services
 
             try { table.GenerateLayout(); } catch { }
         }
-
-        private void Log(string msg)
-        {
-            if (string.IsNullOrWhiteSpace(msg))
-                return;
-
-            CommandLogger.Log(_ed, msg);
-        }
-        // Helper extracted so it compiles on C# 7.3 (no static local functions)
 
         // ---------- header detection helpers ----------
 
