@@ -694,8 +694,10 @@ namespace XingManager.Services
 
         private static void Log(Editor ed, string message)
         {
-            if (ed == null || string.IsNullOrEmpty(message)) return;
-            try { ed.WriteMessage("\n[CrossingManager] " + message); } catch { }
+            if (string.IsNullOrWhiteSpace(message))
+                return;
+
+            CommandLogger.Log(ed, message);
         }
     }
 }

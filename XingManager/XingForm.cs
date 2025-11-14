@@ -946,7 +946,7 @@ namespace XingManager
                             var xKey = NormalizeXKey(xRaw);
                             if (string.IsNullOrWhiteSpace(xKey) || !byX.TryGetValue(xKey, out var rec))
                             {
-                                ed?.WriteMessage($"\n[CrossingManager] Row {row} -> NO MATCH (key='{xRaw}')");
+                                CommandLogger.Log(ed, $"Row {row} -> NO MATCH (key='{xRaw}')");
                                 continue;
                             }
 
@@ -1006,7 +1006,7 @@ namespace XingManager
                         }
 
                         var handleHex = table.ObjectId.Handle.Value.ToString("X");
-                        ed?.WriteMessage($"\n[CrossingManager] Table {handleHex}: {kind.ToString().ToUpperInvariant()} matched={matched} updated={updated}");
+                        CommandLogger.Log(ed, $"Table {handleHex}: {kind.ToString().ToUpperInvariant()} matched={matched} updated={updated}");
                     }
                 }
 
@@ -1235,27 +1235,27 @@ namespace XingManager
                 var table = tr.GetObject(sel.ObjectId, OpenMode.ForRead) as Table;
                 if (table == null)
                 {
-                    ed.WriteMessage("\n[CrossingManager] Selection was not a Table.");
+                    CommandLogger.Log(ed, "Selection was not a Table.");
                     return false;
                 }
 
                 var kind = _tableSync.IdentifyTable(table, tr);
                 if (kind == TableSync.XingTableType.Unknown)
                 {
-                    ed.WriteMessage("\n[CrossingManager] Could not determine table type.");
+                    CommandLogger.Log(ed, "Could not determine table type.");
                     return false;
                 }
 
                 if (kind == TableSync.XingTableType.LatLong)
                 {
-                    ed.WriteMessage("\n[CrossingManager] Lat/Long table detected; merging coordinates into the grid.");
+                    CommandLogger.Log(ed, "Lat/Long table detected; merging coordinates into the grid.");
                     gridChanged = MergeLatLongTableIntoGrid(table, ed);
                 }
                 else
                 {
                     var byX = new Dictionary<string, (string Raw, string Owner, string Desc, string Loc, string Dwg, int Row)>(StringComparer.OrdinalIgnoreCase);
 
-                    ed.WriteMessage("\n[CrossingManager] --- TABLE VALUES (parsed) ---");
+                    CommandLogger.Log(ed, "--- TABLE VALUES (parsed) ---");
                     for (int r = 0; r < table.Rows.Count; r++)
                     {
                         // Column A: attribute-first X-key (strict)
@@ -1273,16 +1273,16 @@ namespace XingManager
                         }
 
                         var xKey = NormalizeXKey(xRaw);
-                        ed.WriteMessage($"\n[CrossingManager] [T] row {r}: X='{xKey}' owner='{owner}' desc='{desc}' loc='{loc}' dwg='{dwg}'");
+                        CommandLogger.Log(ed, $"[T] row {r}: X='{xKey}' owner='{owner}' desc='{desc}' loc='{loc}' dwg='{dwg}'");
 
                         if (!byX.ContainsKey(xKey))
                             byX[xKey] = (xRaw?.Trim() ?? string.Empty, owner, desc, loc, dwg, r);
                         else
-                            ed.WriteMessage($"\n[CrossingManager] [!] Duplicate X '{xKey}' in table (row {r}). First occurrence kept.");
+                            CommandLogger.Log(ed, $"[!] Duplicate X '{xKey}' in table (row {r}). First occurrence kept.");
                     }
 
-                    ed.WriteMessage($"\n[CrossingManager] Table rows indexed by X = {byX.Count}");
-                    ed.WriteMessage("\n[CrossingManager] --- TABLE→FORM UPDATES (X-only) ---");
+                    CommandLogger.Log(ed, $"Table rows indexed by X = {byX.Count}");
+                    CommandLogger.Log(ed, "--- TABLE→FORM UPDATES (X-only) ---");
 
                     int matched = 0, updated = 0, added = 0, noMatch = 0;
                     var matchedKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -1292,7 +1292,7 @@ namespace XingManager
                         var xKey = NormalizeXKey(rec.Crossing);
                         if (string.IsNullOrWhiteSpace(xKey) || !byX.TryGetValue(xKey, out var src))
                         {
-                            ed.WriteMessage($"\n[CrossingManager] [!] {rec.Crossing}: no matching X in table.");
+                            CommandLogger.Log(ed, $"[!] {rec.Crossing}: no matching X in table.");
                             noMatch++;
                             continue;
                         }
@@ -1319,11 +1319,11 @@ namespace XingManager
                         if (changed)
                         {
                             updated++;
-                            ed.WriteMessage($"\n[CrossingManager] [U] {rec.Crossing}: grid updated from table (row {src.Row}).");
+                            CommandLogger.Log(ed, $"[U] {rec.Crossing}: grid updated from table (row {src.Row}).");
                         }
                         else
                         {
-                            ed.WriteMessage($"\n[CrossingManager] [=] {rec.Crossing}: no changes needed (already matches).");
+                            CommandLogger.Log(ed, $"[=] {rec.Crossing}: no changes needed (already matches).");
                         }
                     }
 
@@ -1351,10 +1351,10 @@ namespace XingManager
 
                         _records.Add(newRecord);
                         added++;
-                        ed.WriteMessage($"\n[CrossingManager] [+] {newRecord.Crossing}: added to grid from table (row {src.Row}).");
+                        CommandLogger.Log(ed, $"[+] {newRecord.Crossing}: added to grid from table (row {src.Row}).");
                     }
 
-                    ed.WriteMessage($"\n[CrossingManager] Match Table -> grid only (X-only): matched={matched}, updated={updated}, added={added}, noMatch={noMatch}");
+                    CommandLogger.Log(ed, $"Match Table -> grid only (X-only): matched={matched}, updated={updated}, added={added}, noMatch={noMatch}");
 
                     gridChanged = (updated > 0) || (added > 0);
                 }
@@ -1381,7 +1381,7 @@ namespace XingManager
                     RescanRecords(applyToTables: false);
 
                     _isDirty = false;
-                    ed.WriteMessage("\n[CrossingManager] MATCH TABLE: applied changes to DWG (blocks & tables).");
+                    CommandLogger.Log(ed, "MATCH TABLE: applied changes to DWG (blocks & tables).");
                 }
                 catch (Exception ex)
                 {
@@ -1436,7 +1436,7 @@ namespace XingManager
                 };
                 _records.Add(newRecord);
                 recordMap[key] = newRecord;
-                ed?.WriteMessage($"\n[CrossingManager] [+] {newRecord.Crossing}: added from lat/long table.");
+                CommandLogger.Log(ed, $"[+] {newRecord.Crossing}: added from lat/long table.");
             }
 
             // Refresh the grid
@@ -3868,7 +3868,7 @@ namespace XingManager
 
             if (result.Value != 11 && result.Value != 12)
             {
-                editor.WriteMessage("\n** Invalid zone – enter 11 or 12. **");
+                CommandLogger.Log(editor, "** Invalid zone – enter 11 or 12. **", alsoToCommandBar: true);
                 return null;
             }
 

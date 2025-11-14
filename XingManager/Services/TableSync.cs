@@ -2028,7 +2028,10 @@ namespace XingManager.Services
 
         private void Log(string msg)
         {
-            try { _ed?.WriteMessage("\n[CrossingManager] " + msg); } catch { }
+            if (string.IsNullOrWhiteSpace(msg))
+                return;
+
+            CommandLogger.Log(_ed, msg);
         }
         // Helper extracted so it compiles on C# 7.3 (no static local functions)
 
