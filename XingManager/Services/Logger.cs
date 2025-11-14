@@ -13,13 +13,23 @@ namespace XingManager.Services
             var env = (Environment.GetEnvironmentVariable("XING_LOG_LEVEL") ?? string.Empty)
                 .Trim()
                 .ToUpperInvariant();
-            CurrentLevel = env switch
+
+            if (env == "DEBUG")
             {
-                "DEBUG" => Level.Debug,
-                "WARN" => Level.Warn,
-                "ERROR" => Level.Error,
-                _ => Level.Info
-            };
+                CurrentLevel = Level.Debug;
+            }
+            else if (env == "WARN")
+            {
+                CurrentLevel = Level.Warn;
+            }
+            else if (env == "ERROR")
+            {
+                CurrentLevel = Level.Error;
+            }
+            else
+            {
+                CurrentLevel = Level.Info;
+            }
         }
 
         public static Level CurrentLevel { get; set; }

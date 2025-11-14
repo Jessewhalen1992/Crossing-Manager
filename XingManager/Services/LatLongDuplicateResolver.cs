@@ -8,6 +8,7 @@ using Autodesk.AutoCAD.ApplicationServices;
 using Autodesk.AutoCAD.DatabaseServices;
 using XingManager.Models;
 using WinFormsFlowDirection = System.Windows.Forms.FlowDirection;
+using AutoCADApp = Autodesk.AutoCAD.ApplicationServices.Application;
 
 namespace XingManager.Services
 {
@@ -24,7 +25,7 @@ namespace XingManager.Services
             if (records == null)
                 throw new ArgumentNullException(nameof(records));
 
-            var ed = Application.DocumentManager?.MdiActiveDocument?.Editor;
+            var ed = AutoCADApp.DocumentManager?.MdiActiveDocument?.Editor;
             var candidates = BuildCandidateList(records, contexts);
             Logger.Info(ed, $"dup_latlong candidates={candidates.Count}");
             if (!candidates.Any())
