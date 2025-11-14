@@ -8,6 +8,7 @@ using Autodesk.AutoCAD.ApplicationServices;
 using Autodesk.AutoCAD.DatabaseServices;
 using WinFormsFlowDirection = System.Windows.Forms.FlowDirection;
 using XingManager.Models;
+using AutoCADApp = Autodesk.AutoCAD.ApplicationServices.Application;
 
 namespace XingManager.Services
 {
@@ -46,7 +47,7 @@ namespace XingManager.Services
             if (records == null)
                 throw new ArgumentNullException("records");
 
-            var ed = Application.DocumentManager?.MdiActiveDocument?.Editor;
+            var ed = AutoCADApp.DocumentManager?.MdiActiveDocument?.Editor;
             // Build the flat list shown in the dialog (skips IgnoreForDuplicates instances)
             var duplicateCandidates = BuildCandidateList(records, contexts);
             Logger.Info(ed, $"dup_blocks candidates={duplicateCandidates.Count}");
