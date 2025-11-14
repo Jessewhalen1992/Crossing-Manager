@@ -831,12 +831,7 @@ namespace XingManager.Services
             }
         }
 
-        // =====================================================================
-        // Identify an existing table by content/shape
-        // =====================================================================
-        // Heuristic updater for headerless or multi-row "LAT/LONG" tables.
-        // We only touch rows listed in rowIndexMap; each row either carries both
-        // LAT+LONG numbers, or it carries a label cell ("LAT","LONG") next to a value cell.
+        // TableSync.cs
         private static int UpdateLegacyLatLongRows(Table table, IDictionary<int, CrossingRecord> rowIndexMap)
         {
             if (table == null || rowIndexMap == null || rowIndexMap.Count == 0) return 0;
@@ -848,30 +843,28 @@ namespace XingManager.Services
                 var row = kv.Key;
                 var rec = kv.Value;
                 if (rec == null) continue;
-
                 if (row < 0 || row >= table.Rows.Count) continue;
 
                 // Discover candidate cells on this row
-                int latCol, longCol;
-                TryDetectLatLongCellsInRow(table, row, out latCol, out longCol);
+                TryDetectLatLongCellsInRow(table, row, out int latCol, out int longCol);
 
-                // Write LAT
-                if (latCol >= 0 && latCol < table.Columns.Count)
+                // Write LAT only if record supplies one
+                if (latCol >= 0 && latCol < table.Columns.Count && !string.IsNullOrWhiteSpace(rec.Lat))
                 {
                     var existing = ReadCellTextSafe(table, row, latCol);
-                    var desired = rec.Lat ?? string.Empty;
-                    if (!string.Equals(existing?.Trim(), desired?.Trim(), StringComparison.Ordinal))
+                    var desired = rec.Lat.Trim();
+                    if (!string.Equals(existing?.Trim(), desired, StringComparison.Ordinal))
                     {
                         try { table.Cells[row, latCol].TextString = desired; updatedCells++; } catch { }
                     }
                 }
 
-                // Write LONG
-                if (longCol >= 0 && longCol < table.Columns.Count)
+                // Write LONG only if record supplies one
+                if (longCol >= 0 && longCol < table.Columns.Count && !string.IsNullOrWhiteSpace(rec.Long))
                 {
                     var existing = ReadCellTextSafe(table, row, longCol);
-                    var desired = rec.Long ?? string.Empty;
-                    if (!string.Equals(existing?.Trim(), desired?.Trim(), StringComparison.Ordinal))
+                    var desired = rec.Long.Trim();
+                    if (!string.Equals(existing?.Trim(), desired, StringComparison.Ordinal))
                     {
                         try { table.Cells[row, longCol].TextString = desired; updatedCells++; } catch { }
                     }
@@ -1162,6 +1155,7 @@ namespace XingManager.Services
             RefreshTable(table);
         }
 
+        // TableSync.cs
         private void UpdateLatLongTable(
             Table table,
             IDictionary<string, CrossingRecord> byKey,
@@ -1181,8 +1175,7 @@ namespace XingManager.Services
             var descriptionMap = BuildDescriptionMap(recordList);
 
             var dataRow = FindLatLongDataStartRow(table);
-            if (dataRow <= 0)
-                dataRow = 1;
+            if (dataRow <= 0) dataRow = 1;
 
             var hasExtendedLayout = columnCount >= 6;
             var zoneColumn = hasExtendedLayout ? 2 : -1;
@@ -1200,9 +1193,9 @@ namespace XingManager.Services
 
                 var rawKey = ResolveCrossingKey(table, row, 0);
                 var key = NormalizeKeyForLookup(rawKey);
-                var normalizedCrossing = NormalizeCrossingForMap(rawKey);
-                if (string.IsNullOrEmpty(key))
-                    key = normalizedCrossing;
+                var normX = NormalizeCrossingForMap(rawKey);
+                if (string.IsNullOrEmpty(key)) key = normX;
+
                 CrossingRecord record = null;
 
                 if (rowIndexMap != null && rowIndexMap.TryGetValue(row, out var mappedRecord) && mappedRecord != null)
@@ -1214,9 +1207,7 @@ namespace XingManager.Services
                     if (!string.IsNullOrEmpty(key) && byKey != null)
                     {
                         if (!byKey.TryGetValue(key, out record))
-                        {
                             record = byKey.Values.FirstOrDefault(r => CrossingRecord.CompareCrossingKeys(r.Crossing, key) == 0);
-                        }
                     }
 
                     if (record == null)
@@ -1226,10 +1217,10 @@ namespace XingManager.Services
                 var descriptionText = ReadCellText(table, row, 1);
                 var descriptionKey = NormalizeDescriptionKey(descriptionText);
 
-                if ((record == null || !MatchesCrossingAndDescription(record, key, normalizedCrossing, descriptionKey)) &&
+                if ((record == null || !MatchesCrossingAndDescription(record, key, normX, descriptionKey)) &&
                     !string.IsNullOrEmpty(descriptionKey))
                 {
-                    record = TryResolveByCrossingAndDescription(key, normalizedCrossing, descriptionKey, crossDescMap) ?? record;
+                    record = TryResolveByCrossingAndDescription(key, normX, descriptionKey, crossDescMap) ?? record;
                 }
 
                 if (record == null && !string.IsNullOrEmpty(descriptionKey) &&
@@ -1245,11 +1236,7 @@ namespace XingManager.Services
                     continue;
                 }
 
-                var logKey = !string.IsNullOrEmpty(key)
-                    ? key
-                    : (!string.IsNullOrEmpty(rawKey)
-                        ? rawKey
-                        : (record.Crossing ?? string.Empty));
+                var logKey = !string.IsNullOrEmpty(key) ? key : (!string.IsNullOrEmpty(rawKey) ? rawKey : (record.Crossing ?? string.Empty));
                 matched++;
 
                 var desiredCrossing = (record.Crossing ?? string.Empty).Trim();
@@ -1259,31 +1246,48 @@ namespace XingManager.Services
                 var desiredZone = record.ZoneLabel ?? string.Empty;
                 var desiredDwg = record.DwgRef ?? string.Empty;
 
-                var rowUpdated = false;
+                bool rowUpdated = false;
 
+                // CROSSING + DESCRIPTION are always synced
                 if (columnCount > 0 && ValueDiffers(rawKey, desiredCrossing)) rowUpdated = true;
                 if (columnCount > 1 && ValueDiffers(ReadCellText(table, row, 1), desiredDescription)) rowUpdated = true;
-                if (zoneColumn >= 0 && ValueDiffers(ReadCellText(table, row, zoneColumn), desiredZone)) rowUpdated = true;
-                if (latColumn >= 0 && ValueDiffers(ReadCellText(table, row, latColumn), desiredLat)) rowUpdated = true;
-                if (longColumn >= 0 && ValueDiffers(ReadCellText(table, row, longColumn), desiredLong)) rowUpdated = true;
-                if (dwgColumn >= 0 && ValueDiffers(ReadCellText(table, row, dwgColumn), desiredDwg)) rowUpdated = true;
 
                 if (columnCount > 0) SetCellCrossingValue(table, row, 0, desiredCrossing);
-
                 Cell descriptionCell = null;
                 if (columnCount > 1) { try { descriptionCell = table.Cells[row, 1]; } catch { } SetCellValue(descriptionCell, desiredDescription); }
 
-                Cell latCell = null;
-                if (latColumn >= 0) { try { latCell = table.Cells[row, latColumn]; } catch { } SetCellValue(latCell, desiredLat); }
+                // ZONE/LAT/LONG/DWG: preserve existing unless record provides a non-empty value
+                if (zoneColumn >= 0 && !string.IsNullOrWhiteSpace(desiredZone))
+                {
+                    if (ValueDiffers(ReadCellText(table, row, zoneColumn), desiredZone)) rowUpdated = true;
+                    Cell zoneCell = null;
+                    try { zoneCell = table.Cells[row, zoneColumn]; } catch { }
+                    SetCellValue(zoneCell, desiredZone);
+                }
 
-                Cell longCell = null;
-                if (longColumn >= 0) { try { longCell = table.Cells[row, longColumn]; } catch { } SetCellValue(longCell, desiredLong); }
+                if (latColumn >= 0 && !string.IsNullOrWhiteSpace(desiredLat))
+                {
+                    if (ValueDiffers(ReadCellText(table, row, latColumn), desiredLat)) rowUpdated = true;
+                    Cell latCell = null;
+                    try { latCell = table.Cells[row, latColumn]; } catch { }
+                    SetCellValue(latCell, desiredLat);
+                }
 
-                Cell zoneCell = null;
-                if (zoneColumn >= 0) { try { zoneCell = table.Cells[row, zoneColumn]; } catch { } SetCellValue(zoneCell, desiredZone); }
+                if (longColumn >= 0 && !string.IsNullOrWhiteSpace(desiredLong))
+                {
+                    if (ValueDiffers(ReadCellText(table, row, longColumn), desiredLong)) rowUpdated = true;
+                    Cell longCell = null;
+                    try { longCell = table.Cells[row, longColumn]; } catch { }
+                    SetCellValue(longCell, desiredLong);
+                }
 
-                Cell dwgCell = null;
-                if (dwgColumn >= 0) { try { dwgCell = table.Cells[row, dwgColumn]; } catch { } SetCellValue(dwgCell, desiredDwg); }
+                if (dwgColumn >= 0 && !string.IsNullOrWhiteSpace(desiredDwg))
+                {
+                    if (ValueDiffers(ReadCellText(table, row, dwgColumn), desiredDwg)) rowUpdated = true;
+                    Cell dwgCell = null;
+                    try { dwgCell = table.Cells[row, dwgColumn]; } catch { }
+                    SetCellValue(dwgCell, desiredDwg);
+                }
 
                 if (rowUpdated)
                 {

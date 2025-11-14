@@ -129,6 +129,123 @@ namespace XingManager.Services
 
                     Log(ed, $"Indexed table rows -> byKey={byKey.Count}, byComposite={byComposite.Count}");
 
+                    // --------------------------------------------------------------------------------------
+                    // When matching against a Main/Page table, enrich the in-memory records with LAT/LONG
+                    // values from any LAT/LONG tables in the drawing **and** from existing XING blocks.
+                    // Without this step, records created from Main/Page tables do not populate the
+                    // Lat/Long fields and therefore will not update block extension dictionaries.
+                    //
+                    // First, harvest LAT/LONG values from all other LAT/LONG tables in the drawing.
+                    // We walk through every table in every layout, identify those that are LAT/LONG tables,
+                    // build temporary indexes from them, and merge their Lat/Long/Zone values into the
+                    // primary byKey dictionary. Only missing fields are populated; if the selected table
+                    // already contains LAT/LONG values, they are preserved.
+                    if (tableType != TableSync.XingTableType.LatLong)
+                    {
+                        try
+                        {
+                            // Collect LAT/LONG information from other tables
+                            var latLongByKey = new Dictionary<string, CrossingRecord>(StringComparer.OrdinalIgnoreCase);
+                            var dbForLat = doc.Database;
+                            var btable = (BlockTable)tr.GetObject(dbForLat.BlockTableId, OpenMode.ForRead);
+                            foreach (ObjectId btrId2 in btable)
+                            {
+                                var btr2 = (BlockTableRecord)tr.GetObject(btrId2, OpenMode.ForRead);
+                                if (!btr2.IsLayout) continue;
+                                foreach (ObjectId entId2 in btr2)
+                                {
+                                    var tObj = tr.GetObject(entId2, OpenMode.ForRead) as Table;
+                                    if (tObj == null) continue;
+                                    // skip the selected table
+                                    if (tObj.ObjectId == table.ObjectId) continue;
+
+                                    TableSync.XingTableType tType = TableSync.XingTableType.Unknown;
+                                    try
+                                    {
+                                        tType = DetectTableType(tObj, tr);
+                                    }
+                                    catch { }
+                                    if (tType != TableSync.XingTableType.LatLong) continue;
+
+                                    // Build indexes from this lat-long table
+                                    BuildIndexesFromTable(
+                                        tObj,
+                                        tType,
+                                        out var llByKey,
+                                        out var llByComposite,
+                                        out var llByCompositeX,
+                                        out var llDupes,
+                                        msg => { });
+                                    foreach (var kv in llByKey)
+                                    {
+                                        if (!latLongByKey.TryGetValue(kv.Key, out var merged))
+                                        {
+                                            latLongByKey[kv.Key] = kv.Value;
+                                        }
+                                        else
+                                        {
+                                            // combine lat/long/zone if missing
+                                            if (string.IsNullOrWhiteSpace(merged.Lat) && !string.IsNullOrWhiteSpace(kv.Value.Lat))
+                                                merged.Lat = kv.Value.Lat;
+                                            if (string.IsNullOrWhiteSpace(merged.Long) && !string.IsNullOrWhiteSpace(kv.Value.Long))
+                                                merged.Long = kv.Value.Long;
+                                            if (string.IsNullOrWhiteSpace(merged.Zone) && !string.IsNullOrWhiteSpace(kv.Value.Zone))
+                                                merged.Zone = kv.Value.Zone;
+                                        }
+                                    }
+                                }
+                            }
+                            // Merge collected LAT/LONG values into byKey
+                            foreach (var kv in latLongByKey)
+                            {
+                                if (byKey.TryGetValue(kv.Key, out var recTarget))
+                                {
+                                    var llRec = kv.Value;
+                                    if (string.IsNullOrWhiteSpace(recTarget.Lat) && !string.IsNullOrWhiteSpace(llRec.Lat))
+                                        recTarget.Lat = llRec.Lat;
+                                    if (string.IsNullOrWhiteSpace(recTarget.Long) && !string.IsNullOrWhiteSpace(llRec.Long))
+                                        recTarget.Long = llRec.Long;
+                                    if (string.IsNullOrWhiteSpace(recTarget.Zone) && !string.IsNullOrWhiteSpace(llRec.Zone))
+                                        recTarget.Zone = llRec.Zone;
+                                }
+                            }
+                        }
+                        catch (System.Exception exTables)
+                        {
+                            // Best effort: do not abort if we cannot enrich from tables
+                            Log(ed, $"Warning: unable to enrich LAT/LONG from tables: {exTables.Message}");
+                        }
+
+                        try
+                        {
+                            // Secondly, harvest LAT/LONG values from existing XING blocks via repository scan
+                            var scanResult = new XingRepository(doc).ScanCrossings();
+                            foreach (var record in scanResult.Records ?? new List<CrossingRecord>())
+                            {
+                                // Normalize the key using the same normalizer as BuildIndexesFromTable
+                                var normalized = TableSync.NormalizeKeyForLookup(record.Crossing);
+                                if (string.IsNullOrEmpty(normalized))
+                                    continue;
+
+                                if (byKey.TryGetValue(normalized, out var target))
+                                {
+                                    // Only populate missing fields; avoid overwriting values from the selected table
+                                    if (string.IsNullOrWhiteSpace(target.Lat) && !string.IsNullOrWhiteSpace(record.Lat))
+                                        target.Lat = record.Lat;
+                                    if (string.IsNullOrWhiteSpace(target.Long) && !string.IsNullOrWhiteSpace(record.Long))
+                                        target.Long = record.Long;
+                                    if (string.IsNullOrWhiteSpace(target.Zone) && !string.IsNullOrWhiteSpace(record.Zone))
+                                        target.Zone = record.Zone;
+                                }
+                            }
+                        }
+                        catch (System.Exception exScan)
+                        {
+                            // Best effort: do not abort the command on scan failures; just log the issue.
+                            Log(ed, $"Warning: unable to enrich LAT/LONG values from scan: {exScan.Message}");
+                        }
+                    }
+
                     var repository = new XingRepository(doc);
 
                     // Collect extents of all tables so we can ignore blocks embedded in tables
@@ -228,7 +345,7 @@ namespace XingManager.Services
 
             var handle = br.Handle.ToString();
             var keyValue = GetAttributeText(br, tr, CrossingAttributeTags);
-            var normalizedKey = TableSync.NormalizeKeyForLookup(keyValue); // same normalizer as tables. :contentReference[oaicite:2]{index=2}
+            var normalizedKey = TableSync.NormalizeKeyForLookup(keyValue); // same normalizer as tables.
 
             CrossingRecord record = null;
             var matchedViaComposite = false;
@@ -306,61 +423,11 @@ namespace XingManager.Services
                 if (!string.IsNullOrWhiteSpace(record.Description))
                     changed |= SetAttributeIfExists(br, tr, DescriptionAttributeTags, record.Description, null);
 
-                var hasLat = !string.IsNullOrWhiteSpace(record.Lat);
-                var hasLong = !string.IsNullOrWhiteSpace(record.Long);
-                var hasZone = !string.IsNullOrWhiteSpace(record.Zone);
-
-                if (hasLat || hasLong || hasZone)
-                {
-                    if (repository != null)
-                    {
-                        var shouldWriteLatLong = true;
-                        string existingLat = string.Empty;
-                        string existingLong = string.Empty;
-                        string existingZone = string.Empty;
-                        var hadExisting = repository.TryGetLatLong(br, tr, out existingLat, out existingLong, out existingZone);
-                        string desiredLat = hasLat ? record.Lat?.Trim() : (hadExisting ? existingLat?.Trim() : null);
-                        string desiredLong = hasLong ? record.Long?.Trim() : (hadExisting ? existingLong?.Trim() : null);
-                        string desiredZone = hasZone ? record.Zone?.Trim() : (hadExisting ? existingZone?.Trim() : null);
-
-                        if (!hadExisting && !hasLat && !hasLong)
-                        {
-                            shouldWriteLatLong = false;
-                        }
-                        else if (hadExisting)
-                        {
-                            shouldWriteLatLong =
-                                !ValuesEqual(existingLat, desiredLat) ||
-                                !ValuesEqual(existingLong, desiredLong) ||
-                                !ValuesEqual(existingZone, desiredZone);
-                        }
-                        else
-                        {
-                            shouldWriteLatLong = true;
-                        }
-
-                        if (shouldWriteLatLong)
-                        {
-                            repository.SetLatLong(
-                                br,
-                                tr,
-                                desiredLat ?? string.Empty,
-                                desiredLong ?? string.Empty,
-                                desiredZone ?? string.Empty);
-                            changed = true;
-                        }
-                    }
-
-                    if (hasLat)
-                        changed |= SetAttributeIfExists(br, tr, LatAttributeTags, record.Lat, null);
-                    if (hasLong)
-                        changed |= SetAttributeIfExists(br, tr, LongAttributeTags, record.Long, null);
-                    if (hasZone)
-                        changed |= SetAttributeIfExists(br, tr, ZoneAttributeTags, record.Zone, null);
-                }
+                // For LAT/LONG tables, do not write coordinates during MatchTable.
             }
             else
             {
+                // MAIN or PAGE table: update textual attributes only
                 changed |= SetAttributeIfExists(br, tr, OwnerAttributeTags, record.Owner, null);
                 changed |= SetAttributeIfExists(br, tr, DescriptionAttributeTags, record.Description, null);
 
@@ -369,6 +436,8 @@ namespace XingManager.Services
                     changed |= SetAttributeIfExists(br, tr, LocationAttributeTags, record.Location, null);
                     changed |= SetAttributeIfExists(br, tr, DwgRefAttributeTags, record.DwgRef, null);
                 }
+
+                // DO NOT write LAT/LONG/ZONE values when matching Main or Page tables.
             }
 
             if (changed)
@@ -384,12 +453,11 @@ namespace XingManager.Services
         }
 
         // ---------- Helpers used to build the table indexes ----------
-
         private static TableSync.XingTableType DetectTableType(Table table, Transaction tr)
         {
             try
             {
-                // Reuse your existing IdentifyTable logic. :contentReference[oaicite:3]{index=3}
+                // Reuse your existing IdentifyTable logic.
                 var ts = new TableSync(new TableFactory());
                 return ts.IdentifyTable(table, tr);
             }
@@ -435,7 +503,7 @@ namespace XingManager.Services
 
             for (int row = dataStartRow; row < rows; row++)
             {
-                // Column A: read CROSSING from the block cell (falls back to text). :contentReference[oaicite:4]{index=4}
+                // Column A: read CROSSING from the block cell (falls back to text).
                 var rawKey = TableSync.ResolveCrossingKey(table, row, 0);
                 var normalized = TableSync.NormalizeKeyForLookup(rawKey);
                 if (string.IsNullOrEmpty(normalized))
@@ -531,7 +599,6 @@ namespace XingManager.Services
         }
 
         // ---------- Local cell/attribute helpers ----------
-
         private static string GetAttributeText(BlockReference br, Transaction tr, ISet<string> tags)
         {
             if (br == null || tags == null || br.AttributeCollection == null)

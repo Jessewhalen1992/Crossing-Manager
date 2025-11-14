@@ -228,7 +228,7 @@ namespace XingManager.Services
 
                         for (int row = dataStart; row < table.Rows.Count; row++)
                         {
-                            // Robust key read (handles text, blocks, attribute tags, mtext, etc.)
+                            // Robust key read
                             var rawKey = TableSync.ResolveCrossingKey(table, row, 0);
                             var normKey = TableSync.NormalizeKeyForLookup(rawKey); // "X4", "X10", ...
                             if (string.IsNullOrEmpty(normKey)) continue;
