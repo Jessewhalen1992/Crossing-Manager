@@ -65,7 +65,7 @@ namespace XingManager
             this.gridCrossings.MultiSelect = false;
             this.gridCrossings.Name = "gridCrossings";
             this.gridCrossings.RowHeadersVisible = false;
-            this.gridCrossings.SelectionMode = System.Windows.Forms.DataGridViewSelectionMode.FullRowSelect;
+            this.gridCrossings.SelectionMode = System.Windows.Forms.DataGridViewSelectionMode.CellSelect;
             this.gridCrossings.Size = new System.Drawing.Size(900, 503);
             this.gridCrossings.TabIndex = 0;
             // 
