@@ -102,7 +102,8 @@ namespace XingManager
             // Intentionally left blank to avoid automatically scanning on load.
         }
 
-        public void RescanData() => RescanRecords();
+        // Plain scan refreshes the grid/duplicate UI only (no DWG writes until Apply to Drawing).
+        public void RescanData() => RescanRecords(applyToTables: false);
 
         public void ApplyToDrawing() => ApplyChangesToDrawing();
 
@@ -208,7 +209,8 @@ namespace XingManager
 
         // ===== Buttons (Designer wires to these; keep them) =====
 
-        private void btnRescan_Click(object sender, EventArgs e) => RescanRecords();
+        // Scan button: read-only refresh of the grid/duplicate UI (no writes back to DWG)
+        private void btnRescan_Click(object sender, EventArgs e) => RescanRecords(applyToTables: false);
 
         private void btnApply_Click(object sender, EventArgs e) => ApplyChangesToDrawing();
 
@@ -477,8 +479,8 @@ namespace XingManager
                 // 6) Visual refresh of any tables we just touched (kept)
                 ForceRegenAllCrossingTablesInDwg();                                                         // kept  :contentReference[oaicite:8]{index=8}
 
-                // 7) Re-read from DWG to refresh the grid (kept: no table writes, no duplicate UI)
-                RescanRecords(applyToTables: false, suppressDuplicateUi: true);                             // kept  :contentReference[oaicite:9]{index=9}
+                // 7) Re-read from DWG and allow the apply-to-drawing pass to push any resolver results.
+                RescanRecords(applyToTables: true, suppressDuplicateUi: true);                             // kept  :contentReference[oaicite:9]{index=9}
 
                 // 8) NEW: guard against “snap back” only for LAT/LONG by reapplying the snapshot’s LAT/LONG.
                 //    This does not affect Owner/Desc/Location/DWG_REF (your original flow is preserved).
@@ -2102,7 +2104,7 @@ namespace XingManager
 
             void RescanOnUiThread()
             {
-                void Rescan() { try { RescanRecords(); } catch { /* best effort */ } }
+                void Rescan() { try { RescanRecords(applyToTables: false); } catch { /* best effort */ } }
 
                 if (InvokeRequired)
                 {
