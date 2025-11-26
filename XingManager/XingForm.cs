@@ -45,6 +45,7 @@ namespace XingManager
         private const string HydroTemplateLayoutName = "H2O-PROFILE";
         private const string CnrTemplateLayoutName = "CNR-PROFILE";
         private const string HighwayTemplateLayoutName = "HWY-PROFILE";
+        private const string HydroProfileDescriptionToken = "P/L R/W";
         private static readonly string[] HydroKeywords = { "Watercourse", "Creek", "River" };
         private static readonly string[] HydroOwnerKeywords =
         {
@@ -2613,19 +2614,25 @@ namespace XingManager
                     {
                         return HighwayTemplateLayoutName;
                     }
-                }
 
-                var owner = record?.Owner;
-                if (!string.IsNullOrWhiteSpace(owner) && HydroOwnerKeywords.Any(keyword =>
-                        owner.IndexOf(keyword, StringComparison.OrdinalIgnoreCase) >= 0))
-                {
-                    return HydroTemplateLayoutName;
-                }
+                    var hasHydroProfileDescriptionToken =
+                        description.IndexOf(HydroProfileDescriptionToken, StringComparison.OrdinalIgnoreCase) >= 0;
 
-                if (!string.IsNullOrWhiteSpace(description) && HydroKeywords.Any(keyword =>
-                        description.IndexOf(keyword, StringComparison.OrdinalIgnoreCase) >= 0))
-                {
-                    return HydroTemplateLayoutName;
+                    if (hasHydroProfileDescriptionToken)
+                    {
+                        var owner = record?.Owner;
+                        if (!string.IsNullOrWhiteSpace(owner) && HydroOwnerKeywords.Any(keyword =>
+                                owner.IndexOf(keyword, StringComparison.OrdinalIgnoreCase) >= 0))
+                        {
+                            return HydroTemplateLayoutName;
+                        }
+
+                        if (HydroKeywords.Any(keyword =>
+                                description.IndexOf(keyword, StringComparison.OrdinalIgnoreCase) >= 0))
+                        {
+                            return HydroTemplateLayoutName;
+                        }
+                    }
                 }
             }
 
