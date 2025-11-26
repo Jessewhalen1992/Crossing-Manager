@@ -53,7 +53,8 @@ namespace XingManager
             "Pembina",
             "TCPL",
             "Ovintiv",
-            "PGI"
+            "PGI",
+            "NGTL"
         };
         private static readonly string[] RailwayKeywords = { "Railway" };
         private static readonly string[] HighwayKeywords = { "Highway", "Hwy" };
