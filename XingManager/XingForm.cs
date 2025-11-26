@@ -43,7 +43,7 @@ namespace XingManager
         private const string TemplatePath = @"M:\Drafting\_CURRENT TEMPLATES\Compass_Main.dwt";
         private const string DefaultTemplateLayoutName = "X";
         private const string HydroTemplateLayoutName = "H2O-PROFILE";
-        private const string CnrTemplateLayoutName = "CNR-PROFILE";
+        private const string CnrTemplateLayoutName = "CNR";
         private const string HighwayTemplateLayoutName = "HWY-PROFILE";
         private const string HydroProfileDescriptionToken = "P/L R/W";
         private static readonly string[] HydroKeywords = { "Watercourse", "Creek", "River" };
