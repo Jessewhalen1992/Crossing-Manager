@@ -2615,23 +2615,17 @@ namespace XingManager
                         return HighwayTemplateLayoutName;
                     }
 
-                    var hasHydroProfileDescriptionToken =
+                    var hasHydroToken =
                         description.IndexOf(HydroProfileDescriptionToken, StringComparison.OrdinalIgnoreCase) >= 0;
+                    var owner = record?.Owner;
+                    var hasHydroOwner = hasHydroToken && !string.IsNullOrWhiteSpace(owner) && HydroOwnerKeywords.Any(
+                        keyword => owner.IndexOf(keyword, StringComparison.OrdinalIgnoreCase) >= 0);
+                    var hasHydroKeyword = HydroKeywords.Any(keyword =>
+                        description.IndexOf(keyword, StringComparison.OrdinalIgnoreCase) >= 0);
 
-                    if (hasHydroProfileDescriptionToken)
+                    if (hasHydroOwner || hasHydroKeyword)
                     {
-                        var owner = record?.Owner;
-                        if (!string.IsNullOrWhiteSpace(owner) && HydroOwnerKeywords.Any(keyword =>
-                                owner.IndexOf(keyword, StringComparison.OrdinalIgnoreCase) >= 0))
-                        {
-                            return HydroTemplateLayoutName;
-                        }
-
-                        if (HydroKeywords.Any(keyword =>
-                                description.IndexOf(keyword, StringComparison.OrdinalIgnoreCase) >= 0))
-                        {
-                            return HydroTemplateLayoutName;
-                        }
+                        return HydroTemplateLayoutName;
                     }
                 }
             }
