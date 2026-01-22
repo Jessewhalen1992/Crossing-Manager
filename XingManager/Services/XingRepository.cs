@@ -739,8 +739,14 @@ namespace XingManager.Services
             if (table == null)
                 return false;
 
+            if (TableSync.HasMainHeaderRow(table) || TableSync.HasPageHeaderRow(table))
+                return false;
+
             if ((table.Columns.Count != 4 && table.Columns.Count != 6) || table.Rows.Count <= 0)
                 return false;
+
+            if (TableSync.HasLatLongHeaderRow(table))
+                return true;
 
             if (TableSync.FindLatLongDataStartRow(table) > 0)
                 return true;
