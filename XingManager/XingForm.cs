@@ -1379,7 +1379,8 @@ namespace XingManager
                 ApplyPendingRenumberMapToAnyTables();
 
                 // 3) Safety pass on recognized tables keyed by X (kept)
-                UpdateAllXingTablesFromGrid();                                                              // kept  :contentReference[oaicite:6]{index=6}
+                var allowLatLongByX = _pendingRenumberMap == null || _pendingRenumberMap.Count == 0;
+                UpdateAllXingTablesFromGrid(allowLatLongByX);                                               // kept  :contentReference[oaicite:6]{index=6}
 
                 // 4) If scanner found explicit LAT/LONG sources, update those directly (kept)
                 _tableSync.UpdateLatLongSourceTables(_doc, snapshot);                                       // kept  :contentReference[oaicite:7]{index=7}
@@ -1799,7 +1800,7 @@ namespace XingManager
         /// - Never writes Column 0 (bubble) in any table.
         /// - For LAT/LONG, supports both 4Ã¢â‚¬â€˜col (ID, DESC, LAT, LONG) and 6Ã¢â‚¬â€˜col (ID, DESC, ZONE, LAT, LONG, DWG_REF).
         /// - Ends with a regen so changes appear immediately.
-        private void UpdateAllXingTablesFromGrid()
+        private void UpdateAllXingTablesFromGrid(bool updateLatLongByX = true)
         {
             var doc = _doc ?? AcadApp.DocumentManager.MdiActiveDocument;
             if (doc == null) return;
@@ -1886,6 +1887,11 @@ namespace XingManager
                             }
                             else if (kind == TableSync.XingTableType.LatLong)
                             {
+                                if (!updateLatLongByX)
+                                {
+                                    continue;
+                                }
+
                                 // 4Ã¢â‚¬â€˜col: ID | DESC | LAT | LONG
                                 // 6Ã¢â‚¬â€˜col: ID | DESC | ZONE | LAT | LONG | DWG_REF
                                 var cols = table.Columns.Count;
