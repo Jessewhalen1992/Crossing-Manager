@@ -43,6 +43,9 @@ namespace XingManager.Models
 
         public List<ObjectId> AllInstances { get; } = new List<ObjectId>();
 
+        public List<CrossingTableSource> CrossingTableSources { get; } = new List<CrossingTableSource>();
+
+
         public List<LatLongSource> LatLongSources { get; } = new List<LatLongSource>();
 
         public ObjectId CanonicalInstance { get; set; }
@@ -140,7 +143,32 @@ namespace XingManager.Models
             public string Suffix { get; private set; }
         }
 
-        public class LatLongSource
+        
+
+public class CrossingTableSource
+{
+    public string SourceLabel { get; set; }
+
+    public string Owner { get; set; }
+
+    public string Description { get; set; }
+
+    public string Location { get; set; }
+
+    public string DwgRef { get; set; }
+
+    public bool HasOwner { get; set; }
+
+    public bool HasLocation { get; set; }
+
+    public bool HasDwgRef { get; set; }
+
+    public ObjectId TableId { get; set; }
+
+    public int RowIndex { get; set; }
+}
+
+public class LatLongSource
         {
             public string SourceLabel { get; set; }
 
@@ -160,3 +188,4 @@ namespace XingManager.Models
         }
     }
 }
+

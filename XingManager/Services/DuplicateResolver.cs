@@ -1,14 +1,14 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.Globalization;
-using System.Linq;                    // <-- needed for Where/Select/GroupBy
+using System.Linq;
 using System.Windows.Forms;
 using Autodesk.AutoCAD.ApplicationServices;
 using Autodesk.AutoCAD.DatabaseServices;
-using WinFormsFlowDirection = System.Windows.Forms.FlowDirection;
+using Autodesk.AutoCAD.Runtime;
 using XingManager.Models;
-using AutoCADApp = Autodesk.AutoCAD.ApplicationServices.Application;
+using AutoCADApp = Autodesk.AutoCAD.ApplicationServices.Core.Application;
 
 namespace XingManager.Services
 {
@@ -32,15 +32,21 @@ namespace XingManager.Services
             public string Lat { get; set; }
             public string Long { get; set; }
 
-            // New flag: true if this instance is inside a table or on a paper-space layout.
-            // Such instances should be updated silently but not shown in the duplicate resolver UI.
+            // Flag used by the duplicate-resolver UIs to hide noisy instances (e.g., table-cell blocks or paper-space copies).
+            // Note: some workflows (like comparing Crossing Tables vs. blocks) may intentionally override this to false
+            // so the table-row values can participate in resolution.
             public bool IgnoreForDuplicates { get; set; }
+
+            // True if this block is physically located inside any AutoCAD Table cell.
+            // Kept separate from IgnoreForDuplicates so other resolvers (e.g., LAT/LONG) can always exclude
+            // table-cell blocks even if IgnoreForDuplicates was overridden elsewhere.
+            public bool IsTableInstance { get; set; }
         }
 
 
         /// <summary>
         /// Show the dialog if duplicates exist; on OK, set one canonical per crossing group and
-        /// write the chosen values back into the in‑memory records/contexts. The caller handles DB apply.
+        /// write the chosen values back into the in-memory records/contexts. The caller handles DB apply.
         /// </summary>
         public bool ResolveDuplicates(IList<CrossingRecord> records, IDictionary<ObjectId, InstanceContext> contexts)
         {
@@ -64,61 +70,74 @@ namespace XingManager.Services
             Logger.Info(ed, $"dup_blocks groups={duplicateGroups.Count}");
             var resolvedGroups = 0;
 
-            for (var i = 0; i < duplicateGroups.Count; i++)
+            try
             {
-                var group = duplicateGroups[i];
-                var displayName = !string.IsNullOrWhiteSpace(group[0].Crossing)
-                    ? group[0].Crossing
-                    : group[0].CrossingKey;
-
-                using (var dialog = new DuplicateResolverDialog(group, displayName, i + 1, duplicateGroups.Count))
+                for (var i = 0; i < duplicateGroups.Count; i++)
                 {
-                    if (ModelessDialogRunner.ShowDialog(dialog) != DialogResult.OK)
-                        return false; // user canceled
-                }
+                    var group = duplicateGroups[i];
+                    var displayName = !string.IsNullOrWhiteSpace(group[0].Crossing)
+                        ? group[0].Crossing
+                        : group[0].CrossingKey;
 
-                // The one the user ticked
-                var selected = group.FirstOrDefault(c => c.Canonical);
-                if (selected == null)
-                {
-                    Logger.Debug(ed, $"dup_blocks group crossing={displayName} canonical=none members={group.Count}");
-                    continue;
-                }
-
-                resolvedGroups++;
-                var canonicalHandle = !selected.ObjectId.IsNull ? selected.ObjectId.Handle.ToString() : "null";
-                Logger.Debug(ed, $"dup_blocks group crossing={displayName} canonical={canonicalHandle} members={group.Count}");
-
-                // Find & update the record (canonical snapshot)
-                var record = records.First(r =>
-                    string.Equals(r.CrossingKey, group[0].CrossingKey, StringComparison.OrdinalIgnoreCase));
-
-                if (!selected.ObjectId.IsNull)
-                    record.CanonicalInstance = selected.ObjectId;
-
-                record.Crossing = selected.Crossing;
-                record.Owner = selected.Owner;
-                record.Description = selected.Description;
-                record.Location = selected.Location;
-                record.DwgRef = selected.DwgRef;
-                record.Zone = selected.Zone;
-                record.Lat = selected.Lat;     // <— IMPORTANT
-                record.Long = selected.Long;    // <— IMPORTANT
-
-                // Keep every instance context synced (even those not shown in the dialog)
-                foreach (var instanceId in record.AllInstances)
-                {
-                    if (contexts != null && contexts.TryGetValue(instanceId, out var ctx) && ctx != null)
+                    using (var dialog = new DuplicateResolverDialog(group, displayName, i + 1, duplicateGroups.Count))
                     {
-                        ctx.Crossing = selected.Crossing;
-                        ctx.Owner = selected.Owner;
-                        ctx.Description = selected.Description;
-                        ctx.Location = selected.Location;
-                        ctx.DwgRef = selected.DwgRef;
-                        ctx.Zone = selected.Zone;
-                        ctx.Lat = selected.Lat;   // <— IMPORTANT
-                        ctx.Long = selected.Long;  // <— IMPORTANT
+                        if (ModelessDialogRunner.ShowDialog(dialog) != DialogResult.OK)
+                            return false; // user canceled
                     }
+
+                    // The one the user ticked
+                    var selected = group.FirstOrDefault(c => c.Canonical);
+                    if (selected == null)
+                    {
+                        Logger.Info(ed, $"dup_blocks group crossing={displayName} canonical=none members={group.Count}");
+                        continue;
+                    }
+
+                    resolvedGroups++;
+                    var canonicalHandle = !selected.ObjectId.IsNull ? selected.ObjectId.Handle.ToString() : "null";
+                    Logger.Info(ed, $"dup_blocks group crossing={displayName} canonical={canonicalHandle} members={group.Count}");
+
+                    // Find & update the record (canonical snapshot)
+                    var record = records.First(r =>
+                        string.Equals(r.CrossingKey, group[0].CrossingKey, StringComparison.OrdinalIgnoreCase));
+
+                    if (!selected.ObjectId.IsNull)
+                        record.CanonicalInstance = selected.ObjectId;
+
+                    record.Crossing = selected.Crossing;
+                    record.Owner = selected.Owner;
+                    record.Description = selected.Description;
+                    record.Location = selected.Location;
+                    record.DwgRef = selected.DwgRef;
+                    // NOTE: Zone/Lat/Long are resolved by LatLongDuplicateResolver (separate workflow).
+                    // Do not overwrite them here when resolving crossing-table/block duplicates.
+
+                    // Keep every instance context synced (even those not shown in the dialog)
+                    foreach (var instanceId in record.AllInstances)
+                    {
+                        if (contexts != null && contexts.TryGetValue(instanceId, out var ctx) && ctx != null)
+                        {
+                            ctx.Crossing = selected.Crossing;
+                            ctx.Owner = selected.Owner;
+                            ctx.Description = selected.Description;
+                            ctx.Location = selected.Location;
+                            ctx.DwgRef = selected.DwgRef;
+                            // Zone/Lat/Long are handled by LatLongDuplicateResolver.
+                        }
+                    }
+
+                    // Immediately push the chosen canonical values back to the drawing blocks so the user
+                    // sees the result right away (even if they only ran Scan).
+                    TryApplyToDrawing(record);
+                }
+            }
+            finally
+            {
+                // If the resolver made any changes, also sync table text so Scan-only workflows
+                // don't immediately re-trigger the same discrepancies.
+                if (resolvedGroups > 0)
+                {
+                    TryUpdateTables(records);
                 }
             }
 
@@ -127,77 +146,252 @@ namespace XingManager.Services
             return true;
         }
 
+        /// <summary>
+        /// Best-effort table synchronization after a duplicate resolution.
+        /// We intentionally keep this here (instead of in the Form) so that Scan-only
+        /// flows still propagate the chosen canonical values to table text.
+        /// </summary>
+        private static void TryUpdateTables(IList<CrossingRecord> records)
+        {
+            if (records == null || records.Count == 0)
+                return;
+
+            try
+            {
+                var doc = AutoCADApp.DocumentManager?.MdiActiveDocument;
+                if (doc == null)
+                    return;
+
+                var tableSync = new TableSync(new TableFactory());
+                // NOTE: LAT/LONG tables are handled by LatLongDuplicateResolver. Don't touch LAT/LONG tables here.
+                tableSync.UpdateCrossingTables(doc, records);
+            }
+            catch (System.Exception ex)
+            {
+                var ed = AutoCADApp.DocumentManager?.MdiActiveDocument?.Editor;
+                Logger.Warn(ed, $"dup_blocks update_tables failed: {ex.Message}");
+            }
+        }
+
         // ---------------------------- Build candidate rows for the dialog ----------------------------
         // Build a flat list of duplicate candidates to display in the UI
         private static List<DuplicateCandidate> BuildCandidateList(IEnumerable<CrossingRecord> records, IDictionary<ObjectId, InstanceContext> contexts)
         {
             var list = new List<DuplicateCandidate>();
+            var ed = AutoCADApp.DocumentManager?.MdiActiveDocument?.Editor;
+
+            Logger.Info(ed, "=== BuildCandidateList START ===");
+            
+            if (records == null)
+            {
+                Logger.Info(ed, "BuildCandidateList: records is NULL, returning empty list");
+                return list;
+            }
+
+            var recordCount = records.Count();
+            Logger.Info(ed, $"BuildCandidateList: Processing {recordCount} records");
+            
+            int recordsWithInstances = 0;
+            int recordsWithoutInstances = 0;
 
             foreach (var record in records)
             {
-                // Only consider records with more than one instance
-                var instanceCount = record.AllInstances?.Count ?? 0;
-                if (instanceCount <= 1)
+                if (record == null)
+                {
+                    Logger.Info(ed, "  Found NULL record, skipping");
                     continue;
+                }
+
+                var instances = record.AllInstances ?? new List<ObjectId>();
+                var instanceCount = instances.Count;
+                
+                if (instanceCount > 0)
+                    recordsWithInstances++;
+                else
+                    recordsWithoutInstances++;
+                
+                Logger.Info(ed, $"BuildCandidates: {record.Crossing ?? record.CrossingKey} - instances={instanceCount}, tableSources={record.CrossingTableSources?.Count ?? 0}");
+                
+                if (instanceCount <= 0)
+                {
+                    Logger.Info(ed, $"  SKIPPED - no instances");
+                    continue;
+                }
 
                 // Choose a default canonical if one isn't set (prefer Model space)
                 ObjectId defaultCanonical = record.CanonicalInstance;
-                if (instanceCount > 0 && defaultCanonical.IsNull)
+                if (defaultCanonical.IsNull || !defaultCanonical.IsValid)
                 {
-                    var firstModel = record.AllInstances
+                    var firstModel = instances
                         .Select(id => new { Id = id, Context = GetContext(contexts, id) })
                         .FirstOrDefault(t => string.Equals(t.Context.SpaceName, "Model", StringComparison.OrdinalIgnoreCase));
 
                     if (firstModel != null)
                         defaultCanonical = firstModel.Id;
                     else
-                        defaultCanonical = record.AllInstances[0];
+                        defaultCanonical = instances[0];
 
                     record.CanonicalInstance = defaultCanonical;
                 }
 
-                // Build per-instance UI candidates; skip those flagged as IgnoreForDuplicates
+                // Build candidates from:
+                //   - the in-memory record snapshot (UI)
+                //   - every non-ignored block instance (including table-row overrides when present)
                 var recordCandidates = new List<DuplicateCandidate>();
-                if (instanceCount > 0)
-                {
-                    foreach (var objectId in record.AllInstances)
-                    {
-                        var ctx = GetContext(contexts, objectId);
-                        if (ctx.IgnoreForDuplicates)
-                            continue; // table cell or paper-space block: update later but don't show
 
-                        var crossing = !string.IsNullOrWhiteSpace(ctx.Crossing)
-                            ? ctx.Crossing
-                            : record.Crossing ?? string.Empty;
+                // UI / record snapshot candidate (lets us detect mismatches between table text and a single block instance)
+                var uiCandidate = new DuplicateCandidate
+                {
+                    Crossing = record.Crossing ?? record.CrossingKey,
+                    CrossingKey = record.CrossingKey,
+                    ObjectId = ObjectId.Null,
+                    Layout = "UI",
+                    Owner = record.Owner ?? string.Empty,
+                    Description = record.Description ?? string.Empty,
+                    Location = record.Location ?? string.Empty,
+                    DwgRef = record.DwgRef ?? string.Empty,
+                    Zone = record.Zone ?? string.Empty,
+                    Lat = record.Lat ?? string.Empty,
+                    Long = record.Long ?? string.Empty,
+                    Canonical = false
+                };
+                recordCandidates.Add(uiCandidate);
+
+                // Per-instance candidates
+                // CRITICAL FIX: ApplyCrossingTableOverrides sets IgnoreForDuplicates=false for table bubble blocks
+                // that were successfully matched to table row data. Those blocks should participate in duplicate
+                // resolution (with their table-derived values from the context).
+                // We ONLY skip instances where IgnoreForDuplicates is still true (unmatched table blocks or paper space).
+                int blockCandidatesAdded = 0;
+                foreach (var objectId in instances)
+                {
+                    var ctx = GetContext(contexts, objectId);
+                    
+                    Logger.Info(ed, $"  Instance {objectId.Handle}: IsTableInstance={ctx.IsTableInstance}, IgnoreForDuplicates={ctx.IgnoreForDuplicates}, Space={ctx.SpaceName}");
+                    
+                    // Skip only if explicitly marked to ignore
+                    if (ctx.IgnoreForDuplicates)
+                    {
+                        Logger.Info(ed, $"    SKIPPED (IgnoreForDuplicates=true)");
+                        continue;
+                    }
+
+                    var crossing = !string.IsNullOrWhiteSpace(ctx.Crossing)
+                        ? ctx.Crossing
+                        : record.Crossing ?? string.Empty;
+
+                    recordCandidates.Add(new DuplicateCandidate
+                    {
+                        Crossing = crossing,
+                        CrossingKey = record.CrossingKey,
+                        ObjectId = objectId,
+                        Layout = ctx.SpaceName ?? "Unknown",
+                        Owner = ctx.Owner ?? string.Empty,
+                        Description = ctx.Description ?? string.Empty,
+                        Location = ctx.Location ?? string.Empty,
+                        DwgRef = ctx.DwgRef ?? string.Empty,
+                        Zone = ctx.Zone ?? string.Empty,
+                        Lat = ctx.Lat ?? string.Empty,
+                        Long = ctx.Long ?? string.Empty,
+                        Canonical = objectId == record.CanonicalInstance
+                    });
+                    blockCandidatesAdded++;
+                }
+                
+                Logger.Info(ed, $"  Added {blockCandidatesAdded} block candidates");
+
+
+                // Add candidates sourced from crossing tables (table row text)
+                // These represent the values from table cells (columns B, C, D, etc.) for each X# found in column A.
+                int tableCandidatesAdded = 0;
+                if (record.CrossingTableSources != null && record.CrossingTableSources.Count > 0)
+                {
+                    foreach (var src in record.CrossingTableSources)
+                    {
+                        if (src == null)
+                            continue;
 
                         recordCandidates.Add(new DuplicateCandidate
                         {
-                            Crossing = crossing,
+                            Crossing = record.Crossing ?? record.CrossingKey,
                             CrossingKey = record.CrossingKey,
-                            ObjectId = objectId,
-                            Layout = ctx.SpaceName ?? "Unknown",
-                            Owner = ctx.Owner ?? string.Empty,
-                            Description = ctx.Description ?? string.Empty,
-                            Location = ctx.Location ?? string.Empty,
-                            DwgRef = ctx.DwgRef ?? string.Empty,
-                            Zone = ctx.Zone ?? string.Empty,
-                            Lat = ctx.Lat ?? string.Empty,
-                            Long = ctx.Long ?? string.Empty,
-                            Canonical = objectId == record.CanonicalInstance
+                            ObjectId = ObjectId.Null,
+                            Layout = string.IsNullOrWhiteSpace(src.SourceLabel) ? "TABLE" : src.SourceLabel,
+                            Owner = src.HasOwner ? (src.Owner ?? string.Empty) : (record.Owner ?? string.Empty),
+                            Description = src.Description ?? string.Empty,
+                            Location = src.HasLocation ? (src.Location ?? string.Empty) : (record.Location ?? string.Empty),
+                            DwgRef = src.HasDwgRef ? (src.DwgRef ?? string.Empty) : (record.DwgRef ?? string.Empty),
+                            Zone = record.Zone ?? string.Empty,
+                            Lat = record.Lat ?? string.Empty,
+                            Long = record.Long ?? string.Empty,
+                            Canonical = false
                         });
+                        tableCandidatesAdded++;
+                    }
+                }
+                
+                Logger.Info(ed, $"  Added {tableCandidatesAdded} table candidates, total={recordCandidates.Count}");
+
+                // If we only have the UI candidate (no visible instances), there's nothing to compare
+                if (recordCandidates.Count <= 1)
+                {
+                    Logger.Info(ed, $"  SKIPPED - only {recordCandidates.Count} candidate (need 2+)");
+                    continue;
+                }
+
+                // If there's no visible discrepancy, skip this record
+                if (!RequiresResolution(recordCandidates))
+                {
+                    Logger.Info(ed, $"  SKIPPED - no discrepancy (all values identical)");
+                    continue;
+                }
+                
+                Logger.Info(ed, $"  INCLUDED - has discrepancies, adding {recordCandidates.Count} candidates to list");
+
+                // Ensure exactly one canonical default.
+                // Prefer the existing CanonicalInstance if present; otherwise prefer Model space; otherwise UI.
+                if (!recordCandidates.Any(c => c.Canonical))
+                {
+                    var firstModel = recordCandidates
+                        .FirstOrDefault(c => !c.ObjectId.IsNull && string.Equals(c.Layout, "Model", StringComparison.OrdinalIgnoreCase));
+
+                    if (firstModel != null)
+                        firstModel.Canonical = true;
+                    else
+                    {
+                        var firstInstance = recordCandidates.FirstOrDefault(c => !c.ObjectId.IsNull);
+                        if (firstInstance != null)
+                            firstInstance.Canonical = true;
+                        else
+                            uiCandidate.Canonical = true;
                     }
                 }
 
-                // If all instances are ignored or there’s no visible discrepancy, skip this record
-                if (!recordCandidates.Any() || !RequiresResolution(recordCandidates))
-                    continue;
+                // If the default canonical comes from a table-instance (values read from table text) and it differs
+                // from the UI snapshot, default to UI so we don't silently accept a manual table edit.
+                var canonical = recordCandidates.FirstOrDefault(c => c.Canonical);
+                if (canonical != null && uiCandidate != null)
+                {
+                    if (!canonical.ObjectId.IsNull && contexts != null &&
+                        contexts.TryGetValue(canonical.ObjectId, out var canonCtx) &&
+                        canonCtx != null && canonCtx.IsTableInstance)
+                    {
+                        var canonSig = BuildCandidateSignature(canonical);
+                        var uiSig = BuildCandidateSignature(uiCandidate);
 
-                if (!recordCandidates.Any(c => c.Canonical))
-                    recordCandidates[0].Canonical = true;
+                        if (!string.Equals(canonSig, uiSig, StringComparison.OrdinalIgnoreCase))
+                        {
+                            canonical.Canonical = false;
+                            uiCandidate.Canonical = true;
+                        }
+                    }
+                }
 
                 list.AddRange(recordCandidates);
             }
 
+            Logger.Info(ed, $"BuildCandidateList SUMMARY: {recordsWithInstances} records WITH instances, {recordsWithoutInstances} records WITHOUT instances");
+            Logger.Info(ed, $"=== BuildCandidateList END: returning {list.Count} total candidates ===");
             return list;
         }
 
@@ -276,22 +470,166 @@ namespace XingManager.Services
             if (candidate == null)
                 return string.Empty;
 
+            // This resolver is for Crossing-table / block attribute fields only:
+            //   CROSSING / OWNER / DESCRIPTION / LOCATION / DWG_REF
+            // Zone/Lat/Long are resolved separately by LatLongDuplicateResolver.
             return string.Join(
                 "|",
+                NormalizeAttribute(candidate.Crossing),
                 NormalizeAttribute(candidate.Owner),
                 NormalizeAttribute(candidate.Description),
                 NormalizeAttribute(candidate.Location),
-                NormalizeAttribute(candidate.DwgRef),
-                NormalizeAttribute(candidate.Zone),
-                NormalizeAttribute(candidate.Lat),
-                NormalizeAttribute(candidate.Long));
+                NormalizeAttribute(candidate.DwgRef));
         }
 
         private static string NormalizeAttribute(string value)
         {
-            return string.IsNullOrWhiteSpace(value)
-                ? string.Empty
-                : value.Trim();
+            if (string.IsNullOrWhiteSpace(value))
+                return string.Empty;
+
+            var v = value.Trim();
+
+            // Treat a lone dash as "blank" (tables often use "-" placeholders)
+            if (v == "-" || v == "–" || v == "—")
+                return string.Empty;
+
+            return v;
+        }
+
+        // ---------------------------- Write-back helpers ----------------------------
+
+        private const string LatLongDictionaryKey = "XING2_LATLNG";
+        private const string LatLongKeyLat = "LAT";
+        private const string LatLongKeyLong = "LONG";
+        private const string LatLongKeyZone = "ZONE";
+
+        /// <summary>
+        /// Immediately writes the resolved canonical values back to every block instance for the record.
+        /// This keeps the drawing consistent even when the user only ran "Scan" (no Apply).
+        /// </summary>
+        private static void TryApplyToDrawing(CrossingRecord record)
+        {
+            if (record == null || record.AllInstances == null || record.AllInstances.Count == 0)
+                return;
+
+            var doc = AutoCADApp.DocumentManager.MdiActiveDocument;
+            if (doc == null)
+                return;
+
+            try
+            {
+                using (doc.LockDocument())
+                using (var tr = doc.Database.TransactionManager.StartTransaction())
+                {
+                    foreach (var id in record.AllInstances)
+                    {
+                        if (id == ObjectId.Null || !id.IsValid)
+                            continue;
+
+                        try
+                        {
+                            var br = tr.GetObject(id, OpenMode.ForWrite, false) as BlockReference;
+                            if (br == null || br.IsErased)
+                                continue;
+
+                            SetAttributeValue(tr, br, "CROSSING", record.Crossing);
+                            SetAttributeValue(tr, br, "OWNER", record.Owner);
+                            SetAttributeValue(tr, br, "DESCRIPTION", record.Description);
+                            SetAttributeValue(tr, br, "LOCATION", record.Location);
+                            SetAttributeValue(tr, br, "DWG_REF", record.DwgRef);
+
+                            // Zone/Lat/Long are handled separately by LatLongDuplicateResolver; don't overwrite here.
+                        }
+                        catch (Autodesk.AutoCAD.Runtime.Exception aex)
+                        {
+                            // Common non-fatal cases when working with stale ObjectIds.
+                            if (aex.ErrorStatus == ErrorStatus.WasErased ||
+                                aex.ErrorStatus == ErrorStatus.InvalidInput ||
+                                aex.ErrorStatus == ErrorStatus.NullObjectId)
+                                continue;
+                        }
+                        catch
+                        {
+                            // ignore per-instance failures
+                        }
+                    }
+
+                    tr.Commit();
+                }
+            }
+            catch
+            {
+                // ignore - writeback is best-effort
+            }
+        }
+
+        private static void SetAttributeValue(Transaction tr, BlockReference br, string tag, string value)
+        {
+            if (tr == null || br == null || string.IsNullOrWhiteSpace(tag))
+                return;
+
+            foreach (ObjectId attId in br.AttributeCollection)
+            {
+                if (attId == ObjectId.Null)
+                    continue;
+
+                var attRef = tr.GetObject(attId, OpenMode.ForWrite, false) as AttributeReference;
+                if (attRef == null)
+                    continue;
+
+                if (string.Equals(attRef.Tag, tag, StringComparison.OrdinalIgnoreCase))
+                {
+                    attRef.TextString = value ?? string.Empty;
+                    return;
+                }
+            }
+        }
+
+        private static void SetLatLong(Transaction tr, BlockReference br, string lat, string lng, string zone)
+        {
+            if (tr == null || br == null)
+                return;
+
+            try
+            {
+                if (br.ExtensionDictionary == ObjectId.Null)
+                    br.CreateExtensionDictionary();
+
+                if (br.ExtensionDictionary == ObjectId.Null)
+                    return;
+
+                var extDict = tr.GetObject(br.ExtensionDictionary, OpenMode.ForWrite, false) as DBDictionary;
+                if (extDict == null)
+                    return;
+
+                Xrecord xr;
+                if (extDict.Contains(LatLongDictionaryKey))
+                {
+                    xr = tr.GetObject(extDict.GetAt(LatLongDictionaryKey), OpenMode.ForWrite, false) as Xrecord;
+                }
+                else
+                {
+                    xr = new Xrecord();
+                    extDict.SetAt(LatLongDictionaryKey, xr);
+                    tr.AddNewlyCreatedDBObject(xr, true);
+                }
+
+                if (xr == null)
+                    return;
+
+                xr.Data = new ResultBuffer(
+                    new TypedValue((int)DxfCode.Text, LatLongKeyLat),
+                    new TypedValue((int)DxfCode.Text, lat ?? string.Empty),
+                    new TypedValue((int)DxfCode.Text, LatLongKeyLong),
+                    new TypedValue((int)DxfCode.Text, lng ?? string.Empty),
+                    new TypedValue((int)DxfCode.Text, LatLongKeyZone),
+                    new TypedValue((int)DxfCode.Text, zone ?? string.Empty)
+                );
+            }
+            catch
+            {
+                // ignore
+            }
         }
 
         // ---------------------------- Inner dialog (WINFORMS) ----------------------------
@@ -428,7 +766,7 @@ namespace XingManager.Services
                 var buttonPanel = new FlowLayoutPanel
                 {
                     Dock = DockStyle.Bottom,
-                    FlowDirection = WinFormsFlowDirection.RightToLeft,
+                    FlowDirection = System.Windows.Forms.FlowDirection.RightToLeft,
                     Padding = new Padding(10),
                     Height = 50
                 };

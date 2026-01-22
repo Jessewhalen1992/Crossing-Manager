@@ -120,20 +120,9 @@ namespace XingManager.Services
             // Critical part: immediately push chosen LAT/LONG into DWG tables.
             // This prevents the UI from "snapping back" when it refreshes from DWG.
             // ------------------------------------------------------------------
-            if (changed.Count > 0)
-            {
-                try
-                {
-                    ApplyLatLongChoicesToDrawingTables(records, changed);
-                    Logger.Info(ed, $"dwg_writeback latlong changed={changed.Count}");
-                }
-                catch (Exception ex)
-                {
-                    Logger.Warn(ed, $"dwg_writeback latlong err={ex.Message}");
-                    // Do not fail duplicate resolution if DWG write-back had an issue.
-                    // The normal TableSync pass will still try to push changes later.
-                }
-            }
+                        // NOTE: We intentionally do not write back to the drawing here.
+            // The caller (Apply to Drawing / Update Tables) is responsible for persisting changes.
+
 
             return true;
         }
@@ -718,3 +707,4 @@ namespace XingManager.Services
         }
     }
 }
+

@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text.RegularExpressions;
@@ -13,6 +13,7 @@ namespace XingManager.Services
 {
     /// <summary>
     /// Reads a selected crossing table and pushes those values into XING2 blocks.
+    /// IMPORTANT: Match Table does NOT renumber or change X# values. It matches by existing X# and updates the other fields.
     /// Column A is a block cell; we read the CROSSING value from the cell's block attributes.
     /// Adjacent cells provide OWNER / DESCRIPTION / LOCATION / DWG_REF.
     /// </summary>
@@ -83,7 +84,7 @@ namespace XingManager.Services
             {
                 try
                 {
-                    var options = new PromptEntityOptions("\nSelect a crossing table (Main/Page/LatLong):")
+                    var options = new PromptEntityOptions("\nSelect a crossing table to match fields (does NOT renumber X#):")
                     {
                         AllowNone = false
                     };
@@ -130,6 +131,7 @@ namespace XingManager.Services
                         out duplicateKeys);
 
                     Logger.Info(ed, $"indexed byKey={byKey.Count} byComposite={byComposite.Count} dupes={duplicateKeys.Count}");
+                    Logger.Info(ed, "NOTE: Match Table updates block fields using the SAME X#. It does NOT renumber or change X# values.");
 
                     // --------------------------------------------------------------------------------------
                     // When matching against a Main/Page table, enrich the in-memory records with LAT/LONG
@@ -345,7 +347,7 @@ namespace XingManager.Services
 
                     tr.Commit();
 
-                    Logger.Info(ed, $"summary xing2_total={totalXing2} matched_key={matched} matched_composite={matchedByComposite} updated={updated} skipped_no_key={skippedNoKey} skipped_no_match={skippedNoMatch} errors={errors}");
+                    Logger.Info(ed, $"summary xing2_total={totalXing2} matched_by_x={matched} updated={updated} skipped_no_x={skippedNoKey} skipped_no_match={skippedNoMatch} errors={errors}");
                 }
                 }
                 catch (System.Exception ex)
@@ -377,40 +379,16 @@ namespace XingManager.Services
             var normalizedKey = TableSync.NormalizeKeyForLookup(keyValue); // same normalizer as tables.
 
             CrossingRecord record = null;
-            var matchedViaComposite = false;
-            string compositeUsed = null;
 
             if (!string.IsNullOrEmpty(normalizedKey))
             {
                 byKey?.TryGetValue(normalizedKey, out record);
             }
 
-            if (record == null)
-            {
-                var bOwner = GetAttributeText(br, tr, OwnerAttributeTags);
-                var bDesc = GetAttributeText(br, tr, DescriptionAttributeTags);
-
-                if (tableType == TableSync.XingTableType.Main)
-                {
-                    var bLoc = GetAttributeText(br, tr, LocationAttributeTags);
-                    var bDwg = GetAttributeText(br, tr, DwgRefAttributeTags);
-                    compositeUsed = CompositeKeyMain(bOwner, bDesc, bLoc, bDwg);
-                }
-                else
-                {
-                    compositeUsed = CompositeKeyPage(bOwner, bDesc);
-                }
-
-                if (!string.IsNullOrWhiteSpace(compositeUsed) &&
-                    byComposite != null &&
-                    byComposite.TryGetValue(compositeUsed, out var rowRec))
-                {
-                    record = rowRec;
-                    matchedViaComposite = true;
-                    matchedByComposite++;
-                    Logger.Debug(ed, $"block handle={handle} match=composite");
-                }
-            }
+            // IMPORTANT:
+            // Match Table is intended to update text fields for an existing, correct X#.
+            // Fallback/composite matching is intentionally disabled because it can produce
+            // unpredictable results in older drawings (duplicates, blanks, etc.).
 
             if (record == null)
             {
@@ -432,19 +410,8 @@ namespace XingManager.Services
 
             var changed = false;
 
-            // CROSSING to write:
-            // 1) prefer the raw X from the table; 2) else if matched via composite, use its X; 3) else keep block's.
-            string crossingFromTableRaw = record.Crossing;
-            string crossingFromCompositeIndex = null;
-            if (matchedViaComposite && byCompositeXKey != null && !string.IsNullOrEmpty(compositeUsed))
-                byCompositeXKey.TryGetValue(compositeUsed, out crossingFromCompositeIndex);
-
-            var crossingToWrite = !string.IsNullOrEmpty(crossingFromTableRaw)
-                ? crossingFromTableRaw
-                : (!string.IsNullOrEmpty(crossingFromCompositeIndex) ? crossingFromCompositeIndex : normalizedKey);
-
-            if (!string.IsNullOrEmpty(crossingToWrite))
-                changed |= SetAttributeIfExists(br, tr, CrossingAttributeTags, crossingToWrite, null);
+            // IMPORTANT: Match Table does NOT change the X# / CROSSING value.
+            // The block is matched by its existing X#, and only the other text fields are updated.
 
             // From table to block
             if (tableType == TableSync.XingTableType.LatLong)
@@ -724,3 +691,6 @@ namespace XingManager.Services
 
     }
 }
+
+/////////////////////////////////////////////////////////////////////
+

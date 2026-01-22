@@ -13,7 +13,7 @@ namespace XingManager.Services
         {
             if (t == null || row < 0 || col < 0 || string.IsNullOrWhiteSpace(tag)) return string.Empty;
 
-            // 1) (row, col, tag, …)
+            // 1) (row, col, tag, Ã¢â‚¬Â¦)
             var v = TryCallGetBlockAttr(t, row, col, tag);
             if (!string.IsNullOrWhiteSpace(v)) return v.Trim();
 
@@ -28,7 +28,7 @@ namespace XingManager.Services
                 idx++;
             }
 
-            // 3) discover tags from the cell’s block definition and try those
+            // 3) discover tags from the cellÃ¢â‚¬â„¢s block definition and try those
             foreach (var discovered in EnumerateCellBlockTags(t, row, col))
             {
                 v = TryCallGetBlockAttr(t, row, col, discovered);
@@ -71,7 +71,7 @@ namespace XingManager.Services
                 var p = mi.GetParameters();
                 if (p.Length < 3) continue; // need at least (row, col, tag)
 
-                // expect (row, col, string tag, …)
+                // expect (row, col, string tag, Ã¢â‚¬Â¦)
                 if (typeof(string).IsAssignableFrom(p[2].ParameterType))
                 {
                     var args = new object[p.Length];
@@ -97,14 +97,14 @@ namespace XingManager.Services
                 var p = mi.GetParameters();
                 if (p.Length < 4) continue; // need (row, col, contentIndex, tag)
 
-                // expect (row, col, int contentIndex, string tag, …)
+                // expect (row, col, int contentIndex, string tag, Ã¢â‚¬Â¦)
                 if (typeof(string).IsAssignableFrom(p[3].ParameterType))
                 {
                     var args = new object[p.Length];
-                    if (!TryConvert(row,   p[0], out args[0]) ||
-                        !TryConvert(col,   p[1], out args[1]) ||
+                    if (!TryConvert(row, p[0], out args[0]) ||
+                        !TryConvert(col, p[1], out args[1]) ||
                         !TryConvert(contentIndex, p[2], out args[2]) ||
-                        !TryConvert(tag,   p[3], out args[3])) continue;
+                        !TryConvert(tag, p[3], out args[3])) continue;
 
                     for (int i = 4; i < p.Length; i++) args[i] = p[i].IsOptional ? Type.Missing : null;
 

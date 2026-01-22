@@ -1,4 +1,8 @@
-﻿using Autodesk.AutoCAD.ApplicationServices;  // Document, CommandEventArgs
+/////////////////////////////////////////////////////////////////////
+
+/////////////////////////////////////////////////////////////////////
+
+using Autodesk.AutoCAD.ApplicationServices;  // Document, CommandEventArgs
 using Autodesk.AutoCAD.DatabaseServices;
 using Autodesk.AutoCAD.EditorInput;
 using Autodesk.AutoCAD.Geometry;
@@ -39,6 +43,29 @@ namespace XingManager
         private bool _isAwaitingRenumber;
         private int? _currentUtmZone;
         private bool _isUpdatingZoneControl;
+
+        // Tracks pending X# resequencing (old -> new).
+        // This is used to keep layout-variant tables (that aren't recognized
+        // by the standard table classifier) in sync after Move/Drag renumbering.
+        private Dictionary<string, string> _pendingRenumberMap;
+
+        // Optional UI help (WinForms ToolTip). Note: some AutoCAD palette hosts may
+        // suppress tooltips; safe to keep even if they don't show.
+        private ToolTip _toolTip;
+
+        // Drag/drop row reordering state
+        private bool _rowDragPending;
+        private Point _rowDragStart;
+        private int _rowDragSourceRow = -1;
+
+        // DataGridView can collapse multi-selection on mouse down. Keep the last multi-selection
+        // so drag can still move the whole block when the user starts dragging a selected row.
+        private readonly List<int> _rowDragSourceIndices = new List<int>();
+        private readonly List<int> _lastMultiRowSelectionIndices = new List<int>();
+
+        // Anchor row used for SHIFT-click range selection in the grid.
+        private int _rowSelectionAnchorRow = -1;
+        private bool _restoreMultiSelectionOnDragStart;
 
         private const string TemplatePath = @"M:\Drafting\_CURRENT TEMPLATES\Compass_Main.dwt";
         private const string DefaultTemplateLayoutName = "X";
@@ -94,6 +121,7 @@ namespace XingManager
             _latLongDuplicateResolver = latLongDuplicateResolver;
 
             ConfigureGrid();
+            SetupTooltips();
             UpdateZoneControlFromState();
         }
 
@@ -165,6 +193,8 @@ namespace XingManager
             gridCrossings.CellValueChanged += GridCrossingsOnCellValueChanged;
             gridCrossings.CurrentCellDirtyStateChanged += GridCrossingsOnCurrentCellDirtyStateChanged;
             gridCrossings.CellFormatting += GridCrossingsOnCellFormatting;
+
+            ConfigureGridForRowReorder();
         }
 
         private static DataGridViewTextBoxColumn CreateTextColumn(string propertyName, string header, int width)
@@ -209,6 +239,834 @@ namespace XingManager
             }
         }
 
+        // ===== Grid row reorder (Move Up/Down + drag/drop) =====
+
+        private const string RowDragDataFormat = "XingManager.RowIndexes";
+
+        private void ConfigureGridForRowReorder()
+        {
+            if (gridCrossings == null) return;
+
+            // Allow shift-select ranges + multi-row drag.
+            gridCrossings.MultiSelect = true;
+            gridCrossings.SelectionMode = DataGridViewSelectionMode.FullRowSelect;
+            gridCrossings.AllowDrop = true;
+
+            // In the AutoCAD palette host, single-click editing can interfere with Shift+Click selection.
+            // Require a deliberate action (double-click or F2) to begin editing.
+            gridCrossings.EditMode = DataGridViewEditMode.EditProgrammatically;
+
+            // DataGridView's default Ctrl+C copies the full row when FullRowSelect is enabled.
+            // Users typically want the current cell's value, so we take over Ctrl+C.
+            gridCrossings.ClipboardCopyMode = DataGridViewClipboardCopyMode.Disable;
+
+            // Prevent sort/header clicks from reordering behind our backs.
+            foreach (DataGridViewColumn col in gridCrossings.Columns)
+            {
+                col.SortMode = DataGridViewColumnSortMode.NotSortable;
+            }
+
+            // Hook once (defensive)
+            gridCrossings.MouseDown -= GridCrossingsOnMouseDown_ForDrag;
+            gridCrossings.MouseMove -= GridCrossingsOnMouseMove_ForDrag;
+            gridCrossings.DragOver -= GridCrossingsOnDragOver_ForDrag;
+            gridCrossings.DragDrop -= GridCrossingsOnDragDrop_ForDrag;
+            gridCrossings.KeyDown -= GridCrossingsOnKeyDown_ForCopy;
+            gridCrossings.CellDoubleClick -= GridCrossingsOnCellDoubleClick_BeginEdit;
+            gridCrossings.SelectionChanged -= GridCrossingsOnSelectionChanged_ForDrag;
+
+            gridCrossings.MouseDown += GridCrossingsOnMouseDown_ForDrag;
+            gridCrossings.MouseMove += GridCrossingsOnMouseMove_ForDrag;
+            gridCrossings.DragOver += GridCrossingsOnDragOver_ForDrag;
+            gridCrossings.DragDrop += GridCrossingsOnDragDrop_ForDrag;
+            gridCrossings.KeyDown += GridCrossingsOnKeyDown_ForCopy;
+            gridCrossings.CellDoubleClick += GridCrossingsOnCellDoubleClick_BeginEdit;
+            gridCrossings.SelectionChanged += GridCrossingsOnSelectionChanged_ForDrag;
+        }
+
+        private void GridCrossingsOnSelectionChanged_ForDrag(object sender, EventArgs e)
+        {
+            // Cache last multi-selection so a mouse-down (which can collapse the selection)
+            // can still drag the full block.
+            try
+            {
+                var selected = GetSelectedRowIndices();
+                if (selected.Count >= 2)
+                {
+                    _lastMultiRowSelectionIndices.Clear();
+                    _lastMultiRowSelectionIndices.AddRange(selected);
+                }
+                else if (selected.Count == 0)
+                {
+                    _lastMultiRowSelectionIndices.Clear();
+                }
+            }
+            catch
+            {
+                // ignore
+            }
+        }
+
+        private void GridCrossingsOnKeyDown_ForCopy(object sender, KeyEventArgs e)
+        {
+            if (e == null) return;
+            if (gridCrossings == null) return;
+
+            // Start editing intentionally (F2) - we use EditProgrammatically.
+            if (!e.Control && e.KeyCode == Keys.F2)
+            {
+                try
+                {
+                    var c = gridCrossings.CurrentCell;
+                    if (c != null && !c.ReadOnly)
+                    {
+                        gridCrossings.BeginEdit(true);
+                        e.Handled = true;
+                        e.SuppressKeyPress = true;
+                    }
+                }
+                catch
+                {
+                    // ignore
+                }
+                return;
+            }
+
+            // Copy only the current cell (not the whole row)
+            if (!e.Control || e.KeyCode != Keys.C) return;
+
+            var cell = gridCrossings.CurrentCell;
+            if (cell == null) return;
+
+            try
+            {
+                var text = Convert.ToString(cell.EditedFormattedValue ?? cell.FormattedValue ?? cell.Value ?? string.Empty, CultureInfo.InvariantCulture);
+                Clipboard.SetText(text ?? string.Empty);
+            }
+            catch
+            {
+                // Ignore clipboard errors (can happen depending on AutoCAD/palette host).
+            }
+
+            e.Handled = true;
+            e.SuppressKeyPress = true;
+        }
+
+        private void GridCrossingsOnCellDoubleClick_BeginEdit(object sender, DataGridViewCellEventArgs e)
+        {
+            if (gridCrossings == null) return;
+            if (e == null) return;
+            if (e.RowIndex < 0 || e.ColumnIndex < 0) return;
+
+            try
+            {
+                var row = gridCrossings.Rows[e.RowIndex];
+                if (row == null) return;
+                var cell = row.Cells[e.ColumnIndex];
+                if (cell == null || cell.ReadOnly) return;
+
+                gridCrossings.CurrentCell = cell;
+                gridCrossings.BeginEdit(true);
+            }
+            catch
+            {
+                // ignore
+            }
+        }
+
+        private void GridCrossingsOnMouseDown_ForDrag(object sender, MouseEventArgs e)
+        {
+            if (e.Button == MouseButtons.Right)
+            {
+                _rowDragPending = false;
+                return;
+            }
+
+            var hit = gridCrossings.HitTest(e.X, e.Y);
+            if (hit.RowIndex < 0)
+            {
+                _rowDragPending = false;
+                return;
+            }
+
+            int clickedRow = hit.RowIndex;
+            bool ctrl = (Control.ModifierKeys & Keys.Control) == Keys.Control;
+            bool shift = (Control.ModifierKeys & Keys.Shift) == Keys.Shift;
+
+            // SHIFT-click: force a contiguous range selection. Some palette hosts interfere with the
+            // DataGridView default SHIFT behavior, so we enforce it and do it on BeginInvoke so our
+            // selection isn't immediately overwritten by the control's internal click logic.
+            if (shift && !ctrl)
+            {
+                int anchorRow = _rowSelectionAnchorRow;
+                if (anchorRow < 0)
+                    anchorRow = gridCrossings.CurrentCell != null ? gridCrossings.CurrentCell.RowIndex : clickedRow;
+
+                int col = hit.ColumnIndex;
+                if (col < 0) col = 0;
+                if (gridCrossings.Columns.Count > 0)
+                    col = Math.Min(col, gridCrossings.Columns.Count - 1);
+                else
+                    col = 0;
+
+                int start = Math.Min(anchorRow, clickedRow);
+                int end = Math.Max(anchorRow, clickedRow);
+                var range = Enumerable.Range(start, end - start + 1).ToList();
+
+                BeginInvoke((Action)(() =>
+                {
+                    try
+                    {
+                        gridCrossings.ClearSelection();
+                        for (int i = start; i <= end; i++)
+                            gridCrossings.Rows[i].Selected = true;
+
+                        if (gridCrossings.Rows[clickedRow].Cells.Count > 0 && gridCrossings.Columns.Count > 0)
+                            gridCrossings.CurrentCell = gridCrossings.Rows[clickedRow].Cells[col];
+                    }
+                    catch
+                    {
+                        // ignore
+                    }
+
+                    _rowDragSourceIndices.Clear();
+                    _rowDragSourceIndices.AddRange(range);
+
+                    _lastMultiRowSelectionIndices.Clear();
+                    _lastMultiRowSelectionIndices.AddRange(range);
+                }));
+
+                // Selecting with SHIFT should not arm a drag operation.
+                _rowDragPending = false;
+                _rowDragSourceRow = -1;
+                return;
+            }
+
+            // CTRL-click should behave like normal DataGridView selection (add/remove). Don't arm drag.
+            if (ctrl)
+            {
+                _rowDragPending = false;
+                return;
+            }
+
+            // No modifiers: update the anchor for future SHIFT selection.
+            _rowSelectionAnchorRow = clickedRow;
+
+            bool clickedRowAlreadySelected = gridCrossings.Rows[clickedRow].Selected;
+            bool hasMultiSelection = gridCrossings.SelectedRows != null && gridCrossings.SelectedRows.Count >= 2;
+
+            // If user already has a multi-selection, and clicks on one of the selected rows,
+            // treat it as intent to drag that selection (not to collapse selection to a single row).
+            if (clickedRowAlreadySelected && hasMultiSelection)
+            {
+                _restoreMultiSelectionOnDragStart = true;
+
+                // Capture selection now; if the grid collapses it later, we can restore on drag.
+                var selected = GetSelectedRowIndices();
+                if (selected.Count == 0 && _lastMultiRowSelectionIndices.Count >= 2)
+                    selected.AddRange(_lastMultiRowSelectionIndices);
+
+                if (selected.Count >= 2)
+                {
+                    _lastMultiRowSelectionIndices.Clear();
+                    _lastMultiRowSelectionIndices.AddRange(selected);
+                }
+
+                _rowDragSourceRow = clickedRow;
+                _rowDragSourceIndices.Clear();
+                _rowDragSourceIndices.AddRange(selected);
+
+                _rowDragStart = e.Location;
+                _rowDragPending = true;
+                return;
+            }
+
+            // Ensure the clicked row becomes selected (single-row selection by default).
+            if (!clickedRowAlreadySelected)
+            {
+                gridCrossings.ClearSelection();
+                gridCrossings.Rows[clickedRow].Selected = true;
+            }
+
+            // Ensure a CurrentCell exists at the click point.
+            int colIndex = hit.ColumnIndex;
+            if (colIndex < 0) colIndex = 0;
+            if (gridCrossings.Columns.Count > 0)
+                colIndex = Math.Min(colIndex, gridCrossings.Columns.Count - 1);
+            else
+                colIndex = 0;
+
+            if (gridCrossings.Rows[clickedRow].Cells.Count > 0 && gridCrossings.Columns.Count > 0)
+                gridCrossings.CurrentCell = gridCrossings.Rows[clickedRow].Cells[colIndex];
+
+            _rowDragSourceRow = clickedRow;
+            _rowDragSourceIndices.Clear();
+            _rowDragSourceIndices.Add(clickedRow);
+
+            _rowDragStart = e.Location;
+            _rowDragPending = true;
+            _restoreMultiSelectionOnDragStart = false;
+        }
+
+
+        private void GridCrossingsOnMouseMove_ForDrag(object sender, MouseEventArgs e)
+        {
+            if (!_rowDragPending) return;
+            if (e.Button != MouseButtons.Left) return;
+            if (gridCrossings == null) return;
+            if (gridCrossings.IsCurrentCellInEditMode) return;
+
+            var dragRect = new Rectangle(
+                _rowDragStart.X - SystemInformation.DragSize.Width / 2,
+                _rowDragStart.Y - SystemInformation.DragSize.Height / 2,
+                SystemInformation.DragSize.Width,
+                SystemInformation.DragSize.Height);
+
+            if (dragRect.Contains(e.Location))
+                return;
+
+            _rowDragPending = false;
+
+            var rows = _rowDragSourceIndices.Count > 0
+                ? new List<int>(_rowDragSourceIndices)
+                : GetSelectedRowIndices();
+
+            rows = rows
+                .Distinct()
+                .Where(i => i >= 0 && i < gridCrossings.Rows.Count)
+                .OrderBy(i => i)
+                .ToList();
+
+            if (rows.Count == 0) return;
+
+            // If the grid collapsed multi-selection on click, restore it right before dragging so
+            // the user sees the full block being moved.
+            if (_restoreMultiSelectionOnDragStart)
+            {
+                RestoreRowSelection(rows, _rowDragSourceRow);
+                _restoreMultiSelectionOnDragStart = false;
+            }
+
+            var data = new DataObject();
+            data.SetData(RowDragDataFormat, rows.ToArray());
+            gridCrossings.DoDragDrop(data, DragDropEffects.Move);
+        }
+
+        private void GridCrossingsOnDragOver_ForDrag(object sender, DragEventArgs e)
+        {
+            if (e.Data != null && e.Data.GetDataPresent(RowDragDataFormat))
+                e.Effect = DragDropEffects.Move;
+            else
+                e.Effect = DragDropEffects.None;
+        }
+
+        private void GridCrossingsOnDragDrop_ForDrag(object sender, DragEventArgs e)
+        {
+            if (gridCrossings == null) return;
+            if (e.Data == null || !e.Data.GetDataPresent(RowDragDataFormat)) return;
+
+            var src = e.Data.GetData(RowDragDataFormat) as int[];
+            if (src == null || src.Length == 0) return;
+
+            var clientPoint = gridCrossings.PointToClient(new Point(e.X, e.Y));
+            var hit = gridCrossings.HitTest(clientPoint.X, clientPoint.Y);
+
+            int targetIndex = hit.RowIndex;
+            if (targetIndex < 0)
+                targetIndex = _records?.Count ?? 0; // drop after last row
+
+            MoveRowsToIndex(src, targetIndex);
+        }
+
+        
+
+        private void RestoreRowSelection(IList<int> rowIndices, int anchorRow)
+        {
+            if (gridCrossings == null) return;
+            if (rowIndices == null || rowIndices.Count == 0) return;
+
+            gridCrossings.ClearSelection();
+
+            foreach (var idx in rowIndices.Distinct())
+            {
+                if (idx >= 0 && idx < gridCrossings.Rows.Count)
+                    gridCrossings.Rows[idx].Selected = true;
+            }
+
+            if (anchorRow >= 0 && anchorRow < gridCrossings.Rows.Count && gridCrossings.Columns.Count > 0)
+            {
+                int colIndex = 0;
+                if (gridCrossings.CurrentCell != null)
+                    colIndex = Math.Max(0, Math.Min(gridCrossings.CurrentCell.ColumnIndex, gridCrossings.Columns.Count - 1));
+
+                gridCrossings.CurrentCell = gridCrossings.Rows[anchorRow].Cells[colIndex];
+            }
+        }
+
+        private void MoveRowsToIndex(IList<int> sourceRowIndexes, int targetIndex)
+        {
+            if (_records == null || _records.Count == 0) return;
+            if (sourceRowIndexes == null || sourceRowIndexes.Count == 0) return;
+
+            var src = sourceRowIndexes
+                .Where(i => i >= 0 && i < _records.Count)
+                .Distinct()
+                .OrderBy(i => i)
+                .ToList();
+
+            if (src.Count == 0) return;
+
+            // Allow insert at end.
+            if (targetIndex < 0) targetIndex = 0;
+            if (targetIndex > _records.Count) targetIndex = _records.Count;
+
+            // Adjust insertion index after removing rows that occur before it.
+            int removedBefore = src.Count(i => i < targetIndex);
+            int insertIndex = targetIndex - removedBefore;
+
+            int newCount = _records.Count - src.Count;
+            if (insertIndex < 0) insertIndex = 0;
+            if (insertIndex > newCount) insertIndex = newCount;
+
+            var movedItems = src.Select(i => _records[i]).ToList();
+
+            // Remove from bottom up.
+            for (int i = src.Count - 1; i >= 0; i--)
+                _records.RemoveAt(src[i]);
+
+            for (int i = 0; i < movedItems.Count; i++)
+                _records.Insert(insertIndex + i, movedItems[i]);
+
+            // Moving rows implies resequencing X#s (user request).
+            ResequenceCrossingsFromGridOrder();
+
+            SelectRowsRange(insertIndex, movedItems.Count);
+        }
+
+        private void SelectRowsRange(int startIndex, int count)
+        {
+            if (gridCrossings == null) return;
+            if (gridCrossings.Rows.Count == 0) return;
+
+            gridCrossings.ClearSelection();
+
+            for (int i = 0; i < count; i++)
+            {
+                int r = startIndex + i;
+                if (r >= 0 && r < gridCrossings.Rows.Count)
+                    gridCrossings.Rows[r].Selected = true;
+            }
+
+            int focus = Math.Min(Math.Max(startIndex, 0), gridCrossings.Rows.Count - 1);
+            if (gridCrossings.Columns.Count > 0)
+                gridCrossings.CurrentCell = gridCrossings.Rows[focus].Cells[0];
+        }
+
+        private void SelectRowsForRecords(ISet<CrossingRecord> selectedRecords)
+        {
+            if (gridCrossings == null || selectedRecords == null || selectedRecords.Count == 0)
+            {
+                return;
+            }
+
+            gridCrossings.ClearSelection();
+            var firstRowIndex = -1;
+
+            for (var i = 0; i < gridCrossings.Rows.Count; i++)
+            {
+                var row = gridCrossings.Rows[i];
+                var rec = row?.DataBoundItem as CrossingRecord;
+                if (rec != null && selectedRecords.Contains(rec))
+                {
+                    row.Selected = true;
+                    if (firstRowIndex < 0)
+                    {
+                        firstRowIndex = i;
+                    }
+                }
+            }
+
+            if (firstRowIndex >= 0 && gridCrossings.Columns.Count > 0)
+            {
+                try
+                {
+                    gridCrossings.CurrentCell = gridCrossings.Rows[firstRowIndex].Cells[0];
+                }
+                catch
+                {
+                    // ignore
+                }
+            }
+        }
+
+
+        private int GetPrimarySelectedRowIndex()
+        {
+            if (gridCrossings == null) return -1;
+            if (gridCrossings.CurrentCell != null)
+                return gridCrossings.CurrentCell.RowIndex;
+
+            if (gridCrossings.SelectedRows.Count > 0)
+                return gridCrossings.SelectedRows[0].Index;
+
+            if (gridCrossings.SelectedCells.Count > 0)
+                return gridCrossings.SelectedCells[0].RowIndex;
+
+            return -1;
+        }
+
+        private void MoveSelectedCrossingRow(int direction)
+        {
+            if (_records == null || _records.Count == 0)
+            {
+                return;
+            }
+
+            if (direction == 0)
+            {
+                return;
+            }
+
+            // Support multi-select moves (Shift/Ctrl selection). We move each selected row one step
+            // in the requested direction, keeping the relative order of selected rows.
+            var selectedIndices = GetSelectedRowIndices()
+                .Where(i => i >= 0 && i < _records.Count)
+                .Distinct()
+                .OrderBy(i => i)
+                .ToList();
+
+            if (selectedIndices.Count == 0)
+            {
+                var idx = GetPrimarySelectedRowIndex();
+                if (idx < 0)
+                {
+                    return;
+                }
+
+                selectedIndices.Add(idx);
+            }
+
+            var selectedRecords = new HashSet<CrossingRecord>(selectedIndices.Select(i => _records[i]));
+
+            if (selectedIndices.Count == 1)
+            {
+                var idx = selectedIndices[0];
+                var newIdx = idx + direction;
+                if (newIdx < 0 || newIdx >= _records.Count)
+                {
+                    return;
+                }
+
+                var item = _records[idx];
+                _records.RemoveAt(idx);
+                _records.Insert(newIdx, item);
+            }
+            else
+            {
+                if (direction < 0)
+                {
+                    // Move up: walk top->bottom swapping a selected row with the row above when the above row is not selected.
+                    for (var i = 1; i < _records.Count; i++)
+                    {
+                        if (selectedRecords.Contains(_records[i]) && !selectedRecords.Contains(_records[i - 1]))
+                        {
+                            var tmp = _records[i - 1];
+                            _records[i - 1] = _records[i];
+                            _records[i] = tmp;
+                        }
+                    }
+                }
+                else
+                {
+                    // Move down: walk bottom->top swapping a selected row with the row below when the below row is not selected.
+                    for (var i = _records.Count - 2; i >= 0; i--)
+                    {
+                        if (selectedRecords.Contains(_records[i]) && !selectedRecords.Contains(_records[i + 1]))
+                        {
+                            var tmp = _records[i + 1];
+                            _records[i + 1] = _records[i];
+                            _records[i] = tmp;
+                        }
+                    }
+                }
+            }
+
+            ResequenceCrossingsFromGridOrder();
+
+            // Keep the same records selected after the move.
+            SelectRowsForRecords(selectedRecords);
+        }
+
+
+        private void ResequenceCrossingsFromGridOrder()
+        {
+            if (_records == null || _records.Count == 0)
+                return;
+
+            // Map current X -> new X (X1..Xn).
+            var currentToNew = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            for (int i = 0; i < _records.Count; i++)
+            {
+                string oldKey = NormalizeXKey(_records[i].Crossing);
+                if (string.IsNullOrWhiteSpace(oldKey))
+                    continue;
+
+                string newKey = $"X{i + 1}";
+                if (!currentToNew.ContainsKey(oldKey))
+                    currentToNew[oldKey] = newKey;
+            }
+
+            // Compose into the pending map (originalDrawingKey -> latestKey).
+            if (_pendingRenumberMap == null)
+            {
+                _pendingRenumberMap = new Dictionary<string, string>(currentToNew, StringComparer.OrdinalIgnoreCase);
+            }
+            else
+            {
+                // Update existing originals through the new mapping.
+                var originals = _pendingRenumberMap.Keys.ToList();
+                foreach (var orig in originals)
+                {
+                    var intermediate = _pendingRenumberMap[orig];
+                    if (!string.IsNullOrWhiteSpace(intermediate) && currentToNew.TryGetValue(intermediate, out var finalKey))
+                    {
+                        _pendingRenumberMap[orig] = finalKey;
+                    }
+                    else if (currentToNew.TryGetValue(orig, out var directKey))
+                    {
+                        _pendingRenumberMap[orig] = directKey;
+                    }
+                }
+
+                // Add any brand-new keys that didn't exist in the original map.
+                foreach (var kvp in currentToNew)
+                {
+                    if (!_pendingRenumberMap.ContainsKey(kvp.Key))
+                        _pendingRenumberMap[kvp.Key] = kvp.Value;
+                }
+            }
+
+            // Apply new X#s in list order.
+            for (int i = 0; i < _records.Count; i++)
+            {
+                _records[i].Crossing = $"X{i + 1}";
+            }
+
+            _isDirty = true;
+            gridCrossings?.Refresh();
+        }
+
+        // ===== Tooltips =====
+
+        private void SetupTooltips()
+        {
+            try
+            {
+                _toolTip = new ToolTip
+                {
+                    AutomaticDelay = 250,
+                    AutoPopDelay = 20000,
+                    InitialDelay = 250,
+                    ReshowDelay = 100,
+                    ShowAlways = true
+                };
+
+                _toolTip.SetToolTip(btnRescan, "Scan the drawing for crossing blocks and load them into the list.");
+                _toolTip.SetToolTip(btnApply, "Write the current list values back to the drawing (blocks + tables).");
+                _toolTip.SetToolTip(btnDelete, "Delete the selected crossing (blocks + matching table rows).");
+
+                if (btnMoveUp != null) _toolTip.SetToolTip(btnMoveUp, "Move the selected row up (X#s resequence).");
+                if (btnMoveDown != null) _toolTip.SetToolTip(btnMoveDown, "Move the selected row down (X#s resequence).");
+                if (btnRenumberFromList != null) _toolTip.SetToolTip(btnRenumberFromList, "Resequence X#s based on current list order (X1..Xn).");
+
+                _toolTip.SetToolTip(btnRenumber, "Run the RNC command (uses RNC Path if set) then rescan.");
+                _toolTip.SetToolTip(btnAddRncPolyline, "Create/choose an RNC Path polyline used by the RNC command.");
+                _toolTip.SetToolTip(btnMatchTable, "Use an existing table as the source of truth for non-X fields and push those into the blocks.");
+
+                _toolTip.SetToolTip(btnGeneratePage, "Generate a XING PAGE table for the current list.");
+                _toolTip.SetToolTip(btnGenerateAllLatLongTables, "Generate/update WATER LAT/LONG tables.");
+                _toolTip.SetToolTip(btnGenerateOtherLatLongTables, "Generate/update OTHER LAT/LONG tables.");
+                _toolTip.SetToolTip(btnLatLong, "Create a LAT/LONG table for the selected crossing.");
+                _toolTip.SetToolTip(btnAddLatLong, "Pick points to fill LAT/LONG values for selected crossing.");
+
+                _toolTip.SetToolTip(btnExport, "Export the list to CSV/JSON.");
+                _toolTip.SetToolTip(btnImport, "Import a list from CSV/JSON.");
+                _toolTip.SetToolTip(cmbUtmZone, "UTM Zone used for lat/long conversions.");
+            }
+            catch
+            {
+                // ToolTip can be finicky inside some AutoCAD palette hosts; safe to ignore.
+            }
+        }
+
+        // ===== Pending renumber map -> any tables (layout variants) =====
+
+        private void ApplyPendingRenumberMapToAnyTables()
+        {
+            if (_pendingRenumberMap == null || _pendingRenumberMap.Count == 0)
+                return;
+
+            if (_doc == null)
+                return;
+
+            using (_doc.LockDocument())
+            using (var tr = _doc.Database.TransactionManager.StartTransaction())
+            {
+                var bt = (BlockTable)tr.GetObject(_doc.Database.BlockTableId, OpenMode.ForRead);
+
+                foreach (ObjectId btrId in bt)
+                {
+                    var btr = (BlockTableRecord)tr.GetObject(btrId, OpenMode.ForRead);
+                    foreach (ObjectId entId in btr)
+                    {
+                        if (entId.ObjectClass?.DxfName != "ACAD_TABLE")
+                            continue;
+
+                        Table table = null;
+                        try { table = (Table)tr.GetObject(entId, OpenMode.ForWrite); }
+                        catch { continue; }
+
+                        if (table == null || table.Rows == null || table.Columns == null)
+                            continue;
+
+                        bool tableTouched = false;
+
+                        // We assume the crossing bubble is in column 0 for these legacy/layout tables.
+                        int col = 0;
+                        if (table.Columns.Count <= col)
+                            continue;
+
+                        for (int r = 0; r < table.Rows.Count; r++)
+                        {
+                            string raw = null;
+                            try { raw = TableSync.ResolveCrossingKey(table, r, col); }
+                            catch { raw = null; }
+
+                            var oldKey = NormalizeXKey(raw);
+                            if (string.IsNullOrWhiteSpace(oldKey))
+                                continue;
+
+                            if (!_pendingRenumberMap.TryGetValue(oldKey, out var newKey))
+                                continue;
+
+                            if (string.Equals(oldKey, newKey, StringComparison.OrdinalIgnoreCase))
+                                continue;
+
+                            if (TrySetCrossingCellValue(table, r, col, newKey))
+                                tableTouched = true;
+                        }
+
+                        if (tableTouched)
+                        {
+                            try { table.RecordGraphicsModified(true); } catch { }
+                        }
+                    }
+                }
+
+                tr.Commit();
+            }
+        }
+
+        private static readonly string[] CrossingBubbleAttributeTags =
+        {
+            "CROSSING", "XING", "X_NO", "XING_NO", "XING#", "XINGNUM", "XING_NUM", "X", "CROSSING_ID", "CROSSINGID"
+        };
+
+        private static bool TrySetCrossingCellValue(Table table, int row, int col, string crossingText)
+        {
+            if (table == null) return false;
+
+            try
+            {
+                var cell = table.Cells[row, col];
+                if (cell == null) return false;
+
+                // Detect whether this cell contains a block (bubble) so we don't accidentally add text content on top.
+                var blockContentIndexes = new List<int>();
+                int contentIndex = 0;
+                foreach (var content in EnumerateCellContents(cell))
+                {
+                    if (TryGetBlockTableRecordIdFromContent(content) != ObjectId.Null)
+                        blockContentIndexes.Add(contentIndex);
+
+                    contentIndex++;
+                }
+
+                if (blockContentIndexes.Count > 0)
+                {
+                    // Try to set an attribute on the cell's block content.
+                    foreach (var idx in blockContentIndexes)
+                    {
+                        foreach (var tag in CrossingBubbleAttributeTags)
+                        {
+                            if (TryInvokeSetBlockAttributeValue(table, row, col, idx, tag, crossingText))
+                                return true;
+                        }
+                    }
+
+                    // Fallback: try signature without content index (some AutoCAD versions).
+                    foreach (var tag in CrossingBubbleAttributeTags)
+                    {
+                        if (TryInvokeSetBlockAttributeValue(table, row, col, null, tag, crossingText))
+                            return true;
+                    }
+
+                    return false;
+                }
+
+                // Text-only cell.
+                cell.TextString = crossingText;
+                return true;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private static bool TryInvokeSetBlockAttributeValue(Table table, int row, int col, int? contentIndex, string tag, string value)
+        {
+            try
+            {
+                var t = table.GetType();
+
+                if (contentIndex.HasValue)
+                {
+                    var mi5 = t.GetMethod(
+                        "SetBlockAttributeValue",
+                        BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic,
+                        null,
+                        new[] { typeof(int), typeof(int), typeof(int), typeof(string), typeof(string) },
+                        null);
+
+                    if (mi5 != null)
+                    {
+                        mi5.Invoke(table, new object[] { row, col, contentIndex.Value, tag, value });
+                        return true;
+                    }
+                }
+
+                var mi4 = t.GetMethod(
+                    "SetBlockAttributeValue",
+                    BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic,
+                    null,
+                    new[] { typeof(int), typeof(int), typeof(string), typeof(string) },
+                    null);
+
+                if (mi4 != null)
+                {
+                    mi4.Invoke(table, new object[] { row, col, tag, value });
+                    return true;
+                }
+            }
+            catch
+            {
+                // ignore
+            }
+
+            return false;
+        }
+
         // ===== Buttons (Designer wires to these; keep them) =====
 
         // Scan button: read-only refresh of the grid/duplicate UI (no writes back to DWG)
@@ -226,52 +1084,99 @@ namespace XingManager
         // - removes the block instances for the selected record
         // - removes matching rows from all recognized tables (Main/Page/LatLong)
         // - writes current grid back to blocks
-        // - forces a real graphics refresh to avoid the “ghost row”
+        // - forces a real graphics refresh to avoid the Ã¢â‚¬Å“ghost rowÃ¢â‚¬Â
+                
         private void btnDelete_Click(object sender, EventArgs e)
         {
-            var record = GetSelectedRecord();
-            if (record == null)
+            // Support deleting multiple selected rows.
+            var rowIndices = GetSelectedRowIndices();
+
+            var recordsToDelete = rowIndices
+                .Select(i => gridCrossings.Rows[i].DataBoundItem as CrossingRecord)
+                .Where(r => r != null)
+                .Distinct()
+                .ToList();
+
+            // Fallback if selection came from CurrentRow only
+            if (recordsToDelete.Count == 0)
             {
-                MessageBox.Show("Select a crossing to delete.", "Crossing Manager",
-                    MessageBoxButtons.OK, MessageBoxIcon.Information);
-                return;
+                var single = GetSelectedRecord();
+                if (single != null)
+                    recordsToDelete.Add(single);
             }
 
-            var confirm = MessageBox.Show(
-                $"Delete crossing {record.Crossing} (blocks + any table rows)?",
-                "Crossing Manager", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
+            if (recordsToDelete.Count == 0)
+                return;
 
-            if (confirm != DialogResult.Yes) return;
+            string prompt;
+            if (recordsToDelete.Count == 1)
+            {
+                prompt = $"Delete {recordsToDelete[0].Crossing}?";
+            }
+            else
+            {
+                var preview = string.Join(", ", recordsToDelete.Take(10).Select(r => r.Crossing));
+                if (recordsToDelete.Count > 10)
+                    preview += ", ...";
 
-            var crossingKey = record.Crossing; // keep before removal
+                prompt = $"Delete {recordsToDelete.Count} selected crossings?" + Environment.NewLine + Environment.NewLine + preview;
+            }
+
+            if (MessageBox.Show(prompt, "Confirm", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes)
+                return;
 
             try
             {
-                // 1) Delete the block instances for this record
-                _repository.DeleteInstances(record.AllInstances);
+                var idsToDelete = recordsToDelete
+                    .SelectMany(r => r.AllInstances)
+                    .Distinct()
+                    .ToList();
 
-                // 2) Remove from the grid (NO renumbering)
-                _records.Remove(record);
+                _repository.DeleteInstances(idsToDelete);
 
-                // 3) Persist current grid values back to blocks
-                _repository.ApplyChanges(_records.ToList(), _tableSync);
+                var tableErrors = new List<string>();
+                foreach (var rec in recordsToDelete)
+                {
+                    try
+                    {
+                        DeleteRowFromTables(rec.CrossingKey);
+                    }
+                    catch (Exception ex)
+                    {
+                        tableErrors.Add($"{rec.Crossing}: {ex.Message}");
+                    }
 
-                // 4) Remove row(s) from every recognized crossing table
-                DeleteRowFromTables(crossingKey);
+                    _records.Remove(rec);
+                }
 
-                // 5) Update remaining table cells from grid (B..E only; never touches col 0)
-                UpdateAllXingTablesFromGrid();
-
-                // 6) Extra safety: force redraw/regen of all crossing tables
-                ForceRegenAllCrossingTablesInDwg();
+                if (tableErrors.Count > 0)
+                {
+                    MessageBox.Show(
+                        "Some table rows could not be deleted:" + Environment.NewLine + Environment.NewLine + string.Join(Environment.NewLine, tableErrors),
+                        "Table delete warning",
+                        MessageBoxButtons.OK,
+                        MessageBoxIcon.Warning);
+                }
 
                 _isDirty = true;
-                gridCrossings.Refresh();
             }
             catch (Exception ex)
             {
-                MessageBox.Show(ex.Message, "Crossing Manager", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                MessageBox.Show(ex.Message, "Delete failed");
             }
+        }
+
+
+
+        private void BtnMoveUpOnClick(object sender, EventArgs e) => MoveSelectedCrossingRow(-1);
+
+        private void BtnMoveDownOnClick(object sender, EventArgs e) => MoveSelectedCrossingRow(1);
+
+        // Resequence X# values (X1..Xn) based on the current list order.
+        // This does not move rows; it only renumbers them.
+        private void BtnRenumberFromListOnClick(object sender, EventArgs e)
+        {
+            ResequenceCrossingsFromGridOrder();
         }
 
         private void btnRenumber_Click(object sender, EventArgs e)
@@ -377,6 +1282,9 @@ namespace XingManager
                 // NEW: in case Rescan is called while a cell is still being edited
                 FlushPendingGridEdits();
 
+                // A fresh scan becomes the new baseline for X# values.
+                _pendingRenumberMap = null;
+
                 // 1) Read from DWG -> populate grid
                 var firstScan = _repository.ScanCrossings();
                 _records = new BindingList<CrossingRecord>(firstScan.Records.ToList());
@@ -410,7 +1318,7 @@ namespace XingManager
                     {
                         _repository.ApplyChanges(snapshot, _tableSync);
                         _tableSync.UpdateAllTables(_doc, snapshot);  // MAIN/PAGE/LATLONG  :contentReference[oaicite:5]{index=5}
-                        UpdateAllXingTablesFromGrid();               // safety X‑key pass (4/6‑col LAT/LONG)
+                        UpdateAllXingTablesFromGrid();               // safety XÃ¢â‚¬â€˜key pass (4/6Ã¢â‚¬â€˜col LAT/LONG)
                         _tableSync.UpdateLatLongSourceTables(_doc, snapshot); // explicit sources  :contentReference[oaicite:6]{index=6}
                     }
                     catch (Exception ex)
@@ -457,7 +1365,7 @@ namespace XingManager
 
             try
             {
-                // Snapshot the grid BEFORE we touch the DWG; this is our “source of truth”
+                // Snapshot the grid BEFORE we touch the DWG; this is our Ã¢â‚¬Å“source of truthÃ¢â‚¬Â
                 var snapshot = _records.ToList();
 
                 // 1) Push grid -> blocks (your existing behavior)
@@ -465,6 +1373,10 @@ namespace XingManager
 
                 // 2) Push grid -> all RECOGNIZED tables (Main/Page/LatLong) via TableSync (kept)
                 _tableSync.UpdateAllTables(_doc, snapshot);                                                 // kept  :contentReference[oaicite:5]{index=5}
+
+                // 2b) If the user resequenced X#s (Move Up/Down, drag reorder, Renumber List Order),
+                //     apply the pending X# map to ANY table bubble cells (layout variants / legacy tables).
+                ApplyPendingRenumberMapToAnyTables();
 
                 // 3) Safety pass on recognized tables keyed by X (kept)
                 UpdateAllXingTablesFromGrid();                                                              // kept  :contentReference[oaicite:6]{index=6}
@@ -484,7 +1396,7 @@ namespace XingManager
                 // 7) Re-read from DWG and allow the apply-to-drawing pass to push any resolver results.
                 RescanRecords(applyToTables: true, suppressDuplicateUi: true);                             // kept  :contentReference[oaicite:9]{index=9}
 
-                // 8) NEW: guard against “snap back” only for LAT/LONG by reapplying the snapshot’s LAT/LONG.
+                // 8) NEW: guard against Ã¢â‚¬Å“snap backÃ¢â‚¬Â only for LAT/LONG by reapplying the snapshotÃ¢â‚¬â„¢s LAT/LONG.
                 //    This does not affect Owner/Desc/Location/DWG_REF (your original flow is preserved).
                 OverrideLatLongFromSnapshotInGrid(snapshot);                                                // NEW
 
@@ -501,7 +1413,7 @@ namespace XingManager
 
         // NEW: Update LAT/LONG in ANY table row that matches by X, even with no headings.
         //      - Reads X with TableSync.ResolveCrossingKey (robust).
-        //      - Finds per-row LAT/LONG columns by label (“LAT”, “LONG”, “LATITUDE”, “LONGITUDE”) or numeric range.
+        //      - Finds per-row LAT/LONG columns by label (Ã¢â‚¬Å“LATÃ¢â‚¬Â, Ã¢â‚¬Å“LONGÃ¢â‚¬Â, Ã¢â‚¬Å“LATITUDEÃ¢â‚¬Â, Ã¢â‚¬Å“LONGITUDEÃ¢â‚¬Â) or numeric range.
         //      - Writes only LAT and LONG to minimize side-effects.
         //      - Tags updated tables as LATLONG (so IdentifyTable will classify them next time).
         private void ReplaceLatLongInAnyTableRobust(IList<CrossingRecord> snapshot)
@@ -509,12 +1421,12 @@ namespace XingManager
             var doc = _doc ?? AcadApp.DocumentManager.MdiActiveDocument;
             if (doc == null || snapshot == null || snapshot.Count == 0) return;
 
-            // Build a key -> record map (accept either “X12” or bare digits, normalize both ways)
+            // Build a key -> record map (accept either Ã¢â‚¬Å“X12Ã¢â‚¬Â or bare digits, normalize both ways)
             var byX = new Dictionary<string, CrossingRecord>(StringComparer.OrdinalIgnoreCase);
             foreach (var r in snapshot)
             {
                 if (r == null) continue;
-                var k1 = TableSync.NormalizeKeyForLookup(r.Crossing);   // “X##” or ""  (robust normalization)  :contentReference[oaicite:10]{index=10}
+                var k1 = TableSync.NormalizeKeyForLookup(r.Crossing);   // Ã¢â‚¬Å“X##Ã¢â‚¬Â or ""  (robust normalization)  :contentReference[oaicite:10]{index=10}
                 var k2 = NormalizeXKey(r.Crossing);                     // fallback normalizer used elsewhere     :contentReference[oaicite:11]{index=11}
                 if (!string.IsNullOrWhiteSpace(k1) && !byX.ContainsKey(k1)) byX[k1] = r;
                 if (!string.IsNullOrWhiteSpace(k2) && !byX.ContainsKey(k2)) byX[k2] = r;
@@ -575,7 +1487,7 @@ namespace XingManager
                             }
                             catch { /* tagging is best-effort */ }
 
-                            // Force a redraw to avoid the “ghost row” look
+                            // Force a redraw to avoid the Ã¢â‚¬Å“ghost rowÃ¢â‚¬Â look
                             ForceRegenTable(table);                                                                              // :contentReference[oaicite:14]{index=14}
                         }
                     }
@@ -591,7 +1503,7 @@ namespace XingManager
 
 
         // NEW: After Rescan (which may ignore headerless LAT/LONG tables), put just the
-        //      snapshot’s LAT/LONG (and Zone if you want) back into the grid so the form
+        //      snapshotÃ¢â‚¬â„¢s LAT/LONG (and Zone if you want) back into the grid so the form
         //      shows the values you just applied. Everything else remains from the rescan.
         private void OverrideLatLongFromSnapshotInGrid(IList<CrossingRecord> snapshot)
         {
@@ -703,13 +1615,13 @@ namespace XingManager
         }
 
 
-        // --- NEW helper: only touches LAT, LONG (and ZONE/DWG_REF column in 6‑col LAT/LONG tables) ---
+        // --- NEW helper: only touches LAT, LONG (and ZONE/DWG_REF column in 6Ã¢â‚¬â€˜col LAT/LONG tables) ---
         private void BruteForceReplaceLatLongEverywhere(IList<CrossingRecord> snapshot)
         {
             var doc = _doc ?? AcadApp.DocumentManager.MdiActiveDocument;
             if (doc == null || snapshot == null || snapshot.Count == 0) return;
 
-            // Build by‑X map from the current grid snapshot ("X3" etc.)
+            // Build byÃ¢â‚¬â€˜X map from the current grid snapshot ("X3" etc.)
             var byX = new Dictionary<string, CrossingRecord>(StringComparer.OrdinalIgnoreCase);
             foreach (var r in snapshot)
             {
@@ -731,11 +1643,11 @@ namespace XingManager
                         var table = tr.GetObject(entId, OpenMode.ForRead) as Table;
                         if (table == null) continue;
 
-                        // Treat classic 4‑ or 6‑column layouts as LAT/LONG candidates (ID|DESC|LAT|LONG) or (ID|DESC|ZONE|LAT|LONG|DWG_REF)
+                        // Treat classic 4Ã¢â‚¬â€˜ or 6Ã¢â‚¬â€˜column layouts as LAT/LONG candidates (ID|DESC|LAT|LONG) or (ID|DESC|ZONE|LAT|LONG|DWG_REF)
                         var cols = table.Columns.Count;
                         if (cols != 4 && cols != 6) continue;
 
-                        // Use the same start‑row logic you already rely on elsewhere
+                        // Use the same startÃ¢â‚¬â€˜row logic you already rely on elsewhere
                         int startRow = 1;
                         try { startRow = TableSync.FindLatLongDataStartRow(table); } // robust header finder. :contentReference[oaicite:7]{index=7}
                         catch { startRow = 1; }
@@ -751,7 +1663,7 @@ namespace XingManager
 
                         for (int row = startRow; row < table.Rows.Count; row++)
                         {
-                            // Column 0 key: attribute‑first, fall back to visible token
+                            // Column 0 key: attributeÃ¢â‚¬â€˜first, fall back to visible token
                             string xRaw = ReadXFromCellAttributeOnly(table, row, tr);
                             if (string.IsNullOrWhiteSpace(xRaw))
                             {
@@ -767,7 +1679,7 @@ namespace XingManager
                             if (string.IsNullOrWhiteSpace(xKey) || !byX.TryGetValue(xKey, out var rec) || rec == null)
                                 continue;
 
-                            // Write LAT/LONG (and Zone/DWG_REF if the 6‑col layout is present)
+                            // Write LAT/LONG (and Zone/DWG_REF if the 6Ã¢â‚¬â€˜col layout is present)
                             string zoneLabel = string.IsNullOrWhiteSpace(rec.Zone)
                                 ? string.Empty
                                 : string.Format(CultureInfo.InvariantCulture, "ZONE {0}", rec.Zone.Trim());
@@ -790,7 +1702,7 @@ namespace XingManager
                 tr.Commit();
             }
 
-            // Non‑undoable repaint paths
+            // NonÃ¢â‚¬â€˜undoable repaint paths
             try { doc.Editor?.Regen(); } catch { }
             try { AcadApp.UpdateScreen(); } catch { }
         }
@@ -876,14 +1788,14 @@ namespace XingManager
         /// </summary>
         /// Update recognized crossing tables (MAIN/PAGE/LATLONG) from the current grid.
         /// Never modifies Column 0 (the bubble/X). Only columns B..E are written.
-        /// Ends with a hard refresh to avoid the transient “ghost row” look.
+        /// Ends with a hard refresh to avoid the transient Ã¢â‚¬Å“ghost rowÃ¢â‚¬Â look.
         /// Update recognised crossing tables (MAIN/PAGE/LATLONG) from the current grid.
         /// Never modifies Column 0 (the bubble/X); only columns B..E are written.
-        /// Ends with a hard refresh to avoid the transient “ghost row” look.
+        /// Ends with a hard refresh to avoid the transient Ã¢â‚¬Å“ghost rowÃ¢â‚¬Â look.
         /// Update recognised crossing tables (MAIN, PAGE, LATLONG) from the current grid.
         /// - Matches rows by X-key (attribute-first, with text fallback).
         /// - Never writes Column 0 (bubble) in any table.
-        /// - For LAT/LONG, supports both 4‑col (ID, DESC, LAT, LONG) and 6‑col (ID, DESC, ZONE, LAT, LONG, DWG_REF).
+        /// - For LAT/LONG, supports both 4Ã¢â‚¬â€˜col (ID, DESC, LAT, LONG) and 6Ã¢â‚¬â€˜col (ID, DESC, ZONE, LAT, LONG, DWG_REF).
         /// - Ends with a regen so changes appear immediately.
         private void UpdateAllXingTablesFromGrid()
         {
@@ -972,14 +1884,14 @@ namespace XingManager
                             }
                             else if (kind == TableSync.XingTableType.LatLong)
                             {
-                                // 4‑col: ID | DESC | LAT | LONG
-                                // 6‑col: ID | DESC | ZONE | LAT | LONG | DWG_REF
+                                // 4Ã¢â‚¬â€˜col: ID | DESC | LAT | LONG
+                                // 6Ã¢â‚¬â€˜col: ID | DESC | ZONE | LAT | LONG | DWG_REF
                                 var cols = table.Columns.Count;
 
                                 // Description (col 1 is common)
                                 changed |= SetCellIfChanged(table, row, 1, rec.Description);
 
-                                // Zone label for 6‑col tables (e.g., "ZONE 11")
+                                // Zone label for 6Ã¢â‚¬â€˜col tables (e.g., "ZONE 11")
                                 var zoneLabel = string.IsNullOrWhiteSpace(rec.Zone)
                                     ? string.Empty
                                     : string.Format(CultureInfo.InvariantCulture, "ZONE {0}", rec.Zone.Trim());
@@ -1114,7 +2026,7 @@ namespace XingManager
             catch { return 0; }
         }
 
-        // strip inline MTEXT formatting codes like \A1;, \H2.5x;, \C2;, {…}, etc.
+        // strip inline MTEXT formatting codes like \A1;, \H2.5x;, \C2;, {Ã¢â‚¬Â¦}, etc.
         private static readonly Regex InlineCode = new Regex(@"\\[A-Za-z][^;]*;|{[^}]*}");
 
         // These regexes remove MTEXT commands and special codes from cell strings.
@@ -1286,7 +2198,7 @@ namespace XingManager
                     }
 
                     CommandLogger.Log(ed, $"Table rows indexed by X = {byX.Count}");
-                    CommandLogger.Log(ed, "--- TABLE→FORM UPDATES (X-only) ---");
+                    CommandLogger.Log(ed, "--- TABLEÃ¢â€ â€™FORM UPDATES (X-only) ---");
 
                     int matched = 0, updated = 0, added = 0, noMatch = 0;
                     var matchedKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -1378,7 +2290,7 @@ namespace XingManager
                     // 1) Write block attributes from the grid
                     _repository.ApplyChanges(_records.ToList(), _tableSync);
 
-                    // 2) Update MAIN/PAGE/LATLONG tables from the grid (B..E only — never col 0)
+                    // 2) Update MAIN/PAGE/LATLONG tables from the grid (B..E only Ã¢â‚¬â€ never col 0)
                     UpdateAllXingTablesFromGrid();
 
                     // 3) Reload grid from DWG (no table writes)
@@ -1420,7 +2332,7 @@ namespace XingManager
             // Apply the lat/long rows to the existing records (this updates Lat, Long, Zone, DwgRef).
             XingRepository.ApplyLatLongRows(rows, recordMap);
 
-            // Add any new records for rows that didn’t match existing crossings.
+            // Add any new records for rows that didnÃ¢â‚¬â„¢t match existing crossings.
             foreach (var row in rows)
             {
                 var key = TableSync.NormalizeKeyForLookup(row.Crossing);
@@ -1688,7 +2600,7 @@ namespace XingManager
                         }
                         else
                         {
-                            // MAIN/PAGE: if row 0 isn’t an X row, advance until we hit a row that looks like data.
+                            // MAIN/PAGE: if row 0 isnÃ¢â‚¬â„¢t an X row, advance until we hit a row that looks like data.
                             startRow = 0;
                             while (startRow < table.Rows.Count)
                             {
@@ -1751,7 +2663,7 @@ namespace XingManager
                                 // unknown; try clear fallback
                             }
 
-                            // 2) Fallback: clear the row cells so we don’t leave stale data behind
+                            // 2) Fallback: clear the row cells so we donÃ¢â‚¬â„¢t leave stale data behind
                             if (!deleted && row >= 0 && row < table.Rows.Count)
                             {
                                 try
@@ -1759,7 +2671,7 @@ namespace XingManager
                                     int cols = table.Columns.Count;
                                     for (int c = 0; c < cols; c++)
                                     {
-                                        // Never touch Column 0’s block content; just blank the visible text.
+                                        // Never touch Column 0Ã¢â‚¬â„¢s block content; just blank the visible text.
                                         // (If Column 0 is a block cell, TextString set is harmless/no-op.)
                                         SetCellIfChanged(table, row, c, string.Empty);
                                     }
@@ -1784,7 +2696,7 @@ namespace XingManager
             try { AcadApp.UpdateScreen(); } catch { }
         }
 
-        // Modify your btnDelete_Click handler so it doesn’t renumber bubbles
+        // Modify your btnDelete_Click handler so it doesnÃ¢â‚¬â„¢t renumber bubbles
         // and calls DeleteRowFromTables and UpdateAllXingTablesFromGrid.
 
         private CrossingRecord GetSelectedRecord()
@@ -1792,6 +2704,33 @@ namespace XingManager
             if (gridCrossings.CurrentRow == null) return null;
             return gridCrossings.CurrentRow.DataBoundItem as CrossingRecord;
         }
+
+        private List<int> GetSelectedRowIndices()
+        {
+            var set = new HashSet<int>();
+
+            foreach (DataGridViewRow row in gridCrossings.SelectedRows)
+            {
+                if (row == null || row.IsNewRow)
+                    continue;
+                if (row.Index >= 0)
+                    set.Add(row.Index);
+            }
+
+            foreach (DataGridViewCell cell in gridCrossings.SelectedCells)
+            {
+                if (cell == null)
+                    continue;
+                if (cell.RowIndex >= 0)
+                    set.Add(cell.RowIndex);
+            }
+
+            if (gridCrossings.CurrentCell != null && gridCrossings.CurrentCell.RowIndex >= 0)
+                set.Add(gridCrossings.CurrentCell.RowIndex);
+
+            return set.OrderBy(i => i).ToList();
+        }
+
 
         /// Force a visual rebuild of every recognised crossing table (MAIN / PAGE / LATLONG).
         /// <summary>
@@ -1847,7 +2786,7 @@ namespace XingManager
                 // Make sure internal row/column cache is current
                 try { table.GenerateLayout(); } catch { /* best effort */ }
 
-                // Mark graphics “dirty” so the display list is rebuilt
+                // Mark graphics Ã¢â‚¬Å“dirtyÃ¢â‚¬Â so the display list is rebuilt
                 try { table.RecordGraphicsModified(true); } catch { /* older versions: no-op */ }
             }
             catch
@@ -2031,143 +2970,205 @@ namespace XingManager
             }
         }
 
+                
         private void StartRenumberCrossingCommand()
         {
-            var doc = _doc ?? AcadApp.DocumentManager.MdiActiveDocument;
+            if (_isAwaitingRenumber) return;
+
+            var doc = AcadApp.DocumentManager.MdiActiveDocument;
             if (doc == null)
             {
-                MessageBox.Show(
-                    "No active drawing is available for renumbering.",
-                    "Crossing Manager",
-                    MessageBoxButtons.OK,
-                    MessageBoxIcon.Warning);
-                return;
-            }
-
-            if (_isAwaitingRenumber)
-            {
-                MessageBox.Show(
-                    "Renumber Crossing is already running. Complete the prompts in AutoCAD.",
-                    "Crossing Manager",
-                    MessageBoxButtons.OK,
-                    MessageBoxIcon.Information);
+                MessageBox.Show("No active document.");
                 return;
             }
 
             _isAwaitingRenumber = true;
 
-            CommandEventHandler ended = null;
-            CommandEventHandler cancelled = null;
-            CommandEventHandler failed = null;
-
-            bool IsRenumberCommand(CommandEventArgs args)
-            {
-                if (!_isAwaitingRenumber)
-                {
-                    return false;
-                }
-
-                var name = args?.GlobalCommandName;
-                if (string.IsNullOrWhiteSpace(name))
-                {
-                    return true;
-                }
-
-                if (string.Equals(name, "RNC", StringComparison.OrdinalIgnoreCase) ||
-                    string.Equals(name, "XINGREN", StringComparison.OrdinalIgnoreCase))
-                {
-                    return true;
-                }
-
-                if (name.IndexOf("RENUMBER", StringComparison.OrdinalIgnoreCase) >= 0)
-                {
-                    return true;
-                }
-
-                if (name.IndexOf("XING", StringComparison.OrdinalIgnoreCase) >= 0 &&
-                    name.IndexOf("REN", StringComparison.OrdinalIgnoreCase) >= 0)
-                {
-                    return true;
-                }
-
-                return false;
-            }
-
-            void Cleanup()
-            {
-                doc.CommandEnded -= ended;
-                doc.CommandCancelled -= cancelled;
-                if (failed != null)
-                {
-                    try { doc.CommandFailed -= failed; } catch { /* ignore */ }
-                }
-                _isAwaitingRenumber = false;
-            }
-
-            void RescanOnUiThread()
-            {
-                void Rescan() { try { RescanRecords(applyToTables: false); } catch { /* best effort */ } }
-
-                if (InvokeRequired)
-                {
-                    try { BeginInvoke((Action)Rescan); }
-                    catch { Rescan(); }
-                }
-                else
-                {
-                    Rescan();
-                }
-            }
-
-            ended = (sender, args) =>
-            {
-                if (!IsRenumberCommand(args)) return;
-
-                Cleanup();
-                RescanOnUiThread();
-            };
-
-            cancelled = (sender, args) =>
-            {
-                if (!IsRenumberCommand(args)) return;
-
-                Cleanup();
-            };
-
-            failed = (sender, args) =>
-            {
-                if (!IsRenumberCommand(args)) return;
-
-                Cleanup();
-                try
-                {
-                    MessageBox.Show(
-                        "Renumber Crossing command failed.",
-                        "Crossing Manager",
-                        MessageBoxButtons.OK,
-                        MessageBoxIcon.Warning);
-                }
-                catch
-                {
-                    // ignored
-                }
-            };
-
-            doc.CommandEnded += ended;
-            doc.CommandCancelled += cancelled;
-            try { doc.CommandFailed += failed; }
-            catch { failed = null; }
-
             try
             {
-                doc.SendStringToExecute("RNC\n", true, false, true);
+                // This renumber runs directly (no external command), so any pending table-renumber map
+                // from drag/move operations must NOT be applied afterwards.
+                _pendingRenumberMap = null;
+
+                var ed = doc.Editor;
+
+                // 1) Select the RNC path polyline
+                var peo = new PromptEntityOptions("\nSelect the RNC path polyline (Create RNC Path): ");
+                peo.SetRejectMessage("\nPlease select a polyline.");
+                peo.AddAllowedClass(typeof(Polyline), exactMatch: false);
+
+                var per = ed.GetEntity(peo);
+                if (per.Status != PromptStatus.OK)
+                    return;
+
+                List<Point3d> vertices;
+                ObjectId spaceId;
+
+                using (var tr = doc.TransactionManager.StartTransaction())
+                {
+                    var pl = tr.GetObject(per.ObjectId, OpenMode.ForRead) as Polyline;
+                    if (pl == null)
+                    {
+                        MessageBox.Show("Selected entity is not a polyline.");
+                        return;
+                    }
+
+                    if (pl.Closed)
+                    {
+                        MessageBox.Show("The selected polyline is closed. Please select the OPEN RNC path polyline.");
+                        return;
+                    }
+
+                    spaceId = pl.OwnerId;
+
+                    vertices = new List<Point3d>(pl.NumberOfVertices);
+                    for (int i = 0; i < pl.NumberOfVertices; i++)
+                    {
+                        var pt = pl.GetPoint3dAt(i);
+                        if (vertices.Count == 0 || vertices[vertices.Count - 1].DistanceTo(pt) > 1e-6)
+                            vertices.Add(pt);
+                    }
+
+                    tr.Commit();
+                }
+
+                if (vertices == null || vertices.Count == 0)
+                {
+                    MessageBox.Show("RNC path has no usable vertices.");
+                    return;
+                }
+
+                // 2) Scan crossings so we can update ALL instances (copies) of any crossing that changes
+                var scan = _repository.ScanCrossings();
+                if (scan == null || scan.Records == null || scan.Records.Count == 0)
+                {
+                    MessageBox.Show("No crossing bubbles found.");
+                    return;
+                }
+
+                // 3) Build candidate instance list (only in the same space as the RNC path)
+                var candidates = new List<(ObjectId Id, Point3d Pos, CrossingRecord Rec)>();
+
+                using (var tr = doc.TransactionManager.StartTransaction())
+                {
+                    foreach (var rec in scan.Records)
+                    {
+                        foreach (var id in rec.AllInstances)
+                        {
+                            var br = tr.GetObject(id, OpenMode.ForRead) as BlockReference;
+                            if (br == null) continue;
+                            if (br.OwnerId != spaceId) continue;
+
+                            candidates.Add((id, br.Position, rec));
+                        }
+                    }
+
+                    tr.Commit();
+                }
+
+                if (candidates.Count == 0)
+                {
+                    MessageBox.Show("No crossing bubbles were found in the same space as the selected RNC path.");
+                    return;
+                }
+
+                // 4) Match each vertex -> closest bubble (within tolerance)
+                const double maxDist = 5.0; // drawing units
+                var usedInstanceIds = new HashSet<ObjectId>();
+                var targetCrossingByRecord = new Dictionary<CrossingRecord, string>();
+                var missingVertices = new List<int>();
+
+                for (int i = 0; i < vertices.Count; i++)
+                {
+                    var vtx = vertices[i];
+
+                    double bestDist = double.MaxValue;
+                    (ObjectId Id, Point3d Pos, CrossingRecord Rec) best = default;
+                    bool found = false;
+
+                    foreach (var cand in candidates)
+                    {
+                        if (usedInstanceIds.Contains(cand.Id))
+                            continue;
+
+                        double d = vtx.DistanceTo(cand.Pos);
+                        if (d < bestDist)
+                        {
+                            bestDist = d;
+                            best = cand;
+                            found = true;
+                        }
+                    }
+
+                    if (!found || bestDist > maxDist)
+                    {
+                        missingVertices.Add(i + 1);
+                        continue;
+                    }
+
+                    usedInstanceIds.Add(best.Id);
+
+                    var newX = "X" + (i + 1);
+                    if (targetCrossingByRecord.ContainsKey(best.Rec))
+                    {
+                        MessageBox.Show(
+                            "RNC cancelled. The selected path appears to hit the same crossing bubble more than once." + Environment.NewLine +
+                            "(A single bubble was matched to multiple vertices.)",
+                            "RNC",
+                            MessageBoxButtons.OK,
+                            MessageBoxIcon.Warning);
+                        return;
+                    }
+
+                    targetCrossingByRecord[best.Rec] = newX;
+                }
+
+                if (missingVertices.Count > 0)
+                {
+                    // Build a helpful list with vertex numbers and coordinates
+                    var lines = missingVertices
+                        .Select(v => {
+                            var pt = vertices[v - 1];
+                            return $"Vertex {v}: ({pt.X:0.###}, {pt.Y:0.###})";
+                        })
+                        .ToList();
+
+                    MessageBox.Show(
+                        "RNC cancelled. No bubble was found at these vertex locations:" + Environment.NewLine + Environment.NewLine +
+                        string.Join(Environment.NewLine, lines) + Environment.NewLine + Environment.NewLine +
+                        "Make sure each RNC path vertex is snapped to a crossing bubble insertion point.",
+                        "RNC",
+                        MessageBoxButtons.OK,
+                        MessageBoxIcon.Warning);
+                    return;
+                }
+
+                // 5) Apply updates (this writes all copies for each affected crossing)
+                foreach (var kvp in targetCrossingByRecord)
+                    kvp.Key.Crossing = kvp.Value;
+
+                _repository.ApplyChanges(targetCrossingByRecord.Keys.ToList(), _tableSync);
+
+                // 6) Refresh the UI list (no table syncing here; user regenerates tables after RNC)
+                RescanRecords(applyToTables: false);
+
+                MessageBox.Show(
+                    $"RNC complete. Renumbered {targetCrossingByRecord.Count} crossings from path vertices.",
+                    "RNC",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Information);
             }
             catch (Exception ex)
             {
-                Cleanup();
-                MessageBox.Show(ex.Message, "Crossing Manager", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                MessageBox.Show(ex.Message, "RNC failed");
+            }
+            finally
+            {
+                _isAwaitingRenumber = false;
             }
         }
+
+
 
 
 
@@ -2294,8 +3295,8 @@ namespace XingManager
 
             var trimmed = value.Trim();
             return string.Equals(trimmed, "-", StringComparison.Ordinal) ||
-                   string.Equals(trimmed, "—", StringComparison.Ordinal) ||
-                   string.Equals(trimmed, "–", StringComparison.Ordinal);
+                   string.Equals(trimmed, "Ã¢â‚¬â€", StringComparison.Ordinal) ||
+                   string.Equals(trimmed, "Ã¢â‚¬â€œ", StringComparison.Ordinal);
         }
 
         private sealed class PageGenerationOptions
@@ -2333,7 +3334,7 @@ namespace XingManager
                 return;
             }
 
-            // Build per‑DWG_REF list of distinct LOCATIONs
+            // Build perÃ¢â‚¬â€˜DWG_REF list of distinct LOCATIONs
             var locMap = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
             foreach (var dr in refs)
             {
@@ -2420,7 +3421,7 @@ namespace XingManager
 
                         var otherSections = BuildOwnerLatLongSections(otherLatLongCandidates, out var otherRowCount);
 
-                        // Sort each section’s records numerically and sort sections by earliest crossing
+                        // Sort each sectionÃ¢â‚¬â„¢s records numerically and sort sections by earliest crossing
                         foreach (var sec in otherSections)
                         {
                             sec.Records = sec.Records
@@ -2484,7 +3485,7 @@ namespace XingManager
                                     waterLatLongRecords);
                             }
 
-                            // Insert each owner’s other table separately
+                            // Insert each ownerÃ¢â‚¬â„¢s other table separately
                             if (otherSections.Count > 0)
                             {
                                 Point3d nextInsert = otherInsert;
@@ -2543,7 +3544,7 @@ namespace XingManager
         /// by the numeric part of their name.  AutoCAD assigns new layouts
         /// arbitrary tab orders when they are created; this method ensures
         /// that the layout tabs appear in ascending numeric order
-        /// (e.g., XING #1, XING #2, XING #3).  The “Model” tab (order 0)
+        /// (e.g., XING #1, XING #2, XING #3).  The Ã¢â‚¬Å“ModelÃ¢â‚¬Â tab (order 0)
         /// is not affected.
         /// </summary>
         private void ReorderXingLayouts()
@@ -2739,7 +3740,7 @@ namespace XingManager
                 return;
             }
 
-            // Sort each section’s records by crossing number (ascending)
+            // Sort each sectionÃ¢â‚¬â„¢s records by crossing number (ascending)
             foreach (var sec in sections)
             {
                 sec.Records = sec.Records
@@ -3074,7 +4075,7 @@ namespace XingManager
 
                 var otherSections = BuildOwnerLatLongSections(otherLatLongCandidates, out var otherRowCount);
 
-                // Sort each section’s records by crossing number
+                // Sort each sectionÃ¢â‚¬â„¢s records by crossing number
                 foreach (var sec in otherSections)
                 {
                     sec.Records = sec.Records
@@ -3510,6 +4511,85 @@ namespace XingManager
             return false;
         }
 
+        /// <summary>
+        /// Determines the heading/title for a single LAT/LONG table created from the currently selected record.
+        /// <summary>
+        /// Determines the heading/title for a single LAT/LONG table created from the currently selected record.
+        ///
+        /// Rules:
+        /// - Known owners (NOVA/PGI/etc): "{OWNER} CROSSING INFORMATION"
+        /// - Water crossings (by description/keywords): "WATER CROSSING INFORMATION"
+        /// - Anything else / unknown: no title row
+        ///
+        /// NOTE: We intentionally do NOT treat a blank/"-" Owner as water by default, because many older drawings
+        /// may have missing Owner data for non-water crossings. Instead we look for water/hydro keywords.
+        /// </summary>
+        private static void ResolveLatLongTitleForRecord(CrossingRecord record, out string title, out bool includeTitleRow, out bool includeColumnHeaders)
+        {
+            title = null;
+            includeTitleRow = false;
+            includeColumnHeaders = true;
+
+            if (record == null)
+            {
+                includeColumnHeaders = false;
+                return;
+            }
+
+            var owner = (record.Owner ?? string.Empty).Trim();
+            var desc = record.Description ?? string.Empty;
+
+            // 1) Known owner tables first (NOVA/PGI/etc)
+            if (TryMatchOwnerKeyword(owner, out var keyword))
+            {
+                title = string.Format(CultureInfo.InvariantCulture, "{0} CROSSING INFORMATION", keyword.ToUpperInvariant());
+                includeTitleRow = true;
+                return;
+            }
+
+            // 2) Water/hydro by description keywords
+            var looksLikeWater = false;
+
+            if (!string.IsNullOrWhiteSpace(desc))
+            {
+                // Hydro keywords (Watercourse/Creek/River) plus a generic 'water' fallback.
+                if (desc.IndexOf("water", StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    looksLikeWater = true;
+                }
+                else
+                {
+                    foreach (var k in HydroKeywords)
+                    {
+                        if (desc.IndexOf(k, StringComparison.OrdinalIgnoreCase) >= 0)
+                        {
+                            looksLikeWater = true;
+                            break;
+                        }
+                    }
+                }
+            }
+
+            // Some users/projects store WATER directly in Owner.
+            if (!looksLikeWater && owner.IndexOf("water", StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                looksLikeWater = true;
+            }
+
+            if (looksLikeWater)
+            {
+                title = "WATER CROSSING INFORMATION";
+                includeTitleRow = true;
+                return;
+            }
+
+            // 3) Unknown type => no heading and no column headers.
+            title = null;
+            includeTitleRow = false;
+            includeColumnHeaders = false;
+        }
+
+
         private static IList<TableSync.LatLongSection> BuildOwnerLatLongSections(
             IEnumerable<CrossingRecord> records,
             out int totalRowCount)
@@ -3567,7 +4647,7 @@ namespace XingManager
                 var raw = t.Cells[r, 0]?.TextString ?? string.Empty;
                 // Remove MTEXT formatting commands and braces
                 var plain = StripMTextFormatting(raw).Trim();
-                // Check for the key phrase "CROSSING INFORMATION" (case‑insensitive)
+                // Check for the key phrase "CROSSING INFORMATION" (caseÃ¢â‚¬â€˜insensitive)
                 return plain.IndexOf("CROSSING INFORMATION", StringComparison.OrdinalIgnoreCase) >= 0;
             }
             catch
@@ -3586,54 +4666,39 @@ namespace XingManager
                 return;
             }
 
-            Table existing = null;
-            using (var tr = _doc.Database.TransactionManager.StartTransaction())
-            {
-                var blockTable = (BlockTable)tr.GetObject(_doc.Database.BlockTableId, OpenMode.ForRead);
-                foreach (ObjectId btrId in blockTable)
-                {
-                    var btr = (BlockTableRecord)tr.GetObject(btrId, OpenMode.ForRead);
-                    foreach (ObjectId entId in btr)
-                    {
-                        if (!(tr.GetObject(entId, OpenMode.ForRead) is Table table)) continue;
-                        if (_tableSync.IdentifyTable(table, tr) != TableSync.XingTableType.LatLong) continue;
-
-                        for (var row = 1; row < table.Rows.Count; row++)
-                        {
-                            var text = table.Cells[row, 0].TextString ?? string.Empty;
-                            if (string.Equals(text.Trim(), record.Crossing.Trim(), StringComparison.OrdinalIgnoreCase))
-                            {
-                                existing = table;
-                                break;
-                            }
-                        }
-                        if (existing != null) break;
-                    }
-                    if (existing != null) break;
-                }
-                tr.Commit();
-            }
-
-            if (existing != null)
-            {
-                _tableSync.UpdateAllTables(_doc, _records.ToList());
-                return;
-            }
-
+            // Always create a new LAT/LONG table for the currently selected row.
+            // (Older behavior users relied on.)
             var pointRes = _doc.Editor.GetPoint("\nSpecify insertion point for LAT/LONG table:");
             if (pointRes.Status != PromptStatus.OK) return;
 
             using (_doc.LockDocument())
             using (var tr = _doc.Database.TransactionManager.StartTransaction())
             {
+                // Insert into the current layout's paper space (or model space if that's what
+                // the current layout is).
                 var layoutManager = LayoutManager.Current;
                 var layoutDict = (DBDictionary)tr.GetObject(_doc.Database.LayoutDictionaryId, OpenMode.ForRead);
                 var layoutId = layoutDict.GetAt(layoutManager.CurrentLayout);
                 var layout = (Layout)tr.GetObject(layoutId, OpenMode.ForRead);
                 var btr = (BlockTableRecord)tr.GetObject(layout.BlockTableRecordId, OpenMode.ForWrite);
-                _tableSync.CreateAndInsertLatLongTable(_doc.Database, tr, btr, pointRes.Value, new List<CrossingRecord> { record });
+
+                // Title row should reflect the crossing "type" (water vs known owner), not always WATER.
+                ResolveLatLongTitleForRecord(record, out var titleOverride, out var includeTitleRow, out var includeColumnHeaders);
+
+                _tableSync.CreateAndInsertLatLongTable(
+                    _doc.Database,
+                    tr,
+                    btr,
+                    pointRes.Value,
+                    new List<CrossingRecord> { record },
+                    titleOverride: titleOverride,
+                    sections: null,
+                    includeTitleRow: includeTitleRow,
+                    includeColumnHeaders: includeColumnHeaders);
                 tr.Commit();
             }
+
+            try { _doc.Editor.Regen(); } catch { }
         }
 
         private void AddLatLongFromDrawing()
@@ -3872,7 +4937,7 @@ namespace XingManager
 
             if (result.Value != 11 && result.Value != 12)
             {
-                CommandLogger.Log(editor, "** Invalid zone – enter 11 or 12. **", alsoToCommandBar: true);
+                CommandLogger.Log(editor, "** Invalid zone Ã¢â‚¬â€œ enter 11 or 12. **", alsoToCommandBar: true);
                 return null;
             }
 
@@ -3960,3 +5025,10 @@ namespace XingManager
         }
     }
 }
+
+/////////////////////////////////////////////////////////////////////
+
+/////////////////////////////////////////////////////////////////////
+
+/////////////////////////////////////////////////////////////////////
+

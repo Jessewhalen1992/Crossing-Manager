@@ -7,6 +7,9 @@ namespace XingManager
         private System.Windows.Forms.Button btnRescan;
         private System.Windows.Forms.Button btnApply;
         private System.Windows.Forms.Button btnDelete;
+        private System.Windows.Forms.Button btnMoveUp;
+        private System.Windows.Forms.Button btnMoveDown;
+        private System.Windows.Forms.Button btnRenumberFromList;
         private System.Windows.Forms.Button btnRenumber;
         private System.Windows.Forms.Button btnAddRncPolyline;
         private System.Windows.Forms.Button btnGeneratePage;
@@ -36,6 +39,9 @@ namespace XingManager
             this.btnRescan = new System.Windows.Forms.Button();
             this.btnApply = new System.Windows.Forms.Button();
             this.btnDelete = new System.Windows.Forms.Button();
+            this.btnMoveUp = new System.Windows.Forms.Button();
+            this.btnMoveDown = new System.Windows.Forms.Button();
+            this.btnRenumberFromList = new System.Windows.Forms.Button();
             this.btnRenumber = new System.Windows.Forms.Button();
             this.btnAddRncPolyline = new System.Windows.Forms.Button();
             this.btnGeneratePage = new System.Windows.Forms.Button();
@@ -61,12 +67,12 @@ namespace XingManager
             this.gridCrossings.AutoSizeColumnsMode = System.Windows.Forms.DataGridViewAutoSizeColumnsMode.Fill;
             this.gridCrossings.ColumnHeadersHeightSizeMode = System.Windows.Forms.DataGridViewColumnHeadersHeightSizeMode.AutoSize;
             this.gridCrossings.Dock = System.Windows.Forms.DockStyle.Fill;
-            this.gridCrossings.Location = new System.Drawing.Point(0, 47);
-            this.gridCrossings.MultiSelect = false;
+            this.gridCrossings.Location = new System.Drawing.Point(0, 80);
+            this.gridCrossings.MultiSelect = true;
             this.gridCrossings.Name = "gridCrossings";
             this.gridCrossings.RowHeadersVisible = false;
-            this.gridCrossings.SelectionMode = System.Windows.Forms.DataGridViewSelectionMode.CellSelect;
-            this.gridCrossings.Size = new System.Drawing.Size(900, 503);
+            this.gridCrossings.SelectionMode = System.Windows.Forms.DataGridViewSelectionMode.FullRowSelect;
+            this.gridCrossings.Size = new System.Drawing.Size(900, 470);
             this.gridCrossings.TabIndex = 0;
             // 
             // btnRescan
@@ -99,6 +105,37 @@ namespace XingManager
             this.btnDelete.UseVisualStyleBackColor = true;
             this.btnDelete.Click += new System.EventHandler(this.btnDelete_Click);
             //
+            //
+            // btnMoveUp
+            //
+            this.btnMoveUp.Location = new System.Drawing.Point(306, 3);
+            this.btnMoveUp.Name = "btnMoveUp";
+            this.btnMoveUp.Size = new System.Drawing.Size(85, 32);
+            this.btnMoveUp.TabIndex = 3;
+            this.btnMoveUp.Text = "Move Up";
+            this.btnMoveUp.UseVisualStyleBackColor = true;
+            this.btnMoveUp.Click += new System.EventHandler(this.BtnMoveUpOnClick);
+            //
+            // btnMoveDown
+            //
+            this.btnMoveDown.Location = new System.Drawing.Point(397, 3);
+            this.btnMoveDown.Name = "btnMoveDown";
+            this.btnMoveDown.Size = new System.Drawing.Size(95, 32);
+            this.btnMoveDown.TabIndex = 4;
+            this.btnMoveDown.Text = "Move Down";
+            this.btnMoveDown.UseVisualStyleBackColor = true;
+            this.btnMoveDown.Click += new System.EventHandler(this.BtnMoveDownOnClick);
+            //
+            // btnRenumberFromList
+            //
+            this.btnRenumberFromList.Location = new System.Drawing.Point(498, 3);
+            this.btnRenumberFromList.Name = "btnRenumberFromList";
+            this.btnRenumberFromList.Size = new System.Drawing.Size(170, 32);
+            this.btnRenumberFromList.TabIndex = 5;
+            this.btnRenumberFromList.Text = "Renumber (List Order)";
+            this.btnRenumberFromList.UseVisualStyleBackColor = true;
+            this.btnRenumberFromList.Click += new System.EventHandler(this.BtnRenumberFromListOnClick);
+            //
             // btnRenumber
             //
             this.btnRenumber.Location = new System.Drawing.Point(306, 3);
@@ -115,7 +152,7 @@ namespace XingManager
             this.btnAddRncPolyline.Name = "btnAddRncPolyline";
             this.btnAddRncPolyline.Size = new System.Drawing.Size(90, 32);
             this.btnAddRncPolyline.TabIndex = 4;
-            this.btnAddRncPolyline.Text = "Add RNC PL";
+            this.btnAddRncPolyline.Text = "Create RNC Path";
             this.btnAddRncPolyline.UseVisualStyleBackColor = true;
             this.btnAddRncPolyline.Click += new System.EventHandler(this.btnAddRncPolyline_Click);
             //
@@ -206,6 +243,9 @@ namespace XingManager
             this.buttonPanel.Controls.Add(this.btnRescan);
             this.buttonPanel.Controls.Add(this.btnApply);
             this.buttonPanel.Controls.Add(this.btnDelete);
+            this.buttonPanel.Controls.Add(this.btnMoveUp);
+            this.buttonPanel.Controls.Add(this.btnMoveDown);
+            this.buttonPanel.Controls.Add(this.btnRenumberFromList);
             this.buttonPanel.Controls.Add(this.btnRenumber);
             this.buttonPanel.Controls.Add(this.btnAddRncPolyline);
             this.buttonPanel.Controls.Add(this.btnGeneratePage);
@@ -221,9 +261,9 @@ namespace XingManager
             this.buttonPanel.Dock = System.Windows.Forms.DockStyle.Top;
             this.buttonPanel.Location = new System.Drawing.Point(0, 0);
             this.buttonPanel.Name = "buttonPanel";
-            this.buttonPanel.Size = new System.Drawing.Size(900, 47);
+            this.buttonPanel.Size = new System.Drawing.Size(900, 80);
             this.buttonPanel.TabIndex = 1;
-            this.buttonPanel.WrapContents = false;
+            this.buttonPanel.WrapContents = true;
             //
             // lblUtmZone
             //

@@ -151,72 +151,6 @@ namespace XingManager.Services
             }
         }
 
-
-
-        /// <summary>
-        /// Updates only Crossing tables (Main + Page) and intentionally skips LAT/LONG tables.
-        /// This is used by the general Crossing duplicate resolver so it doesn't interfere with the LAT/LONG resolver.
-        /// </summary>
-        public void UpdateCrossingTables(Document doc, IList<CrossingRecord> records)
-        {
-            if (doc == null) throw new ArgumentNullException(nameof(doc));
-            if (records == null) throw new ArgumentNullException(nameof(records));
-
-            var db = doc.Database;
-            _ed = doc.Editor;
-            using (Logger.Scope(_ed, "update_crossing_tables", $"records={records.Count}"))
-            {
-                var byKey = records.ToDictionary(r => r.CrossingKey, r => r, StringComparer.OrdinalIgnoreCase);
-
-                using (doc.LockDocument())
-                using (var tr = db.TransactionManager.StartTransaction())
-                {
-                    var blockTable = (BlockTable)tr.GetObject(db.BlockTableId, OpenMode.ForRead);
-
-                    foreach (ObjectId btrId in blockTable)
-                    {
-                        var btr = (BlockTableRecord)tr.GetObject(btrId, OpenMode.ForRead);
-                        foreach (ObjectId entId in btr)
-                        {
-                            var table = tr.GetObject(entId, OpenMode.ForRead) as Table;
-                            if (table == null) continue;
-
-                            var type = IdentifyTable(table, tr);
-                            if (type != XingTableType.Main && type != XingTableType.Page)
-                                continue;
-
-                            var typeLabel = type.ToString().ToUpperInvariant();
-
-                            table.UpgradeOpen();
-                            var matched = 0;
-                            var updated = 0;
-
-                            try
-                            {
-                                switch (type)
-                                {
-                                    case XingTableType.Main:
-                                        UpdateMainTable(table, byKey, out matched, out updated);
-                                        break;
-                                    case XingTableType.Page:
-                                        UpdatePageTable(table, byKey, out matched, out updated);
-                                        break;
-                                }
-
-                                _factory.TagTable(tr, table, typeLabel);
-                                Logger.Info(_ed, $"table handle={entId.Handle} type={typeLabel} matched={matched} updated={updated}");
-                            }
-                            catch (Exception ex)
-                            {
-                                Logger.Warn(_ed, $"table handle={entId.Handle} type={typeLabel} err={ex.Message}");
-                            }
-                        }
-                    }
-
-                    tr.Commit();
-                }
-            }
-        }
         public void UpdateLatLongSourceTables(Document doc, IList<CrossingRecord> records)
         {
             if (doc == null) throw new ArgumentNullException(nameof(doc));
@@ -270,7 +204,7 @@ namespace XingManager.Services
                             // Try normal pass anyway
                             UpdateLatLongTable(table, byKey, out matched, out updated, rowIndexMap);
 
-                            // If nothing changed or itâ€™s clearly non-standard, try legacy row heuristics
+                            // If nothing changed or it’s clearly non-standard, try legacy row heuristics
                             if (updated == 0 || table.Columns.Count < 4)
                             {
                                 updated += UpdateLegacyLatLongRows(table, rowIndexMap);
@@ -437,7 +371,7 @@ namespace XingManager.Services
                 t.Cells[row, 2].TextString = rec.Description ?? string.Empty;
             }
 
-            // 6) Remove the Title row so thereâ€™s no extra thin row at the top
+            // 6) Remove the Title row so there’s no extra thin row at the top
             try { t.DeleteRows(0, 1); } catch { /* ignore if not supported */ }
 
             // After deletion, header is now row 0; ensure its formatting
@@ -535,7 +469,7 @@ namespace XingManager.Services
                 : titleOverride;
             var showTitle = includeTitleRow && !string.IsNullOrWhiteSpace(resolvedTitle);
             var hasSectionColumnHeaders = orderedRows.Any(r => r.IsColumnHeader);
-            var showColumnHeaders = includeColumnHeaders && !hasSectionColumnHeaders;
+                var showColumnHeaders = includeColumnHeaders && !hasSectionColumnHeaders;
 
             var table = new Table();
             table.SetDatabaseDefaults();
@@ -1877,7 +1811,7 @@ namespace XingManager.Services
 
             if (placed)
             {
-                // Force scale to 1 after placement (tableâ€‘level API if available, else perâ€‘content)
+                // Force scale to 1 after placement (table‑level API if available, else per‑content)
                 TrySetCellBlockScale(table, row, col, 1.0);
             }
 
@@ -1894,7 +1828,7 @@ namespace XingManager.Services
                 {
                     try
                     {
-                        // DO NOT autosize the cellâ€”keeps block at native scale
+                        // DO NOT autosize the cell—keeps block at native scale
                         miSet.Invoke(target, new object[] { btrId, /*adjustCell*/ false });
                     }
                     catch { return false; }
@@ -1944,24 +1878,24 @@ namespace XingManager.Services
             }
         }
 
-        // Turn OFF autoâ€‘scale/autoâ€‘fit flags that shrink the block (varies by release)
+        // Turn OFF auto‑scale/auto‑fit flags that shrink the block (varies by release)
         private static void TryDisableAutoScale(object target)
         {
             if (target == null) return;
 
-            // Properties weâ€™ve seen across versions
+            // Properties we’ve seen across versions
             var pAuto = target.GetType().GetProperty("AutoScale")
                      ?? target.GetType().GetProperty("IsAutoScale")
                      ?? target.GetType().GetProperty("AutoFit");
             if (pAuto != null && pAuto.CanWrite) { try { pAuto.SetValue(target, false, null); } catch { } }
 
-            // Methods weâ€™ve seen across versions
+            // Methods we’ve seen across versions
             var mAuto = target.GetType().GetMethod("SetAutoScale", new[] { typeof(bool) })
                      ?? target.GetType().GetMethod("SetAutoFit", new[] { typeof(bool) });
             if (mAuto != null) { try { mAuto.Invoke(target, new object[] { false }); } catch { } }
         }
 
-        // Try to set the block scale in the cell to a fixed value (tableâ€‘level API first)
+        // Try to set the block scale in the cell to a fixed value (table‑level API first)
         private static bool TrySetScaleOnTarget(object target, double sc)
         {
             if (target == null) return false;
@@ -2679,3 +2613,6 @@ namespace XingManager.Services
         }
     }
 }
+
+/////////////////////////////////////////////////////////////////////
+

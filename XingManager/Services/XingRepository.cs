@@ -1,12 +1,13 @@
+using Autodesk.AutoCAD.ApplicationServices;
+using Autodesk.AutoCAD.DatabaseServices;
+using Autodesk.AutoCAD.EditorInput;
+using Autodesk.AutoCAD.Geometry;
+using Autodesk.AutoCAD.Runtime;
 using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
 using System.Text.RegularExpressions;
-using Autodesk.AutoCAD.ApplicationServices;
-using Autodesk.AutoCAD.DatabaseServices;
-using Autodesk.AutoCAD.Geometry;
-using Autodesk.AutoCAD.Runtime;
 using XingManager.Models;
 
 namespace XingManager.Services
@@ -36,15 +37,25 @@ namespace XingManager.Services
         public ScanResult ScanCrossings()
         {
             var db = _doc.Database;
+            var ed = _doc.Editor;
             var records = new Dictionary<string, CrossingRecord>(StringComparer.OrdinalIgnoreCase);
             var contexts = new Dictionary<ObjectId, DuplicateResolver.InstanceContext>();
             var latLongRows = new List<LatLongRowInfo>();
 
+            Logger.Info(ed, "=== XingRepository.ScanCrossings START ===");
+
             using (var tr = db.TransactionManager.StartTransaction())
             {
                 // Collect extents of all tables in the drawing.
-                var tableExtents = new List<Extents3d>();
+                var tableExtents = new List<TableExtentInfo>();
+                var crossingTableRowsByTableId = new Dictionary<ObjectId, Dictionary<string, CrossingTableRowData>>();
+                var tableBubbleBlocks = new Dictionary<ObjectId, ObjectId>();
+                var tableOwnerBtrByTableId = new Dictionary<ObjectId, ObjectId>();
+                var tableHandleByTableId = new Dictionary<ObjectId, string>();
                 var btab = (BlockTable)tr.GetObject(db.BlockTableId, OpenMode.ForRead);
+
+                int totalTablesFound = 0;
+
                 foreach (ObjectId btrId in btab)
                 {
                     var btr = (BlockTableRecord)tr.GetObject(btrId, OpenMode.ForRead);
@@ -55,10 +66,21 @@ namespace XingManager.Services
                         var tbl = tr.GetObject(entId, OpenMode.ForRead) as Table;
                         if (tbl == null) continue;
 
+                        totalTablesFound++;
+                        int rows = 0, cols = 0;
+                        try { rows = tbl.Rows.Count; cols = tbl.Columns.Count; } catch { }
+
+                        Logger.Info(ed, $"SCAN: Found table {tbl.ObjectId.Handle}, rows={rows}, cols={cols}");
+
+                        // Track which layout/paperspace this table belongs to (for duplicate resolver labels)
+                        tableOwnerBtrByTableId[tbl.ObjectId] = btrId;
+                        try { tableHandleByTableId[tbl.ObjectId] = tbl.Handle.ToString(); } catch { /* ignore */ }
+
+
                         try
                         {
                             var ext = tbl.GeometricExtents;
-                            tableExtents.Add(ext);
+                            tableExtents.Add(new TableExtentInfo { TableId = tbl.ObjectId, Extents = ext });
                         }
                         catch
                         {
@@ -68,13 +90,22 @@ namespace XingManager.Services
                         try
                         {
                             CollectLatLongRows(tbl, latLongRows);
+
+                            var rowMap = CollectCrossingTableRowMap(tbl, ed);
+                            Logger.Info(ed, $"SCAN: Table {tbl.ObjectId.Handle} returned {rowMap.Count} crossing rows");
+                            if (rowMap.Count > 0)
+                            {
+                                crossingTableRowsByTableId[tbl.ObjectId] = rowMap;
+                            }
                         }
-                        catch
+                        catch (System.Exception ex)
                         {
-                            // ignore lat/long parsing errors
+                            Logger.Info(ed, $"SCAN: Table {tbl.ObjectId.Handle} threw exception: {ex.Message}");
                         }
                     }
                 }
+
+                Logger.Info(ed, $"SCAN: Total tables found={totalTablesFound}, crossingTableRowsByTableId.Count={crossingTableRowsByTableId.Count}");
 
                 // Build a map of layout BlockTableRecordId -> layout name.
                 var layoutDict = (DBDictionary)tr.GetObject(db.LayoutDictionaryId, OpenMode.ForRead);
@@ -110,16 +141,19 @@ namespace XingManager.Services
 
                         // Determine if this block is inside a table or on a paper-space layout.
                         bool isInTable = false;
+                        ObjectId tableId = ObjectId.Null;
                         try
                         {
                             var blkExt = br.GeometricExtents;
-                            foreach (var tblExt in tableExtents)
+                            foreach (var te in tableExtents)
                             {
+                                var tblExt = te.Extents;
                                 bool xOverlaps = blkExt.MinPoint.X <= tblExt.MaxPoint.X && blkExt.MaxPoint.X >= tblExt.MinPoint.X;
                                 bool yOverlaps = blkExt.MinPoint.Y <= tblExt.MaxPoint.Y && blkExt.MaxPoint.Y >= tblExt.MinPoint.Y;
                                 if (xOverlaps && yOverlaps)
                                 {
                                     isInTable = true;
+                                    tableId = te.TableId;
                                     break;
                                 }
                             }
@@ -179,8 +213,14 @@ namespace XingManager.Services
                             Lat = lat,
                             Long = lng,
                             Zone = zone,
-                            IgnoreForDuplicates = ignore
+                            IgnoreForDuplicates = ignore,
+                            IsTableInstance = isInTable
                         };
+
+                        if (isInTable && tableId != ObjectId.Null && crossingTableRowsByTableId.ContainsKey(tableId))
+                        {
+                            tableBubbleBlocks[entId] = tableId;
+                        }
 
                         // Prefer a model-space instance as canonical; otherwise choose first.
                         if (record.CanonicalInstance.IsNull &&
@@ -210,6 +250,14 @@ namespace XingManager.Services
                     }
                 }
 
+                // Apply table-row values into per-instance contexts so the duplicate resolver can
+                // surface mismatches between drawing blocks and table rows.
+                ApplyCrossingTableOverrides(tableBubbleBlocks, crossingTableRowsByTableId, records, contexts);
+
+                // Attach crossing table row sources to the corresponding records so mismatches with
+                // block/UI values can trigger the crossing duplicate resolver.
+                ApplyCrossingTableRowsToRecords(crossingTableRowsByTableId, tableOwnerBtrByTableId, tableHandleByTableId, layoutNames, records);
+
                 tr.Commit();
             }
 
@@ -218,6 +266,8 @@ namespace XingManager.Services
             var ordered = records.Values
                 .OrderBy(r => r, Comparer<CrossingRecord>.Create(CrossingRecord.CompareByCrossing))
                 .ToList();
+
+            Logger.Info(ed, $"=== XingRepository.ScanCrossings END: {ordered.Count} records ===");
 
             return new ScanResult
             {
@@ -823,6 +873,275 @@ namespace XingManager.Services
 
             var token = CrossingRecord.ParseCrossingNumber(value);
             return token.Number > 0;
+        }
+
+
+        private struct TableExtentInfo
+        {
+            public ObjectId TableId;
+            public Extents3d Extents;
+        }
+
+        private sealed class CrossingTableRowData
+        {
+            public string Owner = "";
+            public string Description = "";
+            public string Location = "";
+            public string DwgRef = "";
+            public bool HasOwner;
+            public bool HasLocation;
+            public bool HasDwgRef;
+            public int RowIndex;
+        }
+
+        private static Dictionary<string, CrossingTableRowData> CollectCrossingTableRowMap(Table table, Editor ed)
+        {
+            var map = new Dictionary<string, CrossingTableRowData>(StringComparer.OrdinalIgnoreCase);
+
+            if (table == null)
+            {
+                Logger.Info(ed, "  CollectCrossingTableRowMap: table is null");
+                return map;
+            }
+
+            // Exclude LAT/LONG tables; those are handled by the lat/long resolver.
+            if (IsLatLongTable(table))
+            {
+                Logger.Info(ed, "  CollectCrossingTableRowMap: Is LAT/LONG table, skipping");
+                return map;
+            }
+
+            int rowCount;
+            int colCount;
+            try
+            {
+                rowCount = table.Rows.Count;
+                colCount = table.Columns.Count;
+                Logger.Info(ed, $"  CollectCrossingTableRowMap: rows={rowCount}, cols={colCount}");
+            }
+            catch (System.Exception ex)
+            {
+                Logger.Info(ed, $"  CollectCrossingTableRowMap: Failed to get row/col count: {ex.Message}");
+                return map;
+            }
+
+            if (rowCount <= 0 || colCount < 2)
+            {
+                Logger.Info(ed, $"  CollectCrossingTableRowMap: Invalid dimensions (need rows>0, cols>=2), returning empty");
+                return map;
+            }
+
+            // Supported crossing table shapes:
+            //  - Main crossing table: 5 columns (XING / OWNER / DESCRIPTION / LOCATION / DWG_REF)
+            //  - Crossing page table: 3 columns (XING / OWNER / DESCRIPTION) -> LOCATION & DWG_REF are ignored when comparing
+            //  - Legacy (optional): 4 columns (XING / DESCRIPTION / LOCATION / DWG_REF) -> OWNER ignored when comparing
+            bool hasOwner = false;
+            bool hasLocation = false;
+            bool hasDwgRef = false;
+            int ownerCol = -1;
+            int descCol = -1;
+            int locCol = -1;
+            int dwgCol = -1;
+
+            if (colCount >= 5)
+            {
+                hasOwner = true; ownerCol = 1;
+                descCol = 2;
+                hasLocation = true; locCol = 3;
+                hasDwgRef = true; dwgCol = 4;
+                Logger.Info(ed, "  5+ col table: XING/OWNER/DESC/LOC/DWG");
+            }
+            else if (colCount == 3)
+            {
+                hasOwner = true; ownerCol = 1;
+                descCol = 2;
+                hasLocation = false;
+                hasDwgRef = false;
+                Logger.Info(ed, "  3-col table: XING/OWNER/DESC");
+            }
+            else if (colCount == 4)
+            {
+                // Legacy: no OWNER column
+                hasOwner = false;
+                descCol = 1;
+                hasLocation = true; locCol = 2;
+                hasDwgRef = true; dwgCol = 3;
+                Logger.Info(ed, "  4-col table: XING/DESC/LOC/DWG (legacy)");
+            }
+            else
+            {
+                Logger.Info(ed, $"  CollectCrossingTableRowMap: Unsupported column count {colCount}, returning empty");
+                return map;
+            }
+
+            int rowsAdded = 0;
+            for (int r = 0; r < rowCount; r++)
+            {
+                string crossing = NormalizeCrossingKey(TableSync.ResolveCrossingKey(table, r, 0));
+                Logger.Info(ed, $"    Row {r}: crossing='{crossing}'");
+
+                if (!LooksLikeCrossingValue(crossing))
+                {
+                    Logger.Info(ed, $"      REJECTED by LooksLikeCrossingValue");
+                    continue;
+                }
+
+                var rowData = new CrossingTableRowData
+                {
+                    RowIndex = r,
+                    HasOwner = hasOwner,
+                    HasLocation = hasLocation,
+                    HasDwgRef = hasDwgRef
+                };
+
+                if (hasOwner && ownerCol >= 0 && ownerCol < colCount)
+                    rowData.Owner = TableSync.ReadCellTextSafe(table, r, ownerCol) ?? string.Empty;
+
+                if (descCol >= 0 && descCol < colCount)
+                    rowData.Description = TableSync.ReadCellTextSafe(table, r, descCol) ?? string.Empty;
+
+                if (hasLocation && locCol >= 0 && locCol < colCount)
+                    rowData.Location = TableSync.ReadCellTextSafe(table, r, locCol) ?? string.Empty;
+
+                if (hasDwgRef && dwgCol >= 0 && dwgCol < colCount)
+                    rowData.DwgRef = TableSync.ReadCellTextSafe(table, r, dwgCol) ?? string.Empty;
+
+                map[crossing] = rowData;
+                rowsAdded++;
+                Logger.Info(ed, $"      ADDED to map (desc='{rowData.Description}')");
+            }
+
+            Logger.Info(ed, $"  CollectCrossingTableRowMap: Returning {rowsAdded} crossing rows");
+            return map;
+        }
+
+        private static void ApplyCrossingTableOverrides(
+            Dictionary<ObjectId, ObjectId> tableBubbleBlocks,
+            Dictionary<ObjectId, Dictionary<string, CrossingTableRowData>> crossingTableRowsByTableId,
+            Dictionary<string, CrossingRecord> records,
+            Dictionary<ObjectId, DuplicateResolver.InstanceContext> contexts)
+        {
+            if (tableBubbleBlocks == null || crossingTableRowsByTableId == null || records == null || contexts == null)
+                return;
+
+            foreach (var kvp in tableBubbleBlocks)
+            {
+                ObjectId blockId = kvp.Key;
+                ObjectId tableId = kvp.Value;
+
+                if (!contexts.TryGetValue(blockId, out var ctx) || ctx == null)
+                    continue;
+
+                string crossing = NormalizeCrossingKey(ctx.Crossing);
+                if (string.IsNullOrWhiteSpace(crossing))
+                    continue;
+
+                if (!records.TryGetValue(crossing, out var rec) || rec == null)
+                    continue;
+
+                if (!crossingTableRowsByTableId.TryGetValue(tableId, out var rowMap) || rowMap == null)
+                    continue;
+
+                if (!rowMap.TryGetValue(crossing, out var rowData) || rowData == null)
+                    continue;
+
+                // For table instances, compare using the cell text (B-D), not the bubble's own attributes.
+                ctx.Description = rowData.Description ?? string.Empty;
+                ctx.Location = rowData.HasLocation ? (rowData.Location ?? string.Empty) : (rec.Location ?? string.Empty);
+                ctx.DwgRef = rowData.HasDwgRef ? (rowData.DwgRef ?? string.Empty) : (rec.DwgRef ?? string.Empty);
+
+                // Keep non-table fields aligned to the record so we don't create false duplicates.
+                ctx.Owner = rowData.HasOwner ? (rowData.Owner ?? string.Empty) : (rec.Owner ?? string.Empty);
+                ctx.Zone = rec.Zone ?? string.Empty;
+                ctx.Lat = rec.Lat ?? string.Empty;
+                ctx.Long = rec.Long ?? string.Empty;
+
+                ctx.IgnoreForDuplicates = false;
+            }
+        }
+
+        private static void ApplyCrossingTableRowsToRecords(
+            IDictionary<ObjectId, Dictionary<string, CrossingTableRowData>> crossingTableRowsByTableId,
+            IDictionary<ObjectId, ObjectId> tableOwnerBtrByTableId,
+            IDictionary<ObjectId, string> tableHandleByTableId,
+            IDictionary<ObjectId, string> layoutNames,
+            IDictionary<string, CrossingRecord> records)
+        {
+            if (records == null)
+                return;
+
+            // Reset any previous scan's table sources
+            foreach (var rec in records.Values)
+            {
+                rec?.CrossingTableSources?.Clear();
+            }
+
+            if (crossingTableRowsByTableId == null || crossingTableRowsByTableId.Count == 0)
+                return;
+
+            foreach (var tableEntry in crossingTableRowsByTableId)
+            {
+                var tableId = tableEntry.Key;
+                var rowMap = tableEntry.Value;
+                if (rowMap == null || rowMap.Count == 0)
+                    continue;
+
+                // Build a helpful label for the resolver (which layout + table handle)
+                string layoutLabel = "Unknown";
+                if (tableOwnerBtrByTableId != null &&
+                    tableOwnerBtrByTableId.TryGetValue(tableId, out var ownerBtrId) &&
+                    layoutNames != null &&
+                    layoutNames.TryGetValue(ownerBtrId, out var ln) &&
+                    !string.IsNullOrWhiteSpace(ln))
+                {
+                    layoutLabel = ln;
+                }
+
+                string handleLabel = "";
+                if (tableHandleByTableId != null &&
+                    tableHandleByTableId.TryGetValue(tableId, out var handle) &&
+                    !string.IsNullOrWhiteSpace(handle))
+                {
+                    handleLabel = handle;
+                }
+
+                string sourceLabel = string.IsNullOrWhiteSpace(handleLabel)
+                    ? $"TABLE ({layoutLabel})"
+                    : $"TABLE ({layoutLabel}) #{handleLabel}";
+
+                foreach (var rowEntry in rowMap)
+                {
+                    var crossingKey = NormalizeCrossingKey(rowEntry.Key);
+                    if (string.IsNullOrWhiteSpace(crossingKey))
+                        continue;
+
+                    if (!records.TryGetValue(crossingKey, out var rec) || rec == null)
+                        continue;
+
+                    var row = rowEntry.Value;
+                    if (row == null)
+                        continue;
+
+                    rec.CrossingTableSources.Add(new CrossingRecord.CrossingTableSource
+                    {
+                        SourceLabel = sourceLabel,
+                        Owner = row.Owner ?? string.Empty,
+                        Description = row.Description ?? string.Empty,
+                        Location = row.Location ?? string.Empty,
+                        DwgRef = row.DwgRef ?? string.Empty,
+                        HasOwner = row.HasOwner,
+                        HasLocation = row.HasLocation,
+                        HasDwgRef = row.HasDwgRef,
+                        TableId = tableId,
+                        RowIndex = row.RowIndex
+                    });
+                }
+            }
+        }
+
+        private static string NormalizeCrossingKey(string raw)
+        {
+            return string.IsNullOrWhiteSpace(raw) ? string.Empty : raw.Trim().ToUpperInvariant();
         }
 
         internal sealed class LatLongRowInfo

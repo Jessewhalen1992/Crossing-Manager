@@ -64,8 +64,9 @@ namespace XingManager.Services
             };
 
             var rows = recordList.Count + 1;
-            table.NumRows = rows;
-            table.NumColumns = 5;
+            // NumRows/NumColumns are obsolete in newer AutoCAD APIs.
+            // Use SetSize(rows, cols) to stay forward-compatible.
+            table.SetSize(rows, 5);
 
             table.SetRowHeight(25.0);
             table.Columns[0].Width = 43.5;
@@ -114,8 +115,9 @@ namespace XingManager.Services
             };
 
             var rows = filtered.Count + 1;
-            table.NumRows = Math.Max(1, rows);
-            table.NumColumns = 3;
+            // NumRows/NumColumns are obsolete in newer AutoCAD APIs.
+            // Use SetSize(rows, cols) to stay forward-compatible.
+            table.SetSize(Math.Max(1, rows), 3);
             table.SetRowHeight(25.0);
             table.Columns[0].Width = 43.5;
             table.Columns[1].Width = 144.5;
@@ -195,3 +197,6 @@ namespace XingManager.Services
         }
     }
 }
+
+/////////////////////////////////////////////////////////////////////
+
