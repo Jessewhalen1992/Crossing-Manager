@@ -13,7 +13,7 @@ namespace XingManager.Services
         {
             if (t == null || row < 0 || col < 0 || string.IsNullOrWhiteSpace(tag)) return string.Empty;
 
-            // 1) (row, col, tag, Ã¢â‚¬Â¦)
+            // 1) (row, col, tag, ...)
             var v = TryCallGetBlockAttr(t, row, col, tag);
             if (!string.IsNullOrWhiteSpace(v)) return v.Trim();
 
@@ -28,7 +28,17 @@ namespace XingManager.Services
                 idx++;
             }
 
-            // 3) discover tags from the cellÃ¢â‚¬â„¢s block definition and try those
+            // 3) try content-level accessors (some releases expose block attributes on content objects)
+            foreach (var content in contents)
+            {
+                v = TryCallGetBlockAttrOnContent(content, tag);
+                if (!string.IsNullOrWhiteSpace(v)) return v.Trim();
+
+                v = TryCallGetBlockAttrOnContentById(t, content);
+                if (!string.IsNullOrWhiteSpace(v)) return v.Trim();
+            }
+
+            // 4) discover tags from the cell's block definition and try those
             foreach (var discovered in EnumerateCellBlockTags(t, row, col))
             {
                 v = TryCallGetBlockAttr(t, row, col, discovered);
@@ -40,6 +50,15 @@ namespace XingManager.Services
                     v = TryCallGetBlockAttrIndexed(t, row, col, idx, discovered);
                     if (!string.IsNullOrWhiteSpace(v)) return v.Trim();
                     idx++;
+                }
+
+                foreach (var content in contents)
+                {
+                    v = TryCallGetBlockAttrOnContent(content, discovered);
+                    if (!string.IsNullOrWhiteSpace(v)) return v.Trim();
+
+                    v = TryCallGetBlockAttrOnContentById(t, content);
+                    if (!string.IsNullOrWhiteSpace(v)) return v.Trim();
                 }
             }
 
@@ -71,7 +90,7 @@ namespace XingManager.Services
                 var p = mi.GetParameters();
                 if (p.Length < 3) continue; // need at least (row, col, tag)
 
-                // expect (row, col, string tag, Ã¢â‚¬Â¦)
+                // expect (row, col, string tag, ...)
                 if (typeof(string).IsAssignableFrom(p[2].ParameterType))
                 {
                     var args = new object[p.Length];
@@ -97,7 +116,7 @@ namespace XingManager.Services
                 var p = mi.GetParameters();
                 if (p.Length < 4) continue; // need (row, col, contentIndex, tag)
 
-                // expect (row, col, int contentIndex, string tag, Ã¢â‚¬Â¦)
+                // expect (row, col, int contentIndex, string tag, ...)
                 if (typeof(string).IsAssignableFrom(p[3].ParameterType))
                 {
                     var args = new object[p.Length];
@@ -113,6 +132,79 @@ namespace XingManager.Services
             }
             DebugLog($"table_cell_probe reflection_miss mode=indexed row={row} col={col} idx={contentIndex} tag={tag}");
             return string.Empty;
+        }
+
+        private static string TryCallGetBlockAttrOnContent(object content, string tag)
+        {
+            if (content == null || string.IsNullOrWhiteSpace(tag)) return string.Empty;
+
+            var mi = content.GetType().GetMethod("GetBlockAttributeValue", new[] { typeof(string) });
+            if (mi == null) return string.Empty;
+
+            try
+            {
+                var value = mi.Invoke(content, new object[] { tag });
+                return Convert.ToString(value);
+            }
+            catch (Exception ex)
+            {
+                DebugLog($"table_cell_probe reflection_fail mode=content method=GetBlockAttributeValue err={ex.Message}");
+                return string.Empty;
+            }
+        }
+
+        private static string TryCallGetBlockAttrOnContentById(Table table, object content)
+        {
+            if (table == null || content == null) return string.Empty;
+
+            var mi = content.GetType().GetMethod("GetBlockAttributeValue", new[] { typeof(ObjectId) });
+            if (mi == null) return string.Empty;
+
+            var tr = table.Database?.TransactionManager?.TopTransaction as Transaction;
+            if (tr == null) return string.Empty;
+
+            var btrId = TryGetBlockTableRecordIdFromContent(content);
+            if (btrId == ObjectId.Null || !btrId.IsValid) return string.Empty;
+
+            BlockTableRecord btr = null;
+            try { btr = tr.GetObject(btrId, OpenMode.ForRead) as BlockTableRecord; } catch { }
+            if (btr == null) return string.Empty;
+
+            foreach (ObjectId eid in btr)
+            {
+                AttributeDefinition ad = null;
+                try { ad = tr.GetObject(eid, OpenMode.ForRead) as AttributeDefinition; } catch { }
+                if (ad == null) continue;
+
+                try
+                {
+                    var value = mi.Invoke(content, new object[] { ad.ObjectId });
+                    var text = Convert.ToString(value);
+                    if (!string.IsNullOrWhiteSpace(text)) return text;
+                }
+                catch (Exception ex)
+                {
+                    DebugLog($"table_cell_probe reflection_fail mode=content_by_id method=GetBlockAttributeValue err={ex.Message}");
+                }
+            }
+
+            return string.Empty;
+        }
+
+        private static ObjectId TryGetBlockTableRecordIdFromContent(object content)
+        {
+            if (content == null) return ObjectId.Null;
+
+            var btrProp = content.GetType().GetProperty("BlockTableRecordId", BindingFlags.Public | BindingFlags.Instance);
+            if (btrProp == null) return ObjectId.Null;
+
+            try
+            {
+                if (btrProp.GetValue(content, null) is ObjectId id) return id;
+            }
+            catch { }
+
+            return ObjectId.Null;
         }
 
         private static bool TryConvert(object value, ParameterInfo p, out object converted)
