@@ -1822,11 +1822,16 @@ namespace XingManager
 
             // Index current records by normalized X key ("3" -> "X3")
             var byX = new Dictionary<string, CrossingRecord>(StringComparer.OrdinalIgnoreCase);
+            var byOwnerDesc = new Dictionary<string, CrossingRecord>(StringComparer.OrdinalIgnoreCase);
             foreach (var r in _records)
             {
                 var key = NormalizeXKey(r.Crossing);
                 if (!string.IsNullOrWhiteSpace(key) && !byX.ContainsKey(key))
                     byX[key] = r;
+
+                var ownerDescKey = NormalizeOwnerDescKey(r.Owner, r.Description);
+                if (!string.IsNullOrWhiteSpace(ownerDescKey) && !byOwnerDesc.ContainsKey(ownerDescKey))
+                    byOwnerDesc[ownerDescKey] = r;
             }
 
             using (doc.LockDocument())
@@ -1884,6 +1889,7 @@ namespace XingManager
 
                             matched++;
                             bool changed = false;
+                            bool rowHandled = false;
 
                             // Never touch Column 0 (bubble)
                             if (kind == TableSync.XingTableType.Main)
@@ -1895,6 +1901,27 @@ namespace XingManager
                             }
                             else if (kind == TableSync.XingTableType.Page)
                             {
+                                if (table.Columns.Count == 3)
+                                {
+                                    var owner = ReadTableCellText(table, row, 1);
+                                    var desc = ReadTableCellText(table, row, 2);
+                                    var ownerDescKey = NormalizeOwnerDescKey(owner, desc);
+
+                                    if (!string.IsNullOrWhiteSpace(ownerDescKey) &&
+                                        byOwnerDesc.TryGetValue(ownerDescKey, out var ownerRec) &&
+                                        ownerRec != null)
+                                    {
+                                        changed |= TrySetCrossingCellValue(table, row, 0, ownerRec.Crossing);
+                                        rowHandled = true;
+                                    }
+                                }
+
+                                if (rowHandled)
+                                {
+                                    if (changed) updated++;
+                                    continue;
+                                }
+
                                 changed |= SetCellIfChanged(table, row, 1, rec.Owner);
                                 changed |= SetCellIfChanged(table, row, 2, rec.Description);
                             }
@@ -2561,6 +2588,26 @@ namespace XingManager
             if (m.Success) return "X" + m.Groups[1].Value;
 
             return up;
+        }
+
+        private static string NormalizeOwnerDescKey(string owner, string desc)
+        {
+            var ownerKey = NormalizeOwnerDescValue(owner);
+            var descKey = NormalizeOwnerDescValue(desc);
+
+            if (string.IsNullOrWhiteSpace(ownerKey) && string.IsNullOrWhiteSpace(descKey))
+                return string.Empty;
+
+            return $"{ownerKey}|{descKey}";
+        }
+
+        private static string NormalizeOwnerDescValue(string value)
+        {
+            if (string.IsNullOrWhiteSpace(value)) return string.Empty;
+
+            var cleaned = StripMTextFormatting(value);
+            cleaned = Regex.Replace(cleaned, @"\s+", " ").Trim();
+            return cleaned.ToUpperInvariant();
         }
 
         private static bool IsExplicitXKey(string s)
