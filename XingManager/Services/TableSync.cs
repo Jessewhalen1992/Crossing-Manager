@@ -53,6 +53,7 @@ namespace XingManager.Services
             "XING",
             "X_NO",
             "XING_NO",
+            "XINGNO",
             "XING#",
             "XINGNUM",
             "XING_NUM",
@@ -63,6 +64,7 @@ namespace XingManager.Services
             "XNUMBER",
             "NUMBER",
             "INDEX",
+            // Some drawings use NO as the XING bubble tag.
             "NO",
             "LABEL"
         };
@@ -1186,7 +1188,8 @@ namespace XingManager.Services
                 var rowDesc = ReadNorm(table, row, 2);
 
                 // Page tables (3 columns) should treat OWNER+DESCRIPTION as the row identity,
-                // so swap only the X# when renumbering.
+                // so swap only the X# when renumbering. Duplicate OWNER/DESCRIPTION values are
+                // expected, so we accept the first match to keep X# in sync.
                 if (!string.IsNullOrEmpty(rowOwner) || !string.IsNullOrEmpty(rowDesc))
                 {
                     record = FindRecordByPageColumns(table, row, records);
@@ -1229,6 +1232,7 @@ namespace XingManager.Services
                 if (columnCount > 1 && ValueDiffers(ReadCellText(table, row, 1), desiredOwner)) rowUpdated = true;
                 if (columnCount > 2 && ValueDiffers(ReadCellText(table, row, 2), desiredDescription)) rowUpdated = true;
 
+                // Always update the XING bubble even if OWNER/DESCRIPTION already match.
                 if (columnCount > 0) SetCellCrossingValue(table, row, 0, desiredCrossing);
 
                 Cell ownerCell = null;
@@ -2542,10 +2546,10 @@ namespace XingManager.Services
             var candidates = records.Where(r =>
                 string.Equals(Norm(r.Owner), owner, StringComparison.Ordinal) &&
                 string.Equals(Norm(r.Description), desc, StringComparison.Ordinal)).ToList();
-            if (candidates.Count == 1) return candidates[0];
+            if (candidates.Count > 0) return candidates[0];
 
             candidates = records.Where(r => string.Equals(Norm(r.Description), desc, StringComparison.Ordinal)).ToList();
-            return candidates.Count == 1 ? candidates[0] : null;
+            return candidates.Count > 0 ? candidates[0] : null;
         }
 
         private static CrossingRecord FindRecordByLatLongColumns(Table t, int row, IEnumerable<CrossingRecord> records)
