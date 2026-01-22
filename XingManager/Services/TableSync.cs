@@ -1563,7 +1563,19 @@ namespace XingManager.Services
         private static string ReadCellText(Cell cell)
         {
             if (cell == null) return string.Empty;
-            try { return cell.TextString ?? string.Empty; } catch { return string.Empty; }
+            string text = string.Empty;
+            try { text = cell.TextString ?? string.Empty; } catch { text = string.Empty; }
+
+            if (!string.IsNullOrWhiteSpace(text))
+                return text;
+
+            foreach (var run in EnumerateCellContentText(cell))
+            {
+                if (!string.IsNullOrWhiteSpace(run))
+                    return run;
+            }
+
+            return string.Empty;
         }
 
         // Returns cleaned text runs from the cell's contents
