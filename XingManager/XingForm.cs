@@ -1447,6 +1447,8 @@ namespace XingManager
 
                         // We don't depend on IdentifyTable here: this pass is meant to catch legacy/headerless tables too.
                         // If IdentifyTable *does* work, great; if not, we still handle by row.
+                        var cols = table.Columns.Count;
+                        if (!(cols == 4 || cols >= 6)) continue;   // only LAT/LONG layouts
                         table.UpgradeOpen();
 
                         bool anyRowUpdated = false;
@@ -1611,7 +1613,7 @@ namespace XingManager
                 }
             }
 
-            return latCol >= 0 && longCol >= 0 && latCol < cols && longCol < cols;
+            return latCol >= 0 && longCol >= 0 && latCol < cols && longCol < cols && latCol != longCol;
         }
 
 
@@ -5031,4 +5033,3 @@ namespace XingManager
 /////////////////////////////////////////////////////////////////////
 
 /////////////////////////////////////////////////////////////////////
-

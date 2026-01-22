@@ -1059,7 +1059,11 @@ namespace XingManager.Services
                                 var text = Convert.ToString(value.Value, CultureInfo.InvariantCulture);
                                 if (string.Equals(text, "MAIN", StringComparison.OrdinalIgnoreCase)) return XingTableType.Main;
                                 if (string.Equals(text, "PAGE", StringComparison.OrdinalIgnoreCase)) return XingTableType.Page;
-                                if (string.Equals(text, "LATLONG", StringComparison.OrdinalIgnoreCase)) return XingTableType.LatLong;
+                                if (string.Equals(text, "LATLONG", StringComparison.OrdinalIgnoreCase))
+                                {
+                                    var cols = table.Columns.Count;
+                                    if (cols == 4 || cols >= 6) return XingTableType.LatLong;
+                                }
                             }
                         }
                     }
