@@ -1200,6 +1200,7 @@ namespace XingManager.Services
                 var descriptionKey = NormalizeDescriptionKey(descriptionText);
 
                 CrossingRecord record = null;
+                var matchedByRowIdentity = false;
 
                 // 1) Prefer stable row->record mapping, but only if it still matches this row's description.
                 if (rowIndexMap != null && rowIndexMap.TryGetValue(row, out var mapRecord))
@@ -1208,6 +1209,7 @@ namespace XingManager.Services
                         string.Equals(NormalizeDescriptionKey(mapRecord.Description), descriptionKey, StringComparison.Ordinal))
                     {
                         record = mapRecord;
+                        matchedByRowIdentity = true;
                     }
                 }
 
@@ -1215,6 +1217,7 @@ namespace XingManager.Services
                 if (record == null)
                 {
                     record = FindRecordByLatLongColumns(table, row, recordList);
+                    matchedByRowIdentity = record != null;
                 }
 
                 // 3) If description is unique, it is safe to match on that alone.
@@ -1223,6 +1226,7 @@ namespace XingManager.Services
                     if (descriptionMap.TryGetValue(descriptionKey, out var list) && list.Count == 1)
                     {
                         record = list[0];
+                        matchedByRowIdentity = true;
                     }
                 }
 
@@ -1257,8 +1261,10 @@ namespace XingManager.Services
                 if (columnCount > 0 && ValueDiffers(rawKey, desiredCrossing)) rowUpdated = true;
 
                 if (columnCount > 0) SetCellCrossingValue(table, row, 0, desiredCrossing);
-                // ZONE/LAT/LONG/DWG: preserve existing unless record provides a non-empty value
-                if (zoneColumn >= 0 && !string.IsNullOrWhiteSpace(desiredZone))
+                // ZONE/LAT/LONG/DWG: preserve existing unless record provides a non-empty value.
+                // When a row was matched by its own description/coordinates, avoid overwriting those fields
+                // so renumbering only updates the ID.
+                if (!matchedByRowIdentity && zoneColumn >= 0 && !string.IsNullOrWhiteSpace(desiredZone))
                 {
                     if (ValueDiffers(ReadCellText(table, row, zoneColumn), desiredZone)) rowUpdated = true;
                     Cell zoneCell = null;
@@ -1266,7 +1272,7 @@ namespace XingManager.Services
                     SetCellValue(zoneCell, desiredZone);
                 }
 
-                if (latColumn >= 0 && !string.IsNullOrWhiteSpace(desiredLat))
+                if (!matchedByRowIdentity && latColumn >= 0 && !string.IsNullOrWhiteSpace(desiredLat))
                 {
                     if (ValueDiffers(ReadCellText(table, row, latColumn), desiredLat)) rowUpdated = true;
                     Cell latCell = null;
@@ -1274,7 +1280,7 @@ namespace XingManager.Services
                     SetCellValue(latCell, desiredLat);
                 }
 
-                if (longColumn >= 0 && !string.IsNullOrWhiteSpace(desiredLong))
+                if (!matchedByRowIdentity && longColumn >= 0 && !string.IsNullOrWhiteSpace(desiredLong))
                 {
                     if (ValueDiffers(ReadCellText(table, row, longColumn), desiredLong)) rowUpdated = true;
                     Cell longCell = null;
@@ -1282,7 +1288,7 @@ namespace XingManager.Services
                     SetCellValue(longCell, desiredLong);
                 }
 
-                if (dwgColumn >= 0 && !string.IsNullOrWhiteSpace(desiredDwg))
+                if (!matchedByRowIdentity && dwgColumn >= 0 && !string.IsNullOrWhiteSpace(desiredDwg))
                 {
                     if (ValueDiffers(ReadCellText(table, row, dwgColumn), desiredDwg)) rowUpdated = true;
                     Cell dwgCell = null;
