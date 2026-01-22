@@ -2132,6 +2132,31 @@ namespace XingManager.Services
             return true;
         }
 
+        internal static bool HasMainHeaderRow(Table table)
+        {
+            if (table == null || table.Columns.Count < 5) return false;
+            return HasHeaderRow(table, 5, IsMainHeader);
+        }
+
+        internal static bool HasPageHeaderRow(Table table)
+        {
+            if (table == null || table.Columns.Count < 3) return false;
+            return HasHeaderRow(table, 3, IsPageHeader);
+        }
+
+        internal static bool HasLatLongHeaderRow(Table table)
+        {
+            if (table == null) return false;
+
+            if (table.Columns.Count >= 6 && HasHeaderRow(table, 6, IsLatLongHeader))
+                return true;
+
+            if (table.Columns.Count >= 4 && HasHeaderRow(table, 4, IsLatLongHeader))
+                return true;
+
+            return false;
+        }
+
         private static bool HasHeaderRow(Table table, int columnCount, Func<List<string>, bool> predicate)
         {
             int headerRowIndex;
