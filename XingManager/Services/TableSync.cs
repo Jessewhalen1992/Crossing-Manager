@@ -1816,6 +1816,22 @@ namespace XingManager.Services
             return false;
         }
 
+        private static ObjectId TryGetBlockTableRecordIdFromContent(object content)
+        {
+            if (content == null) return ObjectId.Null;
+
+            var prop = content.GetType().GetProperty("BlockTableRecordId");
+            if (prop == null) return ObjectId.Null;
+
+            try
+            {
+                if (prop.GetValue(content, null) is ObjectId id) return id;
+            }
+            catch { }
+
+            return ObjectId.Null;
+        }
+
         private static IEnumerable<int> EnumerateCellContentIndexes(Table table, int row, int col)
         {
             var cell = GetTableCell(table, row, col);
@@ -2356,7 +2372,11 @@ namespace XingManager.Services
             // 2) If the cell currently hosts a block, do NOT overwrite it with text.
             Cell cell = null;
             try { cell = t.Cells[row, col]; } catch { cell = null; }
-            if (CellHasBlockContent(cell)) return;
+            if (CellHasBlockContent(cell))
+            {
+                if (TrySetBlockAttributeValueOnContent(t, cell, crossingText)) return;
+                return;
+            }
 
             // 3) Fallback to plain text when no block
             try
@@ -2364,6 +2384,62 @@ namespace XingManager.Services
                 if (cell != null) cell.TextString = crossingText ?? string.Empty;
             }
             catch { }
+        }
+
+        private static bool TrySetBlockAttributeValueOnContent(Table table, Cell cell, string value)
+        {
+            if (table == null || cell == null) return false;
+
+            var tr = table.Database?.TransactionManager?.TopTransaction as Transaction;
+            foreach (var content in EnumerateCellContentObjects(cell))
+            {
+                if (TrySetBlockAttributeValueOnTarget(content, value, tr)) return true;
+            }
+
+            return false;
+        }
+
+        private static bool TrySetBlockAttributeValueOnTarget(object target, string value, Transaction tr)
+        {
+            if (target == null) return false;
+
+            var miByTag = target.GetType().GetMethod("SetBlockAttributeValue", new[] { typeof(string), typeof(string) });
+            if (miByTag != null)
+            {
+                foreach (var tag in CrossingAttributeTags)
+                {
+                    try
+                    {
+                        miByTag.Invoke(target, new object[] { tag, value ?? string.Empty });
+                        return true;
+                    }
+                    catch { }
+                }
+            }
+
+            var miById = target.GetType().GetMethod("SetBlockAttributeValue", new[] { typeof(ObjectId), typeof(string) });
+            if (miById == null || tr == null) return false;
+
+            var btrId = TryGetBlockTableRecordIdFromContent(target);
+            if (btrId == ObjectId.Null || !btrId.IsValid) return false;
+
+            var btr = tr.GetObject(btrId, OpenMode.ForRead) as BlockTableRecord;
+            if (btr == null) return false;
+
+            foreach (ObjectId id in btr)
+            {
+                var ad = tr.GetObject(id, OpenMode.ForRead) as AttributeDefinition;
+                if (ad == null) continue;
+
+                try
+                {
+                    miById.Invoke(target, new object[] { ad.ObjectId, value ?? string.Empty });
+                    return true;
+                }
+                catch { }
+            }
+
+            return false;
         }
 
         private static void SetCellValue(Cell cell, string value)
