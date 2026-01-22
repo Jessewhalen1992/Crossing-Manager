@@ -11742,13 +11742,18 @@ namespace XingManager
 
             // Map current X -> new X (X1..Xn).
             var currentToNew = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            var nextIndex = 1;
             for (int i = 0; i < _records.Count; i++)
             {
+                if (!IsExplicitXKey(_records[i].Crossing))
+                    continue;
+
                 string oldKey = NormalizeXKey(_records[i].Crossing);
                 if (string.IsNullOrWhiteSpace(oldKey))
                     continue;
 
-                string newKey = $"X{i + 1}";
+                string newKey = $"X{nextIndex}";
+                nextIndex++;
                 if (!currentToNew.ContainsKey(oldKey))
                     currentToNew[oldKey] = newKey;
             }
@@ -11783,10 +11788,15 @@ namespace XingManager
                 }
             }
 
-            // Apply new X#s in list order.
+            // Apply new X#s in list order for explicit X crossings only.
+            nextIndex = 1;
             for (int i = 0; i < _records.Count; i++)
             {
-                _records[i].Crossing = $"X{i + 1}";
+                if (!IsExplicitXKey(_records[i].Crossing))
+                    continue;
+
+                _records[i].Crossing = $"X{nextIndex}";
+                nextIndex++;
             }
 
             _isDirty = true;
@@ -11878,6 +11888,9 @@ namespace XingManager
                             string raw = null;
                             try { raw = TableSync.ResolveCrossingKey(table, r, col); }
                             catch { raw = null; }
+
+                            if (!IsExplicitXKey(raw))
+                                continue;
 
                             var oldKey = NormalizeXKey(raw);
                             if (string.IsNullOrWhiteSpace(oldKey))
@@ -13479,6 +13492,13 @@ namespace XingManager
             return up;
         }
 
+        private static bool IsExplicitXKey(string s)
+        {
+            if (string.IsNullOrWhiteSpace(s)) return false;
+            var up = Regex.Replace(s.ToUpperInvariant(), @"\s+", "");
+            return Regex.IsMatch(up, @"^X0*\d+$");
+        }
+
         private static string ReadTableCellText(Table t, int row, int col)
         {
             if (t == null || row < 0 || col < 0) return string.Empty;
@@ -13990,6 +14010,9 @@ namespace XingManager
                 {
                     foreach (var rec in scan.Records)
                     {
+                        if (!IsExplicitXKey(rec.Crossing))
+                            continue;
+
                         foreach (var id in rec.AllInstances)
                         {
                             var br = tr.GetObject(id, OpenMode.ForRead) as BlockReference;
@@ -16130,5 +16153,3 @@ namespace XingManager
         }
     }
 }
-
-
