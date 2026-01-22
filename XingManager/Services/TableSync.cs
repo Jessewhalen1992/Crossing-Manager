@@ -1175,15 +1175,33 @@ namespace XingManager.Services
                 var key = NormalizeKeyForLookup(rawKey);
                 CrossingRecord record = null;
 
-                if (!string.IsNullOrEmpty(key) && byKey != null)
+                var rowOwner = ReadNorm(table, row, 1);
+                var rowDesc = ReadNorm(table, row, 2);
+
+                // Page tables (3 columns) should treat OWNER+DESCRIPTION as the row identity,
+                // so swap only the X# when renumbering.
+                if (!string.IsNullOrEmpty(rowOwner) || !string.IsNullOrEmpty(rowDesc))
+                {
+                    record = FindRecordByPageColumns(table, row, records);
+                }
+
+                if (record == null && !string.IsNullOrEmpty(key) && byKey != null)
                 {
                     if (!byKey.TryGetValue(key, out record))
                     {
                         record = byKey.Values.FirstOrDefault(r => CrossingRecord.CompareCrossingKeys(r.Crossing, key) == 0);
                     }
-                }
 
-                if (record == null) record = FindRecordByPageColumns(table, row, records);
+                    if (record != null && (!string.IsNullOrEmpty(rowOwner) || !string.IsNullOrEmpty(rowDesc)))
+                    {
+                        var ownerMatches = string.IsNullOrEmpty(rowOwner) || string.Equals(Norm(record.Owner), rowOwner, StringComparison.Ordinal);
+                        var descMatches = string.IsNullOrEmpty(rowDesc) || string.Equals(Norm(record.Description), rowDesc, StringComparison.Ordinal);
+                        if (!ownerMatches || !descMatches)
+                        {
+                            record = null;
+                        }
+                    }
+                }
 
                 if (record == null)
                 {
