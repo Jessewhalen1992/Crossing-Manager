@@ -939,6 +939,10 @@ namespace XingManager
                         if (table == null || table.Rows == null || table.Columns == null)
                             continue;
 
+                        var kind = _tableSync.IdentifyTable(table, tr);
+                        if (!IsLikelyCrossingTableForRenumber(table, kind))
+                            continue;
+
                         bool tableTouched = false;
 
                         // We assume the crossing bubble is in column 0 for these legacy/layout tables.
@@ -978,6 +982,54 @@ namespace XingManager
 
                 tr.Commit();
             }
+        }
+
+        private bool IsLikelyCrossingTableForRenumber(Table table, TableSync.XingTableType kind)
+        {
+            if (table == null)
+                return false;
+
+            if (kind == TableSync.XingTableType.Main ||
+                kind == TableSync.XingTableType.Page ||
+                kind == TableSync.XingTableType.LatLong)
+            {
+                return true;
+            }
+
+            // For legacy/layout variants not identified by TableSync:
+            // require multiple explicit X# entries in column 0.
+            return TableHasExplicitXRows(table, minCount: 2);
+        }
+
+        private static bool TableHasExplicitXRows(Table table, int minCount)
+        {
+            if (table == null || table.Columns == null || table.Columns.Count <= 0 || minCount <= 0)
+                return false;
+
+            int found = 0;
+            int maxRows = Math.Min(table.Rows.Count, 200);
+            for (int row = 0; row < maxRows; row++)
+            {
+                string raw;
+                try { raw = TableSync.ResolveCrossingKey(table, row, 0); }
+                catch { raw = string.Empty; }
+
+                if (!IsExplicitXKey(raw))
+                    continue;
+
+                found++;
+                if (found >= minCount)
+                    return true;
+            }
+
+            return false;
+        }
+
+        private sealed class TableRowSnapshot
+        {
+            public int Number;
+            public string Crossing;
+            public string[] Values;
         }
 
         private static readonly string[] CrossingBubbleAttributeTags =
@@ -1405,6 +1457,7 @@ namespace XingManager
                 ReplaceLatLongInAnyTableRobust(snapshot);                                                   // NEW
 
                 // 6) Visual refresh of any tables we just touched (kept)
+                SortCrossingRowsInAllApplicableTables();
                 ForceRegenAllCrossingTablesInDwg();                                                         // kept  :contentReference[oaicite:8]{index=8}
 
                 // 7) Re-read from DWG and allow the apply-to-drawing pass to push any resolver results.
@@ -1424,6 +1477,120 @@ namespace XingManager
             }
         }
 
+
+        private void SortCrossingRowsInAllApplicableTables()
+        {
+            var doc = _doc ?? AcadApp.DocumentManager.MdiActiveDocument;
+            if (doc == null) return;
+
+            using (doc.LockDocument())
+            using (var tr = doc.TransactionManager.StartTransaction())
+            {
+                var bt = (BlockTable)tr.GetObject(doc.Database.BlockTableId, OpenMode.ForRead);
+                foreach (ObjectId btrId in bt)
+                {
+                    var btr = (BlockTableRecord)tr.GetObject(btrId, OpenMode.ForRead);
+                    foreach (ObjectId entId in btr)
+                    {
+                        var table = tr.GetObject(entId, OpenMode.ForRead) as Table;
+                        if (table == null) continue;
+
+                        var kind = _tableSync.IdentifyTable(table, tr);
+                        if (!IsLikelyCrossingTableForRenumber(table, kind))
+                            continue;
+
+                        table.UpgradeOpen();
+                        if (!SortCrossingRowsInTable(table, kind))
+                            continue;
+
+                        try { table.GenerateLayout(); } catch { }
+                        NormalizeTableBorders(table);
+                        try { table.RecordGraphicsModified(true); } catch { }
+                    }
+                }
+
+                tr.Commit();
+            }
+        }
+
+        private static bool SortCrossingRowsInTable(Table table, TableSync.XingTableType kind)
+        {
+            if (table == null || table.Columns == null || table.Columns.Count <= 0)
+                return false;
+
+            int startRow = 0;
+            if (kind == TableSync.XingTableType.LatLong)
+            {
+                try { startRow = TableSync.FindLatLongDataStartRow(table); }
+                catch { startRow = 0; }
+                if (startRow < 0) startRow = 0;
+            }
+
+            var targetRows = new List<int>();
+            var sourceRows = new List<TableRowSnapshot>();
+            int colCount = table.Columns.Count;
+
+            for (int row = startRow; row < table.Rows.Count; row++)
+            {
+                string raw;
+                try { raw = TableSync.ResolveCrossingKey(table, row, 0); }
+                catch { raw = string.Empty; }
+
+                if (!IsExplicitXKey(raw))
+                    continue;
+
+                var normalized = NormalizeXKey(raw);
+                var number = CrossingRecord.ParseCrossingNumber(normalized).Number;
+
+                var values = new string[Math.Max(0, colCount - 1)];
+                for (int col = 1; col < colCount; col++)
+                    values[col - 1] = ReadTableCellText(table, row, col);
+
+                targetRows.Add(row);
+                sourceRows.Add(new TableRowSnapshot
+                {
+                    Number = number,
+                    Crossing = normalized,
+                    Values = values
+                });
+            }
+
+            if (sourceRows.Count < 2)
+                return false;
+
+            var sortedRows = sourceRows
+                .OrderBy(r => r.Number)
+                .ThenBy(r => r.Crossing, StringComparer.OrdinalIgnoreCase)
+                .ToList();
+
+            bool alreadySorted = true;
+            for (int i = 0; i < sourceRows.Count; i++)
+            {
+                if (!ReferenceEquals(sourceRows[i], sortedRows[i]))
+                {
+                    alreadySorted = false;
+                    break;
+                }
+            }
+
+            if (alreadySorted)
+                return false;
+
+            bool changed = false;
+            for (int i = 0; i < targetRows.Count; i++)
+            {
+                int row = targetRows[i];
+                var snapshot = sortedRows[i];
+
+                if (TrySetCrossingCellValue(table, row, 0, snapshot.Crossing))
+                    changed = true;
+
+                for (int col = 1; col < colCount; col++)
+                    changed |= SetCellIfChanged(table, row, col, snapshot.Values[col - 1]);
+            }
+
+            return changed;
+        }
 
         // NEW: Update LAT/LONG in ANY table row that matches by X, even with no headings.
         //      - Reads X with TableSync.ResolveCrossingKey (robust).

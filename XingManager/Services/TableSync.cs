@@ -1079,9 +1079,19 @@ namespace XingManager.Services
                 }
             }
 
-            // Header-free heuristics: MAIN=5 cols, PAGE=3 cols, LATLONG=4 cols (+ sanity)
-            if (table.Columns.Count == 5) return XingTableType.Main;
-            if (table.Columns.Count == 3) return XingTableType.Page;
+            // Header-free heuristics:
+            // Keep this strict so unrelated tables with matching column counts are not misclassified.
+            if (table.Columns.Count == 5)
+            {
+                if (HasMainHeaderRow(table) || HasExplicitCrossingKeys(table, minCount: 2))
+                    return XingTableType.Main;
+            }
+
+            if (table.Columns.Count == 3)
+            {
+                if (HasPageHeaderRow(table) || HasExplicitCrossingKeys(table, minCount: 2))
+                    return XingTableType.Page;
+            }
 
             if ((table.Columns.Count == 4 || table.Columns.Count >= 6) && table.Rows.Count >= 1)
             {
@@ -1091,6 +1101,32 @@ namespace XingManager.Services
             }
 
             return XingTableType.Unknown;
+        }
+
+        private static bool HasExplicitCrossingKeys(Table table, int minCount)
+        {
+            if (table == null || table.Columns.Count <= 0 || minCount <= 0)
+                return false;
+
+            int found = 0;
+            int maxRows = Math.Min(table.Rows.Count, 200);
+
+            for (int row = 0; row < maxRows; row++)
+            {
+                var raw = ResolveCrossingKey(table, row, 0);
+                if (string.IsNullOrWhiteSpace(raw))
+                    continue;
+
+                var normalized = NormalizeCrossingForMap(raw);
+                if (Regex.IsMatch(normalized ?? string.Empty, @"^X0*\d+$"))
+                {
+                    found++;
+                    if (found >= minCount)
+                        return true;
+                }
+            }
+
+            return false;
         }
 
         // =====================================================================
