@@ -2,6 +2,7 @@ using System;
 using System.Globalization;
 using System.IO;
 using System.Linq;
+using System.Reflection;
 using System.Text.RegularExpressions;
 using Autodesk.AutoCAD.ApplicationServices;
 using Autodesk.AutoCAD.DatabaseServices;
@@ -110,15 +111,40 @@ namespace XingManager.Services
                             layout.BlockTableRecordId = clonedBtrId;
                         }
 
+                        var oldName = layout.LayoutName;
                         actualName = EnsureUniqueLayoutName(targetLayoutDict, layout.LayoutName, desiredName);
-                        if (!string.Equals(layout.LayoutName, actualName, StringComparison.OrdinalIgnoreCase))
+                        if (!string.Equals(oldName, actualName, StringComparison.OrdinalIgnoreCase))
                         {
-                            layout.LayoutName = actualName;
+                            // Prefer LayoutManager rename so AutoCAD updates all internal layout references/fields.
+                            bool renamed = false;
+                            try
+                            {
+                                var lm = LayoutManager.Current;
+                                if (lm != null)
+                                {
+                                    lm.RenameLayout(oldName, actualName);
+                                    renamed = true;
+                                }
+                            }
+                            catch
+                            {
+                                renamed = false;
+                            }
+
+                            if (!renamed)
+                            {
+                                layout.LayoutName = actualName;
+                            }
                         }
                     }
 
                     targetTr.Commit();
                 }
+            }
+
+            if (!clonedLayoutId.IsNull)
+            {
+                TryRefreshLayoutFieldValues(db, clonedLayoutId);
             }
 
             return clonedLayoutId;
@@ -153,10 +179,128 @@ namespace XingManager.Services
             try
             {
                 layoutManager.CurrentLayout = layoutName;
+
+                try
+                {
+                    using (var tr = doc.Database.TransactionManager.StartTransaction())
+                    {
+                        var layoutDict = (DBDictionary)tr.GetObject(doc.Database.LayoutDictionaryId, OpenMode.ForRead);
+                        if (layoutDict.Contains(layoutName))
+                        {
+                            var layoutId = layoutDict.GetAt(layoutName);
+                            tr.Commit();
+                            TryRefreshLayoutFieldValues(doc.Database, layoutId);
+                        }
+                    }
+                }
+                catch
+                {
+                    // best effort
+                }
             }
             catch (System.Exception ex)
             {
                 CommandLogger.Log(doc.Editor, $"Unable to switch layout: {ex.Message}");
+            }
+        }
+
+        private static void TryRefreshLayoutFieldValues(Database db, ObjectId layoutId)
+        {
+            if (db == null || layoutId.IsNull)
+                return;
+
+            try
+            {
+                using (var tr = db.TransactionManager.StartTransaction())
+                {
+                    var layout = tr.GetObject(layoutId, OpenMode.ForRead) as Layout;
+                    if (layout == null)
+                    {
+                        tr.Commit();
+                        return;
+                    }
+
+                    var btr = tr.GetObject(layout.BlockTableRecordId, OpenMode.ForRead) as BlockTableRecord;
+                    if (btr != null)
+                    {
+                        foreach (ObjectId entId in btr)
+                        {
+                            var ent = tr.GetObject(entId, OpenMode.ForRead) as Entity;
+                            if (ent == null) continue;
+
+                            TryEvaluateObjectFields(ent);
+
+                            var br = ent as BlockReference;
+                            if (br == null || br.AttributeCollection == null) continue;
+
+                            foreach (ObjectId attId in br.AttributeCollection)
+                            {
+                                var attRef = tr.GetObject(attId, OpenMode.ForRead) as AttributeReference;
+                                if (attRef == null) continue;
+
+                                TryEvaluateObjectFields(attRef);
+                                try { attRef.AdjustAlignment(db); } catch { }
+                            }
+                        }
+                    }
+
+                    tr.Commit();
+                }
+            }
+            catch
+            {
+                // best effort
+            }
+
+            // Best-effort DB-level field evaluation across AutoCAD versions.
+            TryInvokeNoArg(db, "EvaluateFields");
+
+            try { Application.DocumentManager.MdiActiveDocument?.Editor?.Regen(); } catch { }
+            try { Application.UpdateScreen(); } catch { }
+        }
+
+        private static void TryEvaluateObjectFields(DBObject obj)
+        {
+            if (obj == null) return;
+
+            try
+            {
+                if (!obj.IsWriteEnabled)
+                    obj.UpgradeOpen();
+            }
+            catch { }
+
+            TryInvokeNoArg(obj, "EvaluateFields");
+            TryInvokeNoArg(obj, "EvaluateField");
+
+            var ent = obj as Entity;
+            if (ent != null)
+            {
+                try { ent.RecordGraphicsModified(true); } catch { }
+            }
+        }
+
+        private static void TryInvokeNoArg(object target, string methodName)
+        {
+            if (target == null || string.IsNullOrWhiteSpace(methodName)) return;
+
+            try
+            {
+                var mi = target.GetType().GetMethod(
+                    methodName,
+                    BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic,
+                    null,
+                    Type.EmptyTypes,
+                    null);
+
+                if (mi != null)
+                {
+                    mi.Invoke(target, null);
+                }
+            }
+            catch
+            {
+                // best effort
             }
         }
 
@@ -520,4 +664,3 @@ namespace XingManager.Services
 }
 
 /////////////////////////////////////////////////////////////////////
-

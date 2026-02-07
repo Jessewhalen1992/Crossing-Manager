@@ -310,10 +310,9 @@ namespace XingManager.Services
                 tr.Commit();
             }
 
-            // Automatic table updates were previously removed (see historical comment: "IMPORTANT: removed automatic table updates here.");
-            // Restore that behavior so every attribute write immediately syncs the LAT/LONG and other crossing tables without extra commands.
-            tableSync.UpdateLatLongSourceTables(_doc, records);
-            tableSync.UpdateAllTables(_doc, records);
+            // Keep repository writes limited to block attributes.
+            // Table synchronization is orchestrated by higher-level flows (e.g., ApplyToDrawing)
+            // to preserve table-specific matching rules and update order.
         }
 
         public ObjectId InsertCrossing(CrossingRecord record, Point3d position)
