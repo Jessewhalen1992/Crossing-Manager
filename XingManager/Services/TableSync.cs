@@ -74,6 +74,27 @@ namespace XingManager.Services
         private static readonly Regex MTextFormattingCommandRegex = new Regex("\\\\[^;\\\\{}]*;", RegexOptions.Compiled);
         private static readonly Regex MTextResidualCommandRegex = new Regex("\\\\[^{}]", RegexOptions.Compiled);
         private static readonly Regex MTextSpecialCodeRegex = new Regex("%%[^\\s]+", RegexOptions.Compiled);
+        private static readonly Regex LayoutDwgRefRegex = new Regex("^\\s*XING\\s*#\\s*(?<ref>.+?)\\s*$", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+        private static readonly Regex LayoutCloneSuffixRegex = new Regex("^(?<base>.+)-\\d+$", RegexOptions.Compiled);
+        private static readonly Regex MeridianLocationRegex = new Regex(
+            "(?:N\\.?\\s*[EW]\\.?|S\\.?\\s*[EW]\\.?)" +
+            "(?:\\s+|\\\\P|\\\\~)*1/4(?:\\s+|\\\\P|\\\\~)*SEC\\." +
+            "(?:\\s+|\\\\P|\\\\~)*\\d+\\s*,\\s*TWP\\.(?:\\s+|\\\\P|\\\\~)*\\d+" +
+            "\\s*,\\s*RGE\\.(?:\\s+|\\\\P|\\\\~)*\\d+\\s*,\\s*W\\." +
+            "(?:\\s+|\\\\P|\\\\~)*\\d+(?:\\s+|\\\\P|\\\\~)*M\\.",
+            RegexOptions.IgnoreCase | RegexOptions.Compiled);
+        private static readonly LayoutUtils LocationFormatter = new LayoutUtils();
+
+        private sealed class TableLayoutContext
+        {
+            public string LayoutName { get; set; } = string.Empty;
+
+            public string DwgRef { get; set; } = string.Empty;
+
+            public HashSet<string> LocationKeys { get; } = new HashSet<string>(StringComparer.Ordinal);
+
+            public bool HasFilters => !string.IsNullOrWhiteSpace(DwgRef) || LocationKeys.Count > 0;
+        }
 
         private readonly TableFactory _factory;
         private Editor _ed;
@@ -137,11 +158,14 @@ namespace XingManager.Services
                                         UpdateMainTable(table, byKey, out matched, out updated);
                                         break;
                                     case XingTableType.Page:
-                                        UpdatePageTable(table, byKey, out matched, out updated);
+                                        var pageRowIndexMap = BuildPageRowIndexMap(table.ObjectId, byKey?.Values);
+                                        var pageContext = BuildTableLayoutContext(table);
+                                        UpdatePageTable(table, byKey, out matched, out updated, pageRowIndexMap, pageContext);
                                         break;
                                     case XingTableType.LatLong:
                                         var rowIndexMap = BuildLatLongRowIndexMap(table.ObjectId, byKey?.Values);
-                                        UpdateLatLongTable(table, byKey, out matched, out updated, rowIndexMap);
+                                        var latLongContext = BuildTableLayoutContext(table);
+                                        UpdateLatLongTable(table, byKey, out matched, out updated, rowIndexMap, latLongContext);
                                         break;
                                 }
 
@@ -208,7 +232,9 @@ namespace XingManager.Services
                                         UpdateMainTable(table, byKey, out matched, out updated);
                                         break;
                                     case XingTableType.Page:
-                                        UpdatePageTable(table, byKey, out matched, out updated);
+                                        var pageRowIndexMap = BuildPageRowIndexMap(table.ObjectId, byKey?.Values);
+                                        var pageContext = BuildTableLayoutContext(table);
+                                        UpdatePageTable(table, byKey, out matched, out updated, pageRowIndexMap, pageContext);
                                         break;
                                 }
 
@@ -264,6 +290,7 @@ namespace XingManager.Services
 
                     var identifiedType = IdentifyTable(table, tr);
                     var rowIndexMap = BuildLatLongRowIndexMap(table.ObjectId, byKey?.Values);
+                    var latLongContext = BuildTableLayoutContext(table);
 
                     int matched = 0, updated = 0;
 
@@ -272,12 +299,12 @@ namespace XingManager.Services
                         if (identifiedType == XingTableType.LatLong)
                         {
                             // Normal header-driven updater (program-generated tables)
-                            UpdateLatLongTable(table, byKey, out matched, out updated, rowIndexMap);
+                            UpdateLatLongTable(table, byKey, out matched, out updated, rowIndexMap, latLongContext);
                         }
                         else
                         {
                             // Try normal pass anyway
-                            UpdateLatLongTable(table, byKey, out matched, out updated, rowIndexMap);
+                            UpdateLatLongTable(table, byKey, out matched, out updated, rowIndexMap, latLongContext);
 
                             // If nothing changed or itâ€™s clearly non-standard, try legacy row heuristics
                             if (updated == 0 || table.Columns.Count < 4)
@@ -1205,30 +1232,45 @@ namespace XingManager.Services
             RefreshTable(table);
         }
 
-        private void UpdatePageTable(Table table, IDictionary<string, CrossingRecord> byKey, out int matched, out int updated)
+        private void UpdatePageTable(
+            Table table,
+            IDictionary<string, CrossingRecord> byKey,
+            out int matched,
+            out int updated,
+            IDictionary<int, CrossingRecord> rowIndexMap = null,
+            TableLayoutContext layoutContext = null)
         {
             matched = 0;
             updated = 0;
             if (table == null) return;
 
             var columnCount = table.Columns.Count;
-            var records = byKey?.Values ?? Enumerable.Empty<CrossingRecord>();
+            var records = (byKey?.Values ?? Enumerable.Empty<CrossingRecord>())
+                .Where(r => r != null)
+                .ToList();
 
-            for (var row = 0; row < table.Rows.Count; row++)
+            var scopedRecords = FilterRecordsByLayoutContext(records, layoutContext);
+            if (scopedRecords.Count == 0)
+                scopedRecords = records;
+
+            var dataStartRow = GetDataStartRow(table, Math.Min(columnCount, 3), IsPageHeader);
+            if (dataStartRow < 0) dataStartRow = 0;
+
+            var usedScopedKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var scopedCursor = 0;
+
+            for (var row = dataStartRow; row < table.Rows.Count; row++)
             {
                 var rawKey = ResolveCrossingKey(table, row, 0);
                 var key = NormalizeKeyForLookup(rawKey);
-                CrossingRecord record = null;
-
                 var rowOwner = ReadNorm(table, row, 1);
                 var rowDesc = ReadNorm(table, row, 2);
+                var hasRowData = !string.IsNullOrEmpty(key) || !string.IsNullOrEmpty(rowOwner) || !string.IsNullOrEmpty(rowDesc);
+                CrossingRecord record = null;
 
-                // Page tables (3 columns) should treat OWNER+DESCRIPTION as the row identity,
-                // so swap only the X# when renumbering. Duplicate OWNER/DESCRIPTION values are
-                // expected, so we accept the first match to keep X# in sync.
-                if (!string.IsNullOrEmpty(rowOwner) || !string.IsNullOrEmpty(rowDesc))
+                if (rowIndexMap != null && rowIndexMap.TryGetValue(row, out var rowMapped) && rowMapped != null)
                 {
-                    record = FindRecordByPageColumns(table, row, records);
+                    record = rowMapped;
                 }
 
                 if (record == null && !string.IsNullOrEmpty(key) && byKey != null)
@@ -1237,25 +1279,42 @@ namespace XingManager.Services
                     {
                         record = byKey.Values.FirstOrDefault(r => CrossingRecord.CompareCrossingKeys(r.Crossing, key) == 0);
                     }
+                }
 
-                    if (record != null && (!string.IsNullOrEmpty(rowOwner) || !string.IsNullOrEmpty(rowDesc)))
+                if (record != null && layoutContext != null && layoutContext.HasFilters && !RecordMatchesLayoutContext(record, layoutContext))
+                {
+                    record = null;
+                }
+
+                if (record == null && scopedRecords.Count > 0 && hasRowData)
+                {
+                    if (!string.IsNullOrEmpty(key))
                     {
-                        var ownerMatches = string.IsNullOrEmpty(rowOwner) || string.Equals(Norm(record.Owner), rowOwner, StringComparison.Ordinal);
-                        var descMatches = string.IsNullOrEmpty(rowDesc) || string.Equals(Norm(record.Description), rowDesc, StringComparison.Ordinal);
-                        if (!ownerMatches || !descMatches)
-                        {
-                            record = null;
-                        }
+                        record = scopedRecords.FirstOrDefault(r =>
+                            CrossingRecord.CompareCrossingKeys(r.Crossing, key) == 0 ||
+                            string.Equals(NormalizeKeyForLookup(r.Crossing), key, StringComparison.OrdinalIgnoreCase));
+                    }
+
+                    if (record == null)
+                    {
+                        record = TakeNextScopedRecord(scopedRecords, usedScopedKeys, ref scopedCursor);
                     }
                 }
 
                 if (record == null)
                 {
-                    Logger.Debug(_ed, $"table handle={table.ObjectId.Handle} row={row} status=no_match key={rawKey}");
+                    if (hasRowData)
+                    {
+                        Logger.Debug(_ed, $"table handle={table.ObjectId.Handle} row={row} status=no_match key={rawKey}");
+                    }
                     continue;
                 }
 
-                var logKey = !string.IsNullOrEmpty(key) ? key : (rawKey ?? string.Empty);
+                MarkScopedRecordUsed(record, usedScopedKeys);
+
+                var logKey = !string.IsNullOrEmpty(key)
+                    ? key
+                    : (!string.IsNullOrEmpty(rawKey) ? rawKey : (record.Crossing ?? string.Empty));
                 matched++;
 
                 var desiredCrossing = (record.Crossing ?? string.Empty).Trim();
@@ -1293,7 +1352,8 @@ namespace XingManager.Services
             IDictionary<string, CrossingRecord> byKey,
             out int matched,
             out int updated,
-            IDictionary<int, CrossingRecord> rowIndexMap = null)
+            IDictionary<int, CrossingRecord> rowIndexMap = null,
+            TableLayoutContext layoutContext = null)
         {
             matched = 0;
             updated = 0;
@@ -1302,9 +1362,9 @@ namespace XingManager.Services
             var columnCount = table.Columns.Count;
             var records = byKey?.Values ?? Enumerable.Empty<CrossingRecord>();
             var recordList = records.Where(r => r != null).ToList();
-
-            var crossDescMap = BuildCrossingDescriptionMap(recordList);
-            var descriptionMap = BuildDescriptionMap(recordList);
+            var scopedRecords = FilterRecordsByLayoutContext(recordList, layoutContext);
+            if (scopedRecords.Count == 0)
+                scopedRecords = recordList;
 
             var dataRow = FindLatLongDataStartRow(table);
             if (dataRow < 0) dataRow = 0;
@@ -1325,54 +1385,49 @@ namespace XingManager.Services
 
                 var rawKey = ResolveCrossingKey(table, row, 0);
                 var key = NormalizeKeyForLookup(rawKey);
-
-                // IMPORTANT:
-                // - For LAT/LONG tables, the row identity is the cell contents (description + coordinates),
-                //   NOT the bubble value. The bubble is only used to read the existing X# for comparison/update.
-                var descriptionText = ReadCellTextSafe(table, row, 1);
-                var descriptionKey = NormalizeDescriptionKey(descriptionText);
+                var rowLat = latColumn >= 0 ? ReadNorm(table, row, latColumn) : string.Empty;
+                var rowLong = longColumn >= 0 ? ReadNorm(table, row, longColumn) : string.Empty;
+                var hasCoordinates = !string.IsNullOrWhiteSpace(rowLat) && !string.IsNullOrWhiteSpace(rowLong);
 
                 CrossingRecord record = null;
 
-                // 1) Prefer stable row->record mapping, but only if it still matches this row's description.
+                // 1) Prefer stable row->record mapping from scan sources.
                 if (rowIndexMap != null && rowIndexMap.TryGetValue(row, out var mapRecord))
                 {
-                    if (string.IsNullOrEmpty(descriptionKey) ||
-                        string.Equals(NormalizeDescriptionKey(mapRecord.Description), descriptionKey, StringComparison.Ordinal))
-                    {
-                        record = mapRecord;
-                    }
+                    record = mapRecord;
                 }
 
-                // 2) Primary match = table cell contents (description + lat/long [+ zone/dwg])
-                if (record == null)
+                // 2) Primary match by LAT/LONG (+ optional zone/dwg).
+                if (record == null && hasCoordinates)
                 {
-                    record = FindRecordByLatLongColumns(table, row, recordList);
+                    record = FindRecordByLatLongColumns(table, row, scopedRecords, key);
                 }
 
-                // 3) If description is unique, it is safe to match on that alone.
-                if (record == null && !string.IsNullOrEmpty(descriptionKey))
+                // 3) Fallback to all records if context-scoped set had no coordinate match.
+                if (record == null && hasCoordinates && !ReferenceEquals(scopedRecords, recordList))
                 {
-                    if (descriptionMap.TryGetValue(descriptionKey, out var list) && list.Count == 1)
-                    {
-                        record = list[0];
-                    }
+                    record = FindRecordByLatLongColumns(table, row, recordList, key);
                 }
 
-                // 4) Last resort: use existing X# from the bubble, but ONLY if it matches the row description.
-                if (record == null && !string.IsNullOrEmpty(key) && byKey.TryGetValue(key, out var keyed))
+                // 4) Last resort: existing X# in the bubble.
+                if (record == null && !string.IsNullOrEmpty(key) && byKey != null && byKey.TryGetValue(key, out var keyed))
                 {
-                    if (string.IsNullOrEmpty(descriptionKey) ||
-                        string.Equals(NormalizeDescriptionKey(keyed.Description), descriptionKey, StringComparison.Ordinal))
+                    if (layoutContext == null || !layoutContext.HasFilters || RecordMatchesLayoutContext(keyed, layoutContext))
                     {
                         record = keyed;
                     }
                 }
 
+                if (record == null && !string.IsNullOrEmpty(key) && byKey != null)
+                {
+                    record = byKey.Values.FirstOrDefault(r =>
+                        CrossingRecord.CompareCrossingKeys(r.Crossing, key) == 0 &&
+                        (layoutContext == null || !layoutContext.HasFilters || RecordMatchesLayoutContext(r, layoutContext)));
+                }
+
                 if (record == null)
                 {
-                    // Logger.Debug in this project requires (Editor, message).
-                    Logger.Debug(_ed, $"Table {table.ObjectId.Handle}: no match for lat/long row {row} (x='{rawKey}', desc='{descriptionText}')");
+                    Logger.Debug(_ed, $"Table {table.ObjectId.Handle}: no match for lat/long row {row} (x='{rawKey}', lat='{rowLat}', long='{rowLong}')");
                     continue;
                 }
                 var logKey = !string.IsNullOrEmpty(key) ? key : (!string.IsNullOrEmpty(rawKey) ? rawKey : (record.Crossing ?? string.Empty));
@@ -1501,6 +1556,295 @@ namespace XingManager.Services
                         .Select(s => new { Source = s, Record = r }))
                 .GroupBy(x => x.Source.RowIndex)
                 .ToDictionary(g => g.Key, g => g.First().Record);
+        }
+
+        private static IDictionary<int, CrossingRecord> BuildPageRowIndexMap(
+            ObjectId tableId,
+            IEnumerable<CrossingRecord> records)
+        {
+            if (records == null)
+                return new Dictionary<int, CrossingRecord>();
+
+            return records
+                .Where(r => r != null)
+                .SelectMany(
+                    r => (r.CrossingTableSources ?? new List<CrossingRecord.CrossingTableSource>())
+                        .Where(s => s != null && !s.TableId.IsNull && s.TableId == tableId && s.RowIndex >= 0)
+                        .Select(s => new { Source = s, Record = r }))
+                .GroupBy(x => x.Source.RowIndex)
+                .ToDictionary(g => g.Key, g => g.First().Record);
+        }
+
+        private static TableLayoutContext BuildTableLayoutContext(Table table)
+        {
+            var context = new TableLayoutContext();
+            if (table == null || table.Database == null)
+                return context;
+
+            var tr = table.Database.TransactionManager?.TopTransaction as Transaction;
+            if (tr == null)
+                return context;
+
+            BlockTableRecord owner = null;
+            try { owner = tr.GetObject(table.OwnerId, OpenMode.ForRead, false) as BlockTableRecord; }
+            catch { owner = null; }
+
+            if (owner == null)
+                return context;
+
+            try
+            {
+                var layout = tr.GetObject(owner.LayoutId, OpenMode.ForRead, false) as Layout;
+                context.LayoutName = layout?.LayoutName ?? string.Empty;
+                context.DwgRef = TryExtractDwgRefFromLayoutName(context.LayoutName);
+            }
+            catch { }
+
+            foreach (var text in EnumerateLayoutText(owner, tr))
+            {
+                foreach (var key in ExtractLocationKeys(text))
+                {
+                    if (!string.IsNullOrEmpty(key))
+                        context.LocationKeys.Add(key);
+                }
+            }
+
+            return context;
+        }
+
+        private static IEnumerable<string> EnumerateLayoutText(BlockTableRecord owner, Transaction tr)
+        {
+            if (owner == null || tr == null)
+                yield break;
+
+            foreach (ObjectId entId in owner)
+            {
+                Entity entity = null;
+                try { entity = tr.GetObject(entId, OpenMode.ForRead, false) as Entity; }
+                catch { entity = null; }
+
+                if (entity == null)
+                    continue;
+
+                if (entity is DBText dbText)
+                {
+                    if (!string.IsNullOrWhiteSpace(dbText.TextString))
+                        yield return dbText.TextString;
+                    continue;
+                }
+
+                if (entity is MText mText)
+                {
+                    if (!string.IsNullOrWhiteSpace(mText.Text))
+                        yield return mText.Text;
+                    else if (!string.IsNullOrWhiteSpace(mText.Contents))
+                        yield return mText.Contents;
+                    continue;
+                }
+
+                if (entity is BlockReference br && br.AttributeCollection != null)
+                {
+                    foreach (ObjectId attId in br.AttributeCollection)
+                    {
+                        AttributeReference att = null;
+                        try { att = tr.GetObject(attId, OpenMode.ForRead, false) as AttributeReference; }
+                        catch { att = null; }
+
+                        if (att == null)
+                            continue;
+
+                        if (att.IsMTextAttribute && att.MTextAttribute != null)
+                        {
+                            if (!string.IsNullOrWhiteSpace(att.MTextAttribute.Text))
+                                yield return att.MTextAttribute.Text;
+                            else if (!string.IsNullOrWhiteSpace(att.MTextAttribute.Contents))
+                                yield return att.MTextAttribute.Contents;
+                        }
+                        else if (!string.IsNullOrWhiteSpace(att.TextString))
+                        {
+                            yield return att.TextString;
+                        }
+                    }
+                }
+            }
+        }
+
+        private static string TryExtractDwgRefFromLayoutName(string layoutName)
+        {
+            if (string.IsNullOrWhiteSpace(layoutName))
+                return string.Empty;
+
+            var match = LayoutDwgRefRegex.Match(layoutName);
+            if (!match.Success)
+                return string.Empty;
+
+            return NormalizeDwgRefForLookup(match.Groups["ref"]?.Value);
+        }
+
+        private static string NormalizeDwgRefForLookup(string value)
+        {
+            var normalized = NormalizeKeyForLookup(value);
+            return string.IsNullOrWhiteSpace(normalized) ? string.Empty : normalized;
+        }
+
+        private static List<CrossingRecord> FilterRecordsByLayoutContext(
+            IEnumerable<CrossingRecord> records,
+            TableLayoutContext context)
+        {
+            var list = (records ?? Enumerable.Empty<CrossingRecord>())
+                .Where(r => r != null)
+                .ToList();
+
+            if (context == null || !context.HasFilters)
+                return list;
+
+            return list
+                .Where(r => RecordMatchesLayoutContext(r, context))
+                .OrderBy(r => r, Comparer<CrossingRecord>.Create(CrossingRecord.CompareByCrossing))
+                .ToList();
+        }
+
+        private static bool RecordMatchesLayoutContext(CrossingRecord record, TableLayoutContext context)
+        {
+            if (record == null)
+                return false;
+
+            if (context == null || !context.HasFilters)
+                return true;
+
+            if (!string.IsNullOrWhiteSpace(context.DwgRef))
+            {
+                var recordDwg = NormalizeDwgRefForLookup(record.DwgRef);
+                if (!string.Equals(recordDwg, context.DwgRef, StringComparison.OrdinalIgnoreCase))
+                {
+                    var suffixMatch = LayoutCloneSuffixRegex.Match(context.DwgRef);
+                    var baseRef = suffixMatch.Success
+                        ? NormalizeDwgRefForLookup(suffixMatch.Groups["base"]?.Value)
+                        : string.Empty;
+
+                    if (string.IsNullOrEmpty(baseRef) ||
+                        !string.Equals(recordDwg, baseRef, StringComparison.OrdinalIgnoreCase))
+                    {
+                        return false;
+                    }
+                }
+            }
+
+            if (context.LocationKeys.Count > 0)
+            {
+                var locationKeys = BuildLocationKeyCandidates(record.Location);
+                if (locationKeys.Count == 0)
+                    return false;
+
+                if (!locationKeys.Any(k => context.LocationKeys.Contains(k)))
+                    return false;
+            }
+
+            return true;
+        }
+
+        private static IEnumerable<string> ExtractLocationKeys(string text)
+        {
+            if (string.IsNullOrWhiteSpace(text))
+                yield break;
+
+            var cleaned = StripMTextFormatting(text);
+            if (string.IsNullOrWhiteSpace(cleaned))
+                yield break;
+
+            foreach (Match match in MeridianLocationRegex.Matches(cleaned))
+            {
+                var key = NormalizeLocationKey(match.Value);
+                if (!string.IsNullOrEmpty(key))
+                    yield return key;
+            }
+        }
+
+        private static List<string> BuildLocationKeyCandidates(string location)
+        {
+            var keys = new HashSet<string>(StringComparer.Ordinal);
+            var direct = NormalizeLocationKey(location);
+            if (!string.IsNullOrEmpty(direct))
+                keys.Add(direct);
+
+            if (!string.IsNullOrWhiteSpace(location))
+            {
+                try
+                {
+                    if (LocationFormatter.TryFormatMeridianLocation(location, out var formatted))
+                    {
+                        var formattedKey = NormalizeLocationKey(formatted);
+                        if (!string.IsNullOrEmpty(formattedKey))
+                            keys.Add(formattedKey);
+                    }
+                }
+                catch { }
+            }
+
+            return keys.ToList();
+        }
+
+        private static string NormalizeLocationKey(string value)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+                return string.Empty;
+
+            var cleaned = StripMTextFormatting(value).Trim();
+            if (string.IsNullOrEmpty(cleaned))
+                return string.Empty;
+
+            try
+            {
+                if (LocationFormatter.TryFormatMeridianLocation(cleaned, out var formatted) &&
+                    !string.IsNullOrWhiteSpace(formatted))
+                {
+                    cleaned = formatted;
+                }
+            }
+            catch { }
+
+            var builder = new StringBuilder(cleaned.Length);
+            foreach (var ch in cleaned)
+            {
+                if (char.IsLetterOrDigit(ch))
+                    builder.Append(char.ToUpperInvariant(ch));
+            }
+
+            return builder.ToString();
+        }
+
+        private static CrossingRecord TakeNextScopedRecord(
+            IList<CrossingRecord> records,
+            ISet<string> usedKeys,
+            ref int cursor)
+        {
+            if (records == null)
+                return null;
+
+            while (cursor < records.Count)
+            {
+                var candidate = records[cursor++];
+                if (candidate == null)
+                    continue;
+
+                var key = NormalizeCrossingForMap(candidate.Crossing);
+                if (!string.IsNullOrEmpty(key) && usedKeys != null && usedKeys.Contains(key))
+                    continue;
+
+                return candidate;
+            }
+
+            return null;
+        }
+
+        private static void MarkScopedRecordUsed(CrossingRecord record, ISet<string> usedKeys)
+        {
+            if (record == null || usedKeys == null)
+                return;
+
+            var key = NormalizeCrossingForMap(record.Crossing);
+            if (!string.IsNullOrEmpty(key))
+                usedKeys.Add(key);
         }
 
         // =====================================================================
@@ -2422,6 +2766,25 @@ namespace XingManager.Services
             catch { }
         }
 
+        internal static bool TrySetCellCrossingValue(Table table, int row, int col, string crossingText)
+        {
+            if (table == null)
+                return false;
+
+            var before = NormalizeCrossingForMap(ResolveCrossingKey(table, row, col));
+            SetCellCrossingValue(table, row, col, crossingText);
+            var after = NormalizeCrossingForMap(ResolveCrossingKey(table, row, col));
+            var desired = NormalizeCrossingForMap(crossingText);
+
+            if (!string.IsNullOrEmpty(desired) && string.Equals(after, desired, StringComparison.OrdinalIgnoreCase))
+                return true;
+
+            if (string.IsNullOrEmpty(before) && string.IsNullOrEmpty(after))
+                return false;
+
+            return !string.Equals(before, after, StringComparison.OrdinalIgnoreCase);
+        }
+
         private static bool TrySetBlockAttributeValueOnContent(Table table, Cell cell, string value)
         {
             if (table == null || cell == null) return false;
@@ -2664,25 +3027,57 @@ namespace XingManager.Services
             return candidates.Count > 0 ? candidates[0] : null;
         }
 
-        private static CrossingRecord FindRecordByLatLongColumns(Table t, int row, IEnumerable<CrossingRecord> records)
+        private static CrossingRecord FindRecordByLatLongColumns(
+            Table t,
+            int row,
+            IEnumerable<CrossingRecord> records,
+            string normalizedKey = null)
         {
-            var desc = ReadNorm(t, row, 1);
+            if (t == null || records == null)
+                return null;
+
             var columns = t?.Columns.Count ?? 0;
             var zone = columns >= 6 ? ReadNorm(t, row, 2) : string.Empty;
             var lat = ReadNorm(t, row, columns >= 6 ? 3 : 2);
             var lng = ReadNorm(t, row, columns >= 6 ? 4 : 3);
             var dwg = columns >= 6 ? ReadNorm(t, row, 5) : string.Empty;
 
+            if (string.IsNullOrWhiteSpace(lat) || string.IsNullOrWhiteSpace(lng))
+                return null;
+
             var candidates = records.Where(r =>
-                string.Equals(Norm(r.Description), desc, StringComparison.Ordinal) &&
-                string.Equals(Norm(r.Lat), lat, StringComparison.Ordinal) &&
-                string.Equals(Norm(r.Long), lng, StringComparison.Ordinal) &&
-                (string.IsNullOrEmpty(zone) || string.Equals(Norm(r.Zone), zone, StringComparison.Ordinal)) &&
-                (string.IsNullOrEmpty(dwg) || string.Equals(Norm(r.DwgRef), dwg, StringComparison.Ordinal))).ToList();
+                CoordinatesEquivalent(r?.Lat, lat) &&
+                CoordinatesEquivalent(r?.Long, lng) &&
+                (string.IsNullOrEmpty(zone) || string.Equals(Norm(r?.Zone), zone, StringComparison.OrdinalIgnoreCase)) &&
+                (string.IsNullOrEmpty(dwg) || string.Equals(Norm(r?.DwgRef), dwg, StringComparison.OrdinalIgnoreCase))).ToList();
             if (candidates.Count == 1) return candidates[0];
 
-            candidates = records.Where(r => string.Equals(Norm(r.Description), desc, StringComparison.Ordinal)).ToList();
-            return candidates.Count == 1 ? candidates[0] : null;
+            if (candidates.Count > 1 && !string.IsNullOrEmpty(normalizedKey))
+            {
+                var keyed = candidates.FirstOrDefault(r =>
+                    string.Equals(NormalizeKeyForLookup(r?.Crossing), normalizedKey, StringComparison.OrdinalIgnoreCase) ||
+                    CrossingRecord.CompareCrossingKeys(r?.Crossing, normalizedKey) == 0);
+                if (keyed != null)
+                    return keyed;
+            }
+
+            return null;
+        }
+
+        private static bool CoordinatesEquivalent(string left, string right)
+        {
+            var l = Norm(left);
+            var r = Norm(right);
+            if (string.IsNullOrEmpty(l) || string.IsNullOrEmpty(r))
+                return string.Equals(l, r, StringComparison.OrdinalIgnoreCase);
+
+            if (double.TryParse(l, NumberStyles.Float, CultureInfo.InvariantCulture, out var ld) &&
+                double.TryParse(r, NumberStyles.Float, CultureInfo.InvariantCulture, out var rd))
+            {
+                return Math.Abs(ld - rd) <= 0.000001d;
+            }
+
+            return string.Equals(l, r, StringComparison.OrdinalIgnoreCase);
         }
 
         internal static string NormalizeKeyForLookup(string s)

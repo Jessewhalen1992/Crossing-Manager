@@ -866,6 +866,15 @@ namespace XingManager
             gridCrossings?.Refresh();
         }
 
+        private static bool PromptConfirmAndApplyChanges()
+        {
+            return MessageBox.Show(
+                       "confirm and apply changes?",
+                       "Renumber",
+                       MessageBoxButtons.YesNo,
+                       MessageBoxIcon.Question) == DialogResult.Yes;
+        }
+
         // ===== Tooltips =====
 
         private void SetupTooltips()
@@ -994,9 +1003,82 @@ namespace XingManager
             if (kind != TableSync.XingTableType.Unknown)
                 return false;
 
+            // Never renumber fallback on coordinate-bearing tables.
+            // Those rows must keep X# tied to their LAT/LONG identity.
+            if (TableHasLatLongCoordinates(table, minRows: 1))
+                return false;
+
             // For legacy/layout variants not identified by TableSync, require
             // multiple explicit X# entries in column 0.
             return TableHasExplicitXRows(table, minCount: 2);
+        }
+
+        private static bool TableHasLatLongCoordinates(Table table, int minRows)
+        {
+            if (table == null || table.Columns == null || table.Rows == null)
+                return false;
+
+            if (minRows <= 0)
+                minRows = 1;
+
+            int cols = table.Columns.Count;
+            if (cols < 3)
+                return false;
+
+            int latCol;
+            int longCol;
+            if (cols >= 6)
+            {
+                latCol = 3;
+                longCol = 4;
+            }
+            else if (cols == 4 || cols == 5)
+            {
+                latCol = 2;
+                longCol = 3;
+            }
+            else
+            {
+                // Legacy 3-column coordinate variants: XING | LAT | LONG
+                latCol = 1;
+                longCol = 2;
+            }
+            if (latCol >= cols || longCol >= cols)
+                return false;
+
+            int found = 0;
+            int maxRows = Math.Min(table.Rows.Count, 300);
+            for (int row = 0; row < maxRows; row++)
+            {
+                string crossing = TableSync.ResolveCrossingKey(table, row, 0);
+                if (!IsSortableCrossingValue(crossing))
+                    continue;
+
+                string lat = TableSync.ReadCellTextSafe(table, row, latCol);
+                string lng = TableSync.ReadCellTextSafe(table, row, longCol);
+                if (TryParseCoordinate(lat, out var latValue) &&
+                    TryParseCoordinate(lng, out var longValue) &&
+                    latValue >= -90.0 && latValue <= 90.0 &&
+                    longValue >= -180.0 && longValue <= 180.0)
+                {
+                    found++;
+                    if (found >= minRows)
+                        return true;
+                }
+            }
+
+            return false;
+        }
+
+        private static bool TryParseCoordinate(string text, out double value)
+        {
+            value = 0.0;
+            var raw = (text ?? string.Empty).Trim();
+            if (raw.Length == 0)
+                return false;
+
+            raw = raw.Replace(",", string.Empty);
+            return double.TryParse(raw, NumberStyles.Float, CultureInfo.InvariantCulture, out value);
         }
 
         private static bool TableHasExplicitXRows(Table table, int minCount)
@@ -1012,7 +1094,7 @@ namespace XingManager
                 try { raw = TableSync.ResolveCrossingKey(table, row, 0); }
                 catch { raw = string.Empty; }
 
-                if (!IsExplicitXKey(raw))
+                if (!IsSortableCrossingValue(raw))
                     continue;
 
                 found++;
@@ -1034,6 +1116,9 @@ namespace XingManager
 
             try
             {
+                if (TableSync.TrySetCellCrossingValue(table, row, col, crossingText))
+                    return true;
+
                 var cell = table.Cells[row, col];
                 if (cell == null) return false;
 
@@ -1233,6 +1318,13 @@ namespace XingManager
         private void BtnRenumberFromListOnClick(object sender, EventArgs e)
         {
             ResequenceCrossingsFromGridOrder();
+            if (!_isDirty)
+                return;
+
+            if (PromptConfirmAndApplyChanges())
+            {
+                ApplyChangesToDrawing();
+            }
         }
 
         private void btnRenumber_Click(object sender, EventArgs e)
@@ -1450,8 +1542,6 @@ namespace XingManager
                 }
 
                 // 6) Visual refresh of any tables we just touched (kept)
-                SortRecognizedTablesByCrossingNumber();
-                ForceRegenAllCrossingTablesInDwg();                                                         // kept  :contentReference[oaicite:8]{index=8}
 
                 // 7) Re-read from DWG and allow the apply-to-drawing pass to push any resolver results.
                 RescanRecords(applyToTables: true, suppressDuplicateUi: true);                             // kept  :contentReference[oaicite:9]{index=9}
@@ -1459,6 +1549,9 @@ namespace XingManager
                 // 8) NEW: guard against Ã¢â‚¬Å“snap backÃ¢â‚¬Â only for LAT/LONG by reapplying the snapshotÃ¢â‚¬â„¢s LAT/LONG.
                 //    This does not affect Owner/Desc/Location/DWG_REF (your original flow is preserved).
                 OverrideLatLongFromSnapshotInGrid(snapshot);                                                // NEW
+
+                SortRecognizedTablesByCrossingNumber();
+                ForceRegenAllCrossingTablesInDwg();
 
                 _isDirty = false;
                 MessageBox.Show("Crossing data applied to drawing.", "Crossing Manager",
@@ -1522,66 +1615,95 @@ namespace XingManager
             if (startRow < 0)
                 return false;
 
-            var rowIndexes = new List<int>();
-            var rows = new List<SortableRowSnapshot>();
             int colCount = table.Columns.Count;
 
+            var sortableRows = new List<(int RowIndex, SortableRowSnapshot Snapshot)>();
             for (int row = startRow; row < table.Rows.Count; row++)
             {
-                string raw;
-                try { raw = TableSync.ResolveCrossingKey(table, row, 0); } catch { raw = string.Empty; }
-
-                if (!IsExplicitXKey(raw))
+                if (!TryBuildSortableRowSnapshot(table, row, colCount, out var snapshot))
                     continue;
 
-                var crossing = NormalizeXKey(raw);
-                if (string.IsNullOrWhiteSpace(crossing))
-                    continue;
-
-                var cells = new string[Math.Max(0, colCount - 1)];
-                for (int c = 1; c < colCount; c++)
-                    cells[c - 1] = ReadTableCellText(table, row, c);
-
-                rowIndexes.Add(row);
-                rows.Add(new SortableRowSnapshot
-                {
-                    Crossing = crossing,
-                    Cells = cells
-                });
+                sortableRows.Add((row, snapshot));
             }
 
-            if (rows.Count < 2)
-                return false;
-
-            var sorted = rows
-                .OrderBy(r => BuildCrossingSortKey(r.Crossing))
-                .ToList();
-
-            bool alreadySorted = true;
-            for (int i = 0; i < rows.Count; i++)
-            {
-                if (!ReferenceEquals(rows[i], sorted[i]))
-                {
-                    alreadySorted = false;
-                    break;
-                }
-            }
-
-            if (alreadySorted)
+            if (sortableRows.Count < 2)
                 return false;
 
             bool changed = false;
-            for (int i = 0; i < rowIndexes.Count; i++)
+            int runStart = 0;
+            while (runStart < sortableRows.Count)
             {
-                int row = rowIndexes[i];
-                var src = sorted[i];
+                int runEnd = runStart;
+                while (runEnd + 1 < sortableRows.Count &&
+                       sortableRows[runEnd + 1].RowIndex == sortableRows[runEnd].RowIndex + 1)
+                {
+                    runEnd++;
+                }
 
-                changed |= TrySetCrossingCellValue(table, row, 0, src.Crossing);
-                for (int c = 1; c < colCount; c++)
-                    changed |= SetCellIfChanged(table, row, c, src.Cells[c - 1]);
+                int runLength = runEnd - runStart + 1;
+                if (runLength >= 2)
+                {
+                    var run = sortableRows.GetRange(runStart, runLength);
+                    var sorted = run
+                        .OrderBy(r => BuildCrossingSortKey(r.Snapshot.Crossing))
+                        .ToList();
+
+                    bool alreadySorted = true;
+                    for (int i = 0; i < run.Count; i++)
+                    {
+                        if (!ReferenceEquals(run[i].Snapshot, sorted[i].Snapshot))
+                        {
+                            alreadySorted = false;
+                            break;
+                        }
+                    }
+
+                    if (!alreadySorted)
+                    {
+                        for (int i = 0; i < run.Count; i++)
+                        {
+                            int row = run[i].RowIndex;
+                            var src = sorted[i].Snapshot;
+
+                            changed |= TrySetCrossingCellValue(table, row, 0, src.Crossing);
+                            for (int c = 1; c < colCount; c++)
+                                changed |= SetCellIfChanged(table, row, c, src.Cells[c - 1]);
+                        }
+                    }
+                }
+
+                runStart = runEnd + 1;
             }
 
             return changed;
+        }
+
+        private static bool TryBuildSortableRowSnapshot(Table table, int row, int colCount, out SortableRowSnapshot snapshot)
+        {
+            snapshot = null;
+            if (table == null || colCount <= 0)
+                return false;
+
+            string raw;
+            try { raw = TableSync.ResolveCrossingKey(table, row, 0); } catch { raw = string.Empty; }
+            if (!IsSortableCrossingValue(raw))
+                return false;
+
+            var crossing = NormalizeXKey(raw);
+            if (string.IsNullOrWhiteSpace(crossing))
+                return false;
+
+            var cells = new string[Math.Max(0, colCount - 1)];
+            for (int c = 1; c < colCount; c++)
+                cells[c - 1] = ReadTableCellText(table, row, c);
+
+            snapshot = new SortableRowSnapshot
+            {
+                Crossing = crossing,
+                Cells = cells
+            };
+
+            return true;
         }
 
         private static int FindFirstExplicitCrossingRow(Table table, TableSync.XingTableType kind)
@@ -1601,7 +1723,7 @@ namespace XingManager
             {
                 string raw;
                 try { raw = TableSync.ResolveCrossingKey(table, row, 0); } catch { raw = string.Empty; }
-                if (IsExplicitXKey(raw))
+                if (IsSortableCrossingValue(raw))
                     return row;
             }
 
@@ -2800,6 +2922,12 @@ namespace XingManager
             return Regex.IsMatch(up, @"^X0*\d+$");
         }
 
+        private static bool IsSortableCrossingValue(string s)
+        {
+            var key = NormalizeXKey(s);
+            return !string.IsNullOrWhiteSpace(key) && Regex.IsMatch(key, @"^X0*\d+$", RegexOptions.IgnoreCase);
+        }
+
         private static string ReadTableCellText(Table t, int row, int col)
         {
             if (t == null || row < 0 || col < 0) return string.Empty;
@@ -3404,13 +3532,22 @@ namespace XingManager
                     return;
                 }
 
-                // 5) Apply updates (this writes all copies for each affected crossing)
+                // 5) Ask for confirmation before writing renumber changes.
+                if (!PromptConfirmAndApplyChanges())
+                    return;
+
+                // 6) Apply updates to drawing first (blocks + tables), then run scan/resolver.
                 foreach (var kvp in targetCrossingByRecord)
                     kvp.Key.Crossing = kvp.Value;
 
-                _repository.ApplyChanges(targetCrossingByRecord.Keys.ToList(), _tableSync);
+                var changedRecords = targetCrossingByRecord.Keys.ToList();
+                _repository.ApplyChanges(changedRecords, _tableSync);
+                _tableSync.UpdateAllTables(_doc, scan.Records);
+                _tableSync.UpdateLatLongSourceTables(_doc, scan.Records);
+                SortRecognizedTablesByCrossingNumber();
+                ForceRegenAllCrossingTablesInDwg();
 
-                // 6) Refresh the UI list (no table syncing here; user regenerates tables after RNC)
+                // 7) Refresh the UI list after drawing has been updated.
                 RescanRecords(applyToTables: false);
 
                 MessageBox.Show(
@@ -3576,6 +3713,62 @@ namespace XingManager
             public bool GenerateAll { get; }
         }
 
+        private void RemoveTemplateCrossingTablesFromLayout(ObjectId layoutId)
+        {
+            if (_doc == null || layoutId.IsNull)
+                return;
+
+            using (var tr = _doc.Database.TransactionManager.StartTransaction())
+            {
+                var layout = tr.GetObject(layoutId, OpenMode.ForRead, false) as Layout;
+                if (layout == null)
+                {
+                    tr.Commit();
+                    return;
+                }
+
+                var btr = tr.GetObject(layout.BlockTableRecordId, OpenMode.ForWrite, false) as BlockTableRecord;
+                if (btr == null)
+                {
+                    tr.Commit();
+                    return;
+                }
+
+                var ids = btr.Cast<ObjectId>().ToList();
+                foreach (var entId in ids)
+                {
+                    Table table = null;
+                    try { table = tr.GetObject(entId, OpenMode.ForRead, false) as Table; }
+                    catch { table = null; }
+                    if (table == null) continue;
+
+                    var kind = TableSync.XingTableType.Unknown;
+                    try { kind = _tableSync.IdentifyTable(table, tr); } catch { }
+
+                    var remove = kind != TableSync.XingTableType.Unknown ||
+                                 TableHasExplicitXRows(table, minCount: 1) ||
+                                 TableHasLatLongCoordinates(table, minRows: 1);
+                    if (!remove)
+                        continue;
+
+                    try
+                    {
+                        var writable = tr.GetObject(entId, OpenMode.ForWrite, false) as Table;
+                        if (writable != null && !writable.IsErased)
+                        {
+                            writable.Erase(true);
+                        }
+                    }
+                    catch
+                    {
+                        // keep best-effort behavior
+                    }
+                }
+
+                tr.Commit();
+            }
+        }
+
         private void GenerateAllXingPages()
         {
             var refs = _records
@@ -3655,6 +3848,8 @@ namespace XingManager
 
                             _layoutUtils.ReplacePlaceholderText(_doc.Database, layoutId, loc);
                         }
+
+                        RemoveTemplateCrossingTablesFromLayout(layoutId);
 
                         // Compute center of layout for page table placement
                         Point3d center;
@@ -4320,6 +4515,8 @@ namespace XingManager
                     var locationText = BuildLocationText(options.DwgRef);
                     if (!string.IsNullOrEmpty(locationText))
                         _layoutUtils.ReplacePlaceholderText(_doc.Database, layoutId, locationText);
+
+                    RemoveTemplateCrossingTablesFromLayout(layoutId);
 
                     _layoutUtils.SwitchToLayout(_doc, actualName);
                 }

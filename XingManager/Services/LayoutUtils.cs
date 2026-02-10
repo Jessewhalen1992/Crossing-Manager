@@ -111,31 +111,7 @@ namespace XingManager.Services
                             layout.BlockTableRecordId = clonedBtrId;
                         }
 
-                        var oldName = layout.LayoutName;
                         actualName = EnsureUniqueLayoutName(targetLayoutDict, layout.LayoutName, desiredName);
-                        if (!string.Equals(oldName, actualName, StringComparison.OrdinalIgnoreCase))
-                        {
-                            // Prefer LayoutManager rename so AutoCAD updates all internal layout references/fields.
-                            bool renamed = false;
-                            try
-                            {
-                                var lm = LayoutManager.Current;
-                                if (lm != null)
-                                {
-                                    lm.RenameLayout(oldName, actualName);
-                                    renamed = true;
-                                }
-                            }
-                            catch
-                            {
-                                renamed = false;
-                            }
-
-                            if (!renamed)
-                            {
-                                layout.LayoutName = actualName;
-                            }
-                        }
                     }
 
                     targetTr.Commit();
@@ -144,6 +120,7 @@ namespace XingManager.Services
 
             if (!clonedLayoutId.IsNull)
             {
+                actualName = EnsureLayoutName(doc, clonedLayoutId, actualName);
                 TryRefreshLayoutFieldValues(db, clonedLayoutId);
             }
 
@@ -155,12 +132,70 @@ namespace XingManager.Services
             var layoutName = string.IsNullOrWhiteSpace(desiredName) ? currentName : desiredName;
             var uniqueName = layoutName;
             var index = 1;
-            while (layoutDict.Contains(uniqueName))
+            while (layoutDict.Contains(uniqueName) &&
+                   !string.Equals(uniqueName, currentName, StringComparison.OrdinalIgnoreCase))
             {
                 uniqueName = string.Format(CultureInfo.InvariantCulture, "{0}-{1}", layoutName, index++);
             }
 
             return uniqueName;
+        }
+
+        private static string EnsureLayoutName(Document doc, ObjectId layoutId, string desiredName)
+        {
+            if (doc == null || layoutId.IsNull)
+                return desiredName ?? string.Empty;
+
+            var db = doc.Database;
+            var currentName = GetLayoutName(db, layoutId);
+            if (string.IsNullOrWhiteSpace(currentName))
+                return desiredName ?? string.Empty;
+
+            var targetName = BuildUniqueLayoutName(db, currentName, desiredName);
+            if (string.Equals(currentName, targetName, StringComparison.OrdinalIgnoreCase))
+                return currentName;
+
+            try
+            {
+                var lm = LayoutManager.Current;
+                if (lm != null)
+                    lm.RenameLayout(currentName, targetName);
+            }
+            catch
+            {
+                // best effort
+            }
+
+            var finalName = GetLayoutName(db, layoutId);
+            return string.IsNullOrWhiteSpace(finalName) ? targetName : finalName;
+        }
+
+        private static string BuildUniqueLayoutName(Database db, string currentName, string desiredName)
+        {
+            if (db == null)
+                return string.IsNullOrWhiteSpace(desiredName) ? (currentName ?? string.Empty) : desiredName;
+
+            using (var tr = db.TransactionManager.StartTransaction())
+            {
+                var layoutDict = (DBDictionary)tr.GetObject(db.LayoutDictionaryId, OpenMode.ForRead);
+                var unique = EnsureUniqueLayoutName(layoutDict, currentName, desiredName);
+                tr.Commit();
+                return unique;
+            }
+        }
+
+        private static string GetLayoutName(Database db, ObjectId layoutId)
+        {
+            if (db == null || layoutId.IsNull)
+                return string.Empty;
+
+            using (var tr = db.TransactionManager.StartTransaction())
+            {
+                var layout = tr.GetObject(layoutId, OpenMode.ForRead, false) as Layout;
+                var name = layout?.LayoutName ?? string.Empty;
+                tr.Commit();
+                return name;
+            }
         }
 
         public void SwitchToLayout(Document doc, string layoutName)
