@@ -80,8 +80,19 @@ namespace XingManager
             var form = app.GetOrCreateForm();
             form?.AddRncPolylineFromCommand();
         }
+
+        [CommandMethod("XINGCLEANLAYOUTS")]
+        public void CleanGhostLayouts()
+        {
+            var app = XingManagerApp.Instance;
+            if (app == null)
+            {
+                return;
+            }
+
+            app.CleanupGhostLayouts();
+        }
     }
 }
 
 /////////////////////////////////////////////////////////////////////
-

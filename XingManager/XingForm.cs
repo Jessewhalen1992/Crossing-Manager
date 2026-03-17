@@ -1121,6 +1121,7 @@ namespace XingManager
 
                 var cell = table.Cells[row, col];
                 if (cell == null) return false;
+                TrySetCellMiddleCenter(cell);
 
                 // Detect whether this cell contains a block (bubble) so we don't accidentally add text content on top.
                 var blockContentIndexes = new List<int>();
@@ -2098,7 +2099,9 @@ namespace XingManager
 
         // ===== Update all recognized crossing tables from the grid =====
 
-        /// Update every recognized crossing table (MAIN, PAGE, LATLONG) from the current grid.
+        /// Update recognized crossing tables from the current grid.
+        /// PAGE tables are intentionally skipped here and are handled by TableSync's
+        /// DWG_REF-driven updater.
         /// Matching uses the same X-key logic as MatchTableIntoGrid: attribute-first with fallbacks,
         /// and NormalizeXKey handles digits-only (e.g., "3" => "X3").
         /// Update recognized crossing tables (MAIN/PAGE/LATLONG) from the current grid,
@@ -2127,16 +2130,11 @@ namespace XingManager
 
             // Index current records by normalized X key ("3" -> "X3")
             var byX = new Dictionary<string, CrossingRecord>(StringComparer.OrdinalIgnoreCase);
-            var byOwnerDesc = new Dictionary<string, CrossingRecord>(StringComparer.OrdinalIgnoreCase);
             foreach (var r in _records)
             {
                 var key = NormalizeXKey(r.Crossing);
                 if (!string.IsNullOrWhiteSpace(key) && !byX.ContainsKey(key))
                     byX[key] = r;
-
-                var ownerDescKey = NormalizeOwnerDescKey(r.Owner, r.Description);
-                if (!string.IsNullOrWhiteSpace(ownerDescKey) && !byOwnerDesc.ContainsKey(ownerDescKey))
-                    byOwnerDesc[ownerDescKey] = r;
             }
 
             using (doc.LockDocument())
@@ -2157,6 +2155,7 @@ namespace XingManager
 
                         var kind = _tableSync.IdentifyTable(table, tr); // robust classifier  :contentReference[oaicite:7]{index=7}
                         if (kind == TableSync.XingTableType.Unknown) continue;
+                        if (kind == TableSync.XingTableType.Page) continue;
 
                         table.UpgradeOpen();
 
@@ -2194,7 +2193,6 @@ namespace XingManager
 
                             matched++;
                             bool changed = false;
-                            bool rowHandled = false;
 
                             // Never touch Column 0 (bubble)
                             if (kind == TableSync.XingTableType.Main)
@@ -2203,32 +2201,6 @@ namespace XingManager
                                 changed |= SetCellIfChanged(table, row, 2, rec.Description);
                                 changed |= SetCellIfChanged(table, row, 3, rec.Location);
                                 changed |= SetCellIfChanged(table, row, 4, rec.DwgRef);
-                            }
-                            else if (kind == TableSync.XingTableType.Page)
-                            {
-                                if (table.Columns.Count == 3)
-                                {
-                                    var owner = ReadTableCellText(table, row, 1);
-                                    var desc = ReadTableCellText(table, row, 2);
-                                    var ownerDescKey = NormalizeOwnerDescKey(owner, desc);
-
-                                    if (!string.IsNullOrWhiteSpace(ownerDescKey) &&
-                                        byOwnerDesc.TryGetValue(ownerDescKey, out var ownerRec) &&
-                                        ownerRec != null)
-                                    {
-                                        changed |= TrySetCrossingCellValue(table, row, 0, ownerRec.Crossing);
-                                        rowHandled = true;
-                                    }
-                                }
-
-                                if (rowHandled)
-                                {
-                                    if (changed) updated++;
-                                    continue;
-                                }
-
-                                changed |= SetCellIfChanged(table, row, 1, rec.Owner);
-                                changed |= SetCellIfChanged(table, row, 2, rec.Description);
                             }
                             else if (kind == TableSync.XingTableType.LatLong)
                             {
@@ -2449,6 +2421,7 @@ namespace XingManager
             catch { cell = null; }
 
             if (cell == null) return false;
+            TrySetCellMiddleCenter(cell);
 
             string current;
             try { current = cell.TextString ?? string.Empty; }
@@ -2473,6 +2446,21 @@ namespace XingManager
                 {
                     return false;
                 }
+            }
+        }
+
+        private static void TrySetCellMiddleCenter(Cell cell)
+        {
+            if (cell == null)
+                return;
+
+            try
+            {
+                cell.Alignment = CellAlignment.MiddleCenter;
+            }
+            catch
+            {
+                // best effort: style may prevent direct alignment assignment
             }
         }
 
@@ -2641,12 +2629,16 @@ namespace XingManager
                 try
                 {
                     // 1) Write block attributes from the grid
-                    _repository.ApplyChanges(_records.ToList(), _tableSync);
+                    var snapshot = _records.ToList();
+                    _repository.ApplyChanges(snapshot, _tableSync);
 
-                    // 2) Update MAIN/PAGE/LATLONG tables from the grid (B..E only Ã¢â‚¬â€ never col 0)
+                    // 2) Update recognised tables first (PAGE is DWG_REF-driven here).
+                    _tableSync.UpdateAllTables(_doc, snapshot);
+
+                    // 3) Safety pass for MAIN/LATLONG only.
                     UpdateAllXingTablesFromGrid();
 
-                    // 3) Reload grid from DWG (no table writes)
+                    // 4) Reload grid from DWG (no table writes)
                     RescanRecords(applyToTables: false);
 
                     _isDirty = false;
@@ -5495,3 +5487,4 @@ namespace XingManager
 /////////////////////////////////////////////////////////////////////
 
 /////////////////////////////////////////////////////////////////////
+

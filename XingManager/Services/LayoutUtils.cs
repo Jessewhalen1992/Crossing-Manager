@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using System.Linq;
@@ -71,26 +72,9 @@ namespace XingManager.Services
                     }
 
                     var sourceLayoutId = layoutDict.GetAt(layoutName);
-                    var sourceLayout = (Layout)sourceTr.GetObject(sourceLayoutId, OpenMode.ForRead);
-                    var sourceBtrId = sourceLayout.BlockTableRecordId;
-
                     var targetLayoutDict = (DBDictionary)targetTr.GetObject(db.LayoutDictionaryId, OpenMode.ForRead);
 
-                    // Clone the block table record first.
-                    var blockIds = new ObjectIdCollection { sourceBtrId };
-                    var mapping = new IdMapping();
-                    templateDb.WblockCloneObjects(blockIds, db.BlockTableId, mapping, DuplicateRecordCloning.Ignore, false);
-
-                    ObjectId clonedBtrId = ObjectId.Null;
-                    foreach (IdPair pair in mapping)
-                    {
-                        if (pair.Key == sourceBtrId)
-                        {
-                            clonedBtrId = pair.Value;
-                        }
-                    }
-
-                    // Now clone the layout entry itself.
+                    // Clone the layout entry. AutoCAD clones its dependent paperspace block.
                     var layoutIds = new ObjectIdCollection { sourceLayoutId };
                     var layoutMapping = new IdMapping();
                     templateDb.WblockCloneObjects(layoutIds, db.LayoutDictionaryId, layoutMapping, DuplicateRecordCloning.Ignore, false);
@@ -106,11 +90,6 @@ namespace XingManager.Services
                     if (!clonedLayoutId.IsNull)
                     {
                         var layout = (Layout)targetTr.GetObject(clonedLayoutId, OpenMode.ForWrite);
-                        if (!clonedBtrId.IsNull)
-                        {
-                            layout.BlockTableRecordId = clonedBtrId;
-                        }
-
                         actualName = EnsureUniqueLayoutName(targetLayoutDict, layout.LayoutName, desiredName);
                     }
 
@@ -125,6 +104,84 @@ namespace XingManager.Services
             }
 
             return clonedLayoutId;
+        }
+
+        public int RemoveOrphanPaperSpaceBlocks(Document doc)
+        {
+            if (doc == null)
+            {
+                throw new ArgumentNullException("doc");
+            }
+
+            var db = doc.Database;
+            var removed = 0;
+
+            using (var tr = db.TransactionManager.StartTransaction())
+            {
+                var layoutDict = (DBDictionary)tr.GetObject(db.LayoutDictionaryId, OpenMode.ForRead);
+                var referencedLayoutBlocks = new HashSet<ObjectId>();
+
+                foreach (DBDictionaryEntry entry in layoutDict)
+                {
+                    var layout = tr.GetObject(entry.Value, OpenMode.ForRead, false) as Layout;
+                    if (layout == null || layout.BlockTableRecordId.IsNull)
+                    {
+                        continue;
+                    }
+
+                    referencedLayoutBlocks.Add(layout.BlockTableRecordId);
+                }
+
+                var bt = (BlockTable)tr.GetObject(db.BlockTableId, OpenMode.ForRead);
+                var orphanIds = new List<ObjectId>();
+
+                foreach (ObjectId btrId in bt)
+                {
+                    var btr = tr.GetObject(btrId, OpenMode.ForRead, false) as BlockTableRecord;
+                    if (btr == null || !btr.IsLayout)
+                    {
+                        continue;
+                    }
+
+                    if (referencedLayoutBlocks.Contains(btrId))
+                    {
+                        continue;
+                    }
+
+                    if (string.Equals(btr.Name, BlockTableRecord.ModelSpace, StringComparison.OrdinalIgnoreCase))
+                    {
+                        continue;
+                    }
+
+                    orphanIds.Add(btrId);
+                }
+
+                if (orphanIds.Count > 0)
+                {
+                    foreach (var orphanId in orphanIds)
+                    {
+                        var orphanBtr = tr.GetObject(orphanId, OpenMode.ForWrite, false) as BlockTableRecord;
+                        if (orphanBtr == null || orphanBtr.IsErased)
+                        {
+                            continue;
+                        }
+
+                        try
+                        {
+                            orphanBtr.Erase(true);
+                            removed++;
+                        }
+                        catch
+                        {
+                            // best effort
+                        }
+                    }
+                }
+
+                tr.Commit();
+            }
+
+            return removed;
         }
 
         private static string EnsureUniqueLayoutName(DBDictionary layoutDict, string currentName, string desiredName)

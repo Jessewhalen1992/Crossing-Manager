@@ -70,11 +70,12 @@ namespace XingManager.Services
         };
 
         private const int MaxHeaderRowsToScan = 5;
+        private const double CrossingBubbleScale = 0.980;
 
         private static readonly Regex MTextFormattingCommandRegex = new Regex("\\\\[^;\\\\{}]*;", RegexOptions.Compiled);
         private static readonly Regex MTextResidualCommandRegex = new Regex("\\\\[^{}]", RegexOptions.Compiled);
         private static readonly Regex MTextSpecialCodeRegex = new Regex("%%[^\\s]+", RegexOptions.Compiled);
-        private static readonly Regex LayoutDwgRefRegex = new Regex("^\\s*XING\\s*#\\s*(?<ref>.+?)\\s*$", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+        private static readonly Regex LayoutDwgRefRegex = new Regex("^\\s*(?:XING|CROSSING)(?:\\s*DWG)?\\s*#\\s*(?<ref>.+?)\\s*$", RegexOptions.IgnoreCase | RegexOptions.Compiled);
         private static readonly Regex LayoutCloneSuffixRegex = new Regex("^(?<base>.+)-\\d+$", RegexOptions.Compiled);
         private static readonly Regex MeridianLocationRegex = new Regex(
             "(?:N\\.?\\s*[EW]\\.?|S\\.?\\s*[EW]\\.?)" +
@@ -94,6 +95,17 @@ namespace XingManager.Services
             public HashSet<string> LocationKeys { get; } = new HashSet<string>(StringComparer.Ordinal);
 
             public bool HasFilters => !string.IsNullOrWhiteSpace(DwgRef) || LocationKeys.Count > 0;
+        }
+
+        private sealed class WaterTableCreatePlan
+        {
+            public ObjectId LayoutBtrId { get; set; } = ObjectId.Null;
+
+            public string LayoutName { get; set; } = string.Empty;
+
+            public Point3d InsertPoint { get; set; } = Point3d.Origin;
+
+            public List<CrossingRecord> Records { get; set; } = new List<CrossingRecord>();
         }
 
         private readonly TableFactory _factory;
@@ -179,6 +191,10 @@ namespace XingManager.Services
                         }
                     }
 
+                    // Ensure water-coordinate crossings always have a WATER table on crossing layouts.
+                    // This avoids a water crossing being represented in PAGE without its coordinate table.
+                    EnsureWaterLatLongTablesOnCrossingLayouts(db, tr, records);
+
                     tr.Commit();
                 }
             }
@@ -252,6 +268,181 @@ namespace XingManager.Services
                 }
             }
         }
+
+        private void EnsureWaterLatLongTablesOnCrossingLayouts(Database db, Transaction tr, IEnumerable<CrossingRecord> records)
+        {
+            if (db == null || tr == null)
+                return;
+
+            var normalizedWaterRecords = (records ?? Enumerable.Empty<CrossingRecord>())
+                .Where(r => r != null)
+                .Where(IsWaterCoordinateCrossingForPage)
+                .Where(r => !IsPlaceholderDwgRef(r.DwgRef))
+                .GroupBy(r => NormalizeDwgRefForLookup(r.DwgRef), StringComparer.OrdinalIgnoreCase)
+                .Where(g => !string.IsNullOrWhiteSpace(g.Key))
+                .ToDictionary(
+                    g => g.Key,
+                    g => g.OrderBy(r => r, Comparer<CrossingRecord>.Create(CrossingRecord.CompareByCrossing)).ToList(),
+                    StringComparer.OrdinalIgnoreCase);
+
+            if (normalizedWaterRecords.Count == 0)
+                return;
+
+            var plans = new List<WaterTableCreatePlan>();
+            var blockTable = (BlockTable)tr.GetObject(db.BlockTableId, OpenMode.ForRead);
+
+            foreach (ObjectId btrId in blockTable)
+            {
+                var btr = tr.GetObject(btrId, OpenMode.ForRead) as BlockTableRecord;
+                if (btr == null || btr.LayoutId.IsNull)
+                    continue;
+
+                Layout layout = null;
+                try { layout = tr.GetObject(btr.LayoutId, OpenMode.ForRead, false) as Layout; }
+                catch { layout = null; }
+                if (layout == null)
+                    continue;
+
+                var layoutRef = TryExtractDwgRefFromLayoutName(layout.LayoutName);
+                if (string.IsNullOrWhiteSpace(layoutRef))
+                    continue;
+
+                if (!normalizedWaterRecords.TryGetValue(layoutRef, out var waterRecords) || waterRecords.Count == 0)
+                    continue;
+
+                var hasWaterTable = false;
+                Table anchorPageTable = null;
+                var waterKeys = new HashSet<string>(
+                    waterRecords
+                        .Select(r => NormalizeCrossingForMap(r?.Crossing))
+                        .Where(k => !string.IsNullOrWhiteSpace(k)),
+                    StringComparer.OrdinalIgnoreCase);
+
+                foreach (ObjectId entId in btr)
+                {
+                    if (!entId.ObjectClass.DxfName.Equals("ACAD_TABLE", StringComparison.OrdinalIgnoreCase))
+                        continue;
+
+                    Table table = null;
+                    try { table = tr.GetObject(entId, OpenMode.ForRead, false) as Table; }
+                    catch { table = null; }
+                    if (table == null)
+                        continue;
+
+                    var kind = XingTableType.Unknown;
+                    try { kind = IdentifyTable(table, tr); }
+                    catch { kind = XingTableType.Unknown; }
+
+                    if (kind == XingTableType.Page && anchorPageTable == null)
+                        anchorPageTable = table;
+
+                    // Existing water table detection:
+                    // 1) explicit WATER title; or
+                    // 2) LAT/LONG table that already contains any water crossing key.
+                    if (IsWaterCrossingLatLongTable(table))
+                    {
+                        hasWaterTable = true;
+                        break;
+                    }
+
+                    if (kind == XingTableType.LatLong && TableContainsAnyCrossingKeys(table, waterKeys))
+                    {
+                        hasWaterTable = true;
+                        break;
+                    }
+                }
+
+                if (hasWaterTable || anchorPageTable == null)
+                {
+                    if (hasWaterTable)
+                        Logger.Debug(_ed, $"layout={layout.LayoutName} action=create_water_latlong status=skip reason=existing_table");
+                    continue;
+                }
+
+                var insertPoint = ResolveWaterTableInsertPoint(anchorPageTable, waterRecords.Count);
+                plans.Add(new WaterTableCreatePlan
+                {
+                    LayoutBtrId = btr.ObjectId,
+                    LayoutName = layout.LayoutName ?? string.Empty,
+                    InsertPoint = insertPoint,
+                    Records = waterRecords
+                });
+            }
+
+            foreach (var plan in plans)
+            {
+                if (plan == null || plan.LayoutBtrId.IsNull || plan.Records == null || plan.Records.Count == 0)
+                    continue;
+
+                try
+                {
+                    var btr = tr.GetObject(plan.LayoutBtrId, OpenMode.ForWrite, false) as BlockTableRecord;
+                    if (btr == null)
+                        continue;
+
+                    CreateAndInsertLatLongTable(db, tr, btr, plan.InsertPoint, plan.Records);
+                    Logger.Info(_ed, $"layout={plan.LayoutName} action=create_water_latlong status=ok rows={plan.Records.Count}");
+                }
+                catch (Exception ex)
+                {
+                    Logger.Warn(_ed, $"layout={plan.LayoutName} action=create_water_latlong status=err err={ex.Message}");
+                }
+            }
+        }
+
+        private Point3d ResolveWaterTableInsertPoint(Table pageTable, int recordCount)
+        {
+            if (pageTable == null)
+                return Point3d.Origin;
+
+            Point3d basePoint;
+            try { basePoint = pageTable.Position; }
+            catch { basePoint = Point3d.Origin; }
+
+            var pageWidth = GetTableTotalWidth(pageTable);
+            var pageHeight = GetTableTotalHeight(pageTable);
+
+            GetLatLongTableSize(Math.Max(0, recordCount), out var waterWidth, out _);
+
+            const double verticalGap = 10.0;
+            var x = basePoint.X + ((pageWidth - waterWidth) / 2.0);
+            var y = basePoint.Y + pageHeight + verticalGap;
+
+            return new Point3d(x, y, basePoint.Z);
+        }
+
+        private static double GetTableTotalWidth(Table table)
+        {
+            if (table == null)
+                return 0.0;
+
+            var total = 0.0;
+            try
+            {
+                for (var i = 0; i < table.Columns.Count; i++)
+                    total += table.Columns[i].Width;
+            }
+            catch { }
+
+            return total;
+        }
+
+        private static double GetTableTotalHeight(Table table)
+        {
+            if (table == null)
+                return 0.0;
+
+            var total = 0.0;
+            try
+            {
+                for (var i = 0; i < table.Rows.Count; i++)
+                    total += table.Rows[i].Height;
+            }
+            catch { }
+
+            return total;
+        }
+
         public void UpdateLatLongSourceTables(Document doc, IList<CrossingRecord> records)
         {
             if (doc == null) throw new ArgumentNullException(nameof(doc));
@@ -385,8 +576,13 @@ namespace XingManager.Services
             // 1) Filter + order rows for this DWG_REF
             var rows = (all ?? new List<CrossingRecord>())
                 .Where(r => string.Equals(r.DwgRef ?? "", dwgRef ?? "", StringComparison.OrdinalIgnoreCase))
+                .Where(r => !IsWaterCoordinateCrossingForPage(r))
                 .OrderBy(r => r, Comparer<CrossingRecord>.Create(CrossingRecord.CompareByCrossing))
                 .ToList();
+
+            // If this page only has water-coordinate crossings, do not create a blank PAGE table header.
+            if (rows.Count == 0)
+                return;
 
             // 2) Create table, position, style
             var t = new Table();
@@ -463,7 +659,7 @@ namespace XingManager.Services
                 {
                     placed = TrySetCellToBlockWithAttribute(t, row, 0, tr, bubbleBtrId, xVal);
                     if (placed)
-                        TrySetCellBlockScale(t, row, 0, 1.0);   // force block scale = 1.0
+                        TrySetCellBlockScale(t, row, 0, CrossingBubbleScale);
                 }
                 if (!placed)
                     t.Cells[row, 0].TextString = xVal;
@@ -493,6 +689,22 @@ namespace XingManager.Services
             ownerBtr.AppendEntity(t);
             tr.AddNewlyCreatedDBObject(t, true);
             try { t.GenerateLayout(); } catch { }
+        }
+
+        private static bool IsWaterCoordinateCrossingForPage(CrossingRecord record)
+        {
+            if (record == null)
+                return false;
+
+            var hasCoordinate = !string.IsNullOrWhiteSpace(record.Lat) ||
+                                !string.IsNullOrWhiteSpace(record.Long);
+            if (!hasCoordinate)
+                return false;
+
+            var owner = (record.Owner ?? string.Empty).Trim();
+            owner = owner.Replace("\u2014", "-").Replace("\u2013", "-");
+
+            return string.IsNullOrWhiteSpace(owner) || string.Equals(owner, "-", StringComparison.Ordinal);
         }
 
         // =====================================================================
@@ -614,7 +826,7 @@ namespace XingManager.Services
                 table.Cells[headerRow, 3].TextString = "LONGITUDE";
             }
 
-            var boldStyleId = EnsureBoldTextStyle(db, tr, "XING_BOLD", "Standard");
+            var regularStyleId = GetPreferredRegularTextStyle(db, tr, "Standard");
             var headerColor = Color.FromColorIndex(ColorMethod.ByAci, 254);
             var titleColor = Color.FromColorIndex(ColorMethod.ByAci, 14);
 
@@ -625,7 +837,7 @@ namespace XingManager.Services
                     var cell = table.Cells[headerRow, c];
                     cell.TextHeight = CellTextHeight;
                     cell.Alignment = CellAlignment.MiddleCenter;
-                    cell.TextStyleId = boldStyleId;
+                    cell.TextStyleId = regularStyleId;
                     cell.BackgroundColor = headerColor;
                 }
             }
@@ -637,9 +849,10 @@ namespace XingManager.Services
                 titleCell.TextString = resolvedTitle;
                 titleCell.Alignment = CellAlignment.MiddleLeft;
                 titleCell.TextHeight = TitleTextHeight;
-                titleCell.TextStyleId = boldStyleId;
+                titleCell.TextStyleId = regularStyleId;
                 ApplyCellTextColor(titleCell, titleColor);
                 ApplyTitleBorderStyle(table, titleRow, 0, table.Columns.Count - 1);
+                ApplyTopBorderToRow(table, titleRow + 1, 0, table.Columns.Count - 1);
             }
 
             // Data rows
@@ -657,16 +870,17 @@ namespace XingManager.Services
                     var headerCell = table.Cells[row, 0];
                     headerCell.Alignment = CellAlignment.MiddleLeft;
                     headerCell.TextHeight = TitleTextHeight;
-                    headerCell.TextStyleId = boldStyleId;
+                    headerCell.TextStyleId = regularStyleId;
                     headerCell.TextString = headerText;
                     ApplyCellTextColor(headerCell, titleColor);
                     ApplyTitleBorderStyle(table, row, 0, table.Columns.Count - 1);
+                    ApplyTopBorderToRow(table, row + 1, 0, table.Columns.Count - 1);
                     continue;
                 }
 
                 if (rowInfo.IsColumnHeader)
                 {
-                    ApplyLatLongColumnHeaderRow(table, row, HeaderRowHeight, CellTextHeight, boldStyleId, headerColor);
+                    ApplyLatLongColumnHeaderRow(table, row, HeaderRowHeight, CellTextHeight, regularStyleId, headerColor);
                     continue;
                 }
 
@@ -819,7 +1033,40 @@ namespace XingManager.Services
                 SetBorderVisible(bordersObj, "Right", false);
                 SetBorderVisible(bordersObj, "InsideHorizontal", false);
                 SetBorderVisible(bordersObj, "InsideVertical", false);
-                SetBorderVisible(bordersObj, "Bottom", true);
+                SetBorderVisible(bordersObj, "Bottom", false);
+                SetBorderVisible(bordersObj, "Outline", false);
+            }
+            catch
+            {
+                // purely cosmetic; ignore on unsupported releases
+            }
+        }
+
+        private static void ApplyTopBorderToRow(Table table, int row, int startColumn, int endColumn)
+        {
+            if (table == null || table.Columns.Count == 0) return;
+            if (row < 0 || row >= table.Rows.Count) return;
+
+            startColumn = Math.Max(0, startColumn);
+            endColumn = Math.Min(table.Columns.Count - 1, endColumn);
+
+            for (int c = startColumn; c <= endColumn; c++)
+            {
+                ApplyTopBorder(table.Cells[row, c]);
+            }
+        }
+
+        private static void ApplyTopBorder(Cell cell)
+        {
+            if (cell == null) return;
+
+            try
+            {
+                var bordersProp = cell.GetType().GetProperty("Borders", BindingFlags.Public | BindingFlags.Instance);
+                var bordersObj = bordersProp?.GetValue(cell, null);
+                if (bordersObj == null) return;
+
+                SetBorderVisible(bordersObj, "Top", true);
             }
             catch
             {
@@ -1244,77 +1491,60 @@ namespace XingManager.Services
             updated = 0;
             if (table == null) return;
 
+            if (!HasLayoutDwgRefContext(layoutContext))
+            {
+                Logger.Debug(_ed, $"table handle={table.ObjectId.Handle} type=PAGE status=skipped reason=no_layout_dwgref");
+                return;
+            }
+
             var columnCount = table.Columns.Count;
             var records = (byKey?.Values ?? Enumerable.Empty<CrossingRecord>())
                 .Where(r => r != null)
                 .ToList();
 
-            var scopedRecords = FilterRecordsByLayoutContext(records, layoutContext);
-            if (scopedRecords.Count == 0)
-                scopedRecords = records;
+            // PAGE tables on XING#/CROSSING# layouts are DWG_REF-driven.
+            var scopedRecords = FilterRecordsForPageTable(records, layoutContext);
+            var topTr = table.Database?.TransactionManager?.TopTransaction as Transaction;
+
+            // On crossing layouts, if a crossing is explicitly listed in a WATER LAT/LONG table
+            // on the same layout, keep it only in that water table (exclude from PAGE table).
+            var waterKeysOnLayout = GetWaterCrossingKeysOnLayout(table, topTr);
+            if (waterKeysOnLayout.Count > 0)
+            {
+                var before = scopedRecords.Count;
+                scopedRecords = scopedRecords
+                    .Where(r =>
+                    {
+                        var key = NormalizeCrossingForMap(r?.Crossing);
+                        return string.IsNullOrEmpty(key) || !waterKeysOnLayout.Contains(key);
+                    })
+                    .ToList();
+
+                var removed = before - scopedRecords.Count;
+                if (removed > 0)
+                {
+                    Logger.Debug(_ed, $"table handle={table.ObjectId.Handle} type=PAGE status=filtered_water duplicates_removed={removed}");
+                }
+            }
 
             var dataStartRow = GetDataStartRow(table, Math.Min(columnCount, 3), IsPageHeader);
             if (dataStartRow < 0) dataStartRow = 0;
+            var bubbleBlockId = ResolvePageBubbleBlockId(table, topTr, dataStartRow);
 
-            var usedScopedKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            var scopedCursor = 0;
+            SyncTableDataRowsToCount(table, dataStartRow, scopedRecords.Count, columnCount, ref updated);
 
-            for (var row = dataStartRow; row < table.Rows.Count; row++)
+            for (var i = 0; i < scopedRecords.Count; i++)
             {
-                var rawKey = ResolveCrossingKey(table, row, 0);
-                var key = NormalizeKeyForLookup(rawKey);
-                var rowOwner = ReadNorm(table, row, 1);
-                var rowDesc = ReadNorm(table, row, 2);
-                var hasRowData = !string.IsNullOrEmpty(key) || !string.IsNullOrEmpty(rowOwner) || !string.IsNullOrEmpty(rowDesc);
-                CrossingRecord record = null;
+                var row = dataStartRow + i;
+                if (row < 0 || row >= table.Rows.Count)
+                    break;
 
-                if (rowIndexMap != null && rowIndexMap.TryGetValue(row, out var rowMapped) && rowMapped != null)
-                {
-                    record = rowMapped;
-                }
-
-                if (record == null && !string.IsNullOrEmpty(key) && byKey != null)
-                {
-                    if (!byKey.TryGetValue(key, out record))
-                    {
-                        record = byKey.Values.FirstOrDefault(r => CrossingRecord.CompareCrossingKeys(r.Crossing, key) == 0);
-                    }
-                }
-
-                if (record != null && layoutContext != null && layoutContext.HasFilters && !RecordMatchesLayoutContext(record, layoutContext))
-                {
-                    record = null;
-                }
-
-                if (record == null && scopedRecords.Count > 0 && hasRowData)
-                {
-                    if (!string.IsNullOrEmpty(key))
-                    {
-                        record = scopedRecords.FirstOrDefault(r =>
-                            CrossingRecord.CompareCrossingKeys(r.Crossing, key) == 0 ||
-                            string.Equals(NormalizeKeyForLookup(r.Crossing), key, StringComparison.OrdinalIgnoreCase));
-                    }
-
-                    if (record == null)
-                    {
-                        record = TakeNextScopedRecord(scopedRecords, usedScopedKeys, ref scopedCursor);
-                    }
-                }
-
+                var record = scopedRecords[i];
                 if (record == null)
-                {
-                    if (hasRowData)
-                    {
-                        Logger.Debug(_ed, $"table handle={table.ObjectId.Handle} row={row} status=no_match key={rawKey}");
-                    }
                     continue;
-                }
 
-                MarkScopedRecordUsed(record, usedScopedKeys);
-
-                var logKey = !string.IsNullOrEmpty(key)
-                    ? key
-                    : (!string.IsNullOrEmpty(rawKey) ? rawKey : (record.Crossing ?? string.Empty));
+                var rawKey = ResolveCrossingKey(table, row, 0);
+                var logKey = !string.IsNullOrEmpty(rawKey) ? rawKey : (record.Crossing ?? string.Empty);
                 matched++;
 
                 var desiredCrossing = (record.Crossing ?? string.Empty).Trim();
@@ -1328,7 +1558,27 @@ namespace XingManager.Services
                 if (columnCount > 2 && ValueDiffers(ReadCellText(table, row, 2), desiredDescription)) rowUpdated = true;
 
                 // Always update the XING bubble even if OWNER/DESCRIPTION already match.
-                if (columnCount > 0) SetCellCrossingValue(table, row, 0, desiredCrossing);
+                if (columnCount > 0)
+                {
+                    var set = false;
+                    if (!bubbleBlockId.IsNull && topTr != null)
+                    {
+                        try
+                        {
+                            set = TrySetCellToBlockWithAttribute(table, row, 0, topTr, bubbleBlockId, desiredCrossing);
+                            if (set)
+                            {
+                                TrySetCellBlockScale(table, row, 0, CrossingBubbleScale);
+                            }
+                        }
+                        catch { set = false; }
+                    }
+
+                    if (!set)
+                    {
+                        SetCellCrossingValue(table, row, 0, desiredCrossing);
+                    }
+                }
 
                 Cell ownerCell = null;
                 if (columnCount > 1) { try { ownerCell = table.Cells[row, 1]; } catch { } SetCellValue(ownerCell, desiredOwner); }
@@ -1340,6 +1590,19 @@ namespace XingManager.Services
                 {
                     updated++;
                     Logger.Debug(_ed, $"table handle={table.ObjectId.Handle} row={row} status=updated key={logKey}");
+                }
+            }
+
+            // Best effort: if we couldn't delete surplus rows, clear any trailing content.
+            for (var row = dataStartRow + scopedRecords.Count; row < table.Rows.Count; row++)
+            {
+                if (!RowHasAnyData(table, row, columnCount))
+                    continue;
+
+                if (TryClearRow(table, row, columnCount))
+                {
+                    updated++;
+                    Logger.Debug(_ed, $"table handle={table.ObjectId.Handle} row={row} status=cleared reason=out_of_scope");
                 }
             }
 
@@ -1362,6 +1625,15 @@ namespace XingManager.Services
             var columnCount = table.Columns.Count;
             var records = byKey?.Values ?? Enumerable.Empty<CrossingRecord>();
             var recordList = records.Where(r => r != null).ToList();
+
+            // On XING#/CROSSING# layouts, LAT/LONG tables are enforced by DWG_REF.
+            if (HasLayoutDwgRefContext(layoutContext))
+            {
+                SyncLatLongTableByDwgRef(table, recordList, layoutContext, out matched, out updated);
+                RefreshTable(table);
+                return;
+            }
+
             var scopedRecords = FilterRecordsByLayoutContext(recordList, layoutContext);
             if (scopedRecords.Count == 0)
                 scopedRecords = recordList;
@@ -1486,6 +1758,462 @@ namespace XingManager.Services
             }
 
             RefreshTable(table);
+        }
+
+        private void SyncLatLongTableByDwgRef(
+            Table table,
+            IList<CrossingRecord> records,
+            TableLayoutContext layoutContext,
+            out int matched,
+            out int updated)
+        {
+            matched = 0;
+            updated = 0;
+            if (table == null)
+                return;
+
+            var columnCount = table.Columns.Count;
+            if (columnCount < 4)
+                return;
+
+            var scopedRecords = FilterRecordsForLatLongTable(records, layoutContext);
+            var dataStart = FindLatLongDataStartRow(table);
+            if (dataStart < 0) dataStart = 0;
+
+            SyncTableDataRowsToCount(table, dataStart, scopedRecords.Count, columnCount, ref updated);
+
+            var hasExtendedLayout = columnCount >= 6;
+            var zoneColumn = hasExtendedLayout ? 2 : -1;
+            var latColumn = hasExtendedLayout ? 3 : 2;
+            var longColumn = hasExtendedLayout ? 4 : 3;
+            var dwgColumn = hasExtendedLayout ? 5 : -1;
+            var remaining = new List<CrossingRecord>(scopedRecords);
+
+            for (var i = 0; i < scopedRecords.Count; i++)
+            {
+                var row = dataStart + i;
+                if (row < 0 || row >= table.Rows.Count)
+                    break;
+
+                var record = TakeNextLatLongRecordForRow(table, row, remaining, latColumn, longColumn);
+                if (record == null)
+                    continue;
+
+                var rawKey = ResolveCrossingKey(table, row, 0);
+                var desiredCrossing = (record.Crossing ?? string.Empty).Trim();
+                var desiredDescription = record.Description ?? string.Empty;
+                var desiredLat = record.Lat ?? string.Empty;
+                var desiredLong = record.Long ?? string.Empty;
+                var desiredZone = record.ZoneLabel ?? string.Empty;
+                var desiredDwg = record.DwgRef ?? string.Empty;
+
+                bool rowUpdated = false;
+
+                if (columnCount > 0 && ValueDiffers(rawKey, desiredCrossing)) rowUpdated = true;
+                if (columnCount > 1 && ValueDiffers(ReadCellText(table, row, 1), desiredDescription)) rowUpdated = true;
+                if (zoneColumn >= 0 && ValueDiffers(ReadCellText(table, row, zoneColumn), desiredZone)) rowUpdated = true;
+                if (latColumn >= 0 && ValueDiffers(ReadCellText(table, row, latColumn), desiredLat)) rowUpdated = true;
+                if (longColumn >= 0 && ValueDiffers(ReadCellText(table, row, longColumn), desiredLong)) rowUpdated = true;
+                if (dwgColumn >= 0 && ValueDiffers(ReadCellText(table, row, dwgColumn), desiredDwg)) rowUpdated = true;
+
+                if (columnCount > 0) SetCellCrossingValue(table, row, 0, desiredCrossing);
+
+                Cell descriptionCell = null;
+                if (columnCount > 1) { try { descriptionCell = table.Cells[row, 1]; } catch { } SetCellValue(descriptionCell, desiredDescription); }
+
+                if (zoneColumn >= 0)
+                {
+                    Cell zoneCell = null;
+                    try { zoneCell = table.Cells[row, zoneColumn]; } catch { }
+                    SetCellValue(zoneCell, desiredZone);
+                }
+
+                if (latColumn >= 0)
+                {
+                    Cell latCell = null;
+                    try { latCell = table.Cells[row, latColumn]; } catch { }
+                    SetCellValue(latCell, desiredLat);
+                }
+
+                if (longColumn >= 0)
+                {
+                    Cell longCell = null;
+                    try { longCell = table.Cells[row, longColumn]; } catch { }
+                    SetCellValue(longCell, desiredLong);
+                }
+
+                if (dwgColumn >= 0)
+                {
+                    Cell dwgCell = null;
+                    try { dwgCell = table.Cells[row, dwgColumn]; } catch { }
+                    SetCellValue(dwgCell, desiredDwg);
+                }
+
+                matched++;
+                if (rowUpdated)
+                {
+                    updated++;
+                    Logger.Debug(_ed, $"table handle={table.ObjectId.Handle} row={row} status=updated key={desiredCrossing}");
+                }
+            }
+
+            // Best effort: if delete failed for surplus rows, clear trailing content.
+            for (var row = dataStart + scopedRecords.Count; row < table.Rows.Count; row++)
+            {
+                if (!RowHasAnyData(table, row, columnCount))
+                    continue;
+
+                if (TryClearRow(table, row, columnCount))
+                {
+                    updated++;
+                    Logger.Debug(_ed, $"table handle={table.ObjectId.Handle} row={row} status=cleared reason=out_of_scope");
+                }
+            }
+        }
+
+        private static void SyncTableDataRowsToCount(
+            Table table,
+            int dataStartRow,
+            int desiredCount,
+            int columnCount,
+            ref int updatedCounter)
+        {
+            if (table == null)
+                return;
+
+            if (dataStartRow < 0) dataStartRow = 0;
+            if (desiredCount < 0) desiredCount = 0;
+
+            var keepFromRow = dataStartRow + desiredCount;
+            for (var row = table.Rows.Count - 1; row >= keepFromRow; row--)
+            {
+                if (TryDeleteSingleRow(table, row))
+                {
+                    updatedCounter++;
+                    continue;
+                }
+
+                if (TryClearRow(table, row, columnCount))
+                {
+                    updatedCounter++;
+                }
+            }
+
+            var currentDataRows = Math.Max(0, table.Rows.Count - dataStartRow);
+            var missing = desiredCount - currentDataRows;
+            if (missing <= 0)
+                return;
+
+            var rowHeight = ResolveDataRowHeight(table, dataStartRow);
+            if (TryInsertRows(table, table.Rows.Count, rowHeight, missing))
+            {
+                updatedCounter += missing;
+            }
+        }
+
+        private static double ResolveDataRowHeight(Table table, int dataStartRow)
+        {
+            if (table == null)
+                return 25.0;
+
+            try
+            {
+                if (dataStartRow >= 0 && dataStartRow < table.Rows.Count)
+                    return table.Rows[dataStartRow].Height;
+            }
+            catch { }
+
+            try
+            {
+                if (table.Rows.Count > 0)
+                    return table.Rows[table.Rows.Count - 1].Height;
+            }
+            catch { }
+
+            return 25.0;
+        }
+
+        private static bool TryInsertRows(Table table, int rowIndex, double rowHeight, int count)
+        {
+            if (table == null || count <= 0)
+                return false;
+
+            try
+            {
+                table.InsertRows(rowIndex, rowHeight, count);
+                return true;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private static bool TryDeleteSingleRow(Table table, int rowIndex)
+        {
+            if (table == null || rowIndex < 0 || rowIndex >= table.Rows.Count)
+                return false;
+
+            try
+            {
+                table.DeleteRows(rowIndex, 1);
+                return true;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private static bool TryClearRow(Table table, int row, int columnCount)
+        {
+            if (table == null || row < 0 || row >= table.Rows.Count)
+                return false;
+
+            var changed = false;
+            var cols = Math.Min(Math.Max(0, columnCount), table.Columns.Count);
+
+            for (var col = 0; col < cols; col++)
+            {
+                var existing = ReadCellText(table, row, col);
+                if (string.IsNullOrWhiteSpace(existing))
+                    continue;
+
+                if (col == 0)
+                {
+                    SetCellCrossingValue(table, row, col, string.Empty);
+                }
+                else
+                {
+                    Cell cell = null;
+                    try { cell = table.Cells[row, col]; } catch { cell = null; }
+                    SetCellValue(cell, string.Empty);
+                }
+
+                changed = true;
+            }
+
+            return changed;
+        }
+
+        private static bool RowHasAnyData(Table table, int row, int columnCount)
+        {
+            if (table == null || row < 0 || row >= table.Rows.Count)
+                return false;
+
+            var cols = Math.Min(Math.Max(0, columnCount), table.Columns.Count);
+            for (var col = 0; col < cols; col++)
+            {
+                if (!string.IsNullOrWhiteSpace(ReadCellText(table, row, col)))
+                    return true;
+            }
+
+            return false;
+        }
+
+        private ObjectId ResolvePageBubbleBlockId(Table table, Transaction tr, int dataStartRow)
+        {
+            if (table == null)
+                return ObjectId.Null;
+
+            var fromTable = TryGetBubbleBlockIdFromTable(table, dataStartRow);
+            if (!fromTable.IsNull)
+                return fromTable;
+
+            if (tr == null || table.Database == null)
+                return ObjectId.Null;
+
+            try
+            {
+                return TryFindPrototypeBubbleBlockIdFromExistingTables(table.Database, tr);
+            }
+            catch
+            {
+                return ObjectId.Null;
+            }
+        }
+
+        private static ObjectId TryGetBubbleBlockIdFromTable(Table table, int dataStartRow)
+        {
+            if (table == null || table.Columns.Count <= 0 || table.Rows.Count <= 0)
+                return ObjectId.Null;
+
+            var start = Math.Max(0, dataStartRow);
+            var end = Math.Min(table.Rows.Count - 1, start + 20);
+
+            for (var row = start; row <= end; row++)
+            {
+                Cell cell = null;
+                try { cell = table.Cells[row, 0]; } catch { cell = null; }
+                if (cell == null) continue;
+
+                foreach (var content in EnumerateCellContentObjects(cell))
+                {
+                    var id = TryGetBlockTableRecordIdFromContent(content);
+                    if (!id.IsNull)
+                        return id;
+                }
+            }
+
+            return ObjectId.Null;
+        }
+
+        private static CrossingRecord TakeNextLatLongRecordForRow(
+            Table table,
+            int row,
+            IList<CrossingRecord> remaining,
+            int latColumn,
+            int longColumn)
+        {
+            if (remaining == null || remaining.Count == 0)
+                return null;
+
+            if (table != null && latColumn >= 0 && longColumn >= 0)
+            {
+                var rowLat = ReadNorm(table, row, latColumn);
+                var rowLong = ReadNorm(table, row, longColumn);
+
+                if (!string.IsNullOrWhiteSpace(rowLat) && !string.IsNullOrWhiteSpace(rowLong))
+                {
+                    for (var i = 0; i < remaining.Count; i++)
+                    {
+                        var candidate = remaining[i];
+                        if (candidate == null) continue;
+
+                        if (CoordinatesEquivalent(candidate.Lat, rowLat) &&
+                            CoordinatesEquivalent(candidate.Long, rowLong))
+                        {
+                            remaining.RemoveAt(i);
+                            return candidate;
+                        }
+                    }
+                }
+            }
+
+            var first = remaining[0];
+            remaining.RemoveAt(0);
+            return first;
+        }
+
+        private HashSet<string> GetWaterCrossingKeysOnLayout(Table pageTable, Transaction tr)
+        {
+            var keys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            if (pageTable == null || tr == null)
+                return keys;
+
+            BlockTableRecord owner = null;
+            try { owner = tr.GetObject(pageTable.OwnerId, OpenMode.ForRead, false) as BlockTableRecord; }
+            catch { owner = null; }
+
+            if (owner == null)
+                return keys;
+
+            foreach (ObjectId entId in owner)
+            {
+                if (entId == pageTable.ObjectId)
+                    continue;
+
+                if (!entId.ObjectClass.DxfName.Equals("ACAD_TABLE", StringComparison.OrdinalIgnoreCase))
+                    continue;
+
+                Table candidate = null;
+                try { candidate = tr.GetObject(entId, OpenMode.ForRead, false) as Table; }
+                catch { candidate = null; }
+                if (candidate == null)
+                    continue;
+
+                XingTableType kind;
+                try { kind = IdentifyTable(candidate, tr); }
+                catch { kind = XingTableType.Unknown; }
+
+                if (kind != XingTableType.LatLong)
+                    continue;
+
+                if (!IsWaterCrossingLatLongTable(candidate))
+                    continue;
+
+                foreach (var key in ExtractCrossingKeysFromLatLongTable(candidate))
+                {
+                    if (!string.IsNullOrWhiteSpace(key))
+                        keys.Add(key);
+                }
+            }
+
+            return keys;
+        }
+
+        private static bool IsWaterCrossingLatLongTable(Table table)
+        {
+            if (table == null || table.Rows.Count == 0 || table.Columns.Count == 0)
+                return false;
+
+            var maxRows = Math.Min(table.Rows.Count, 12);
+            const string waterTitle = "WATERCROSSINGINFORMATION";
+
+            for (var row = 0; row < maxRows; row++)
+            {
+                var text = ReadCellText(table, row, 0);
+                if (string.IsNullOrWhiteSpace(text))
+                    continue;
+
+                var normalized = NormalizeDwgRefForLookup(text);
+                if (normalized.IndexOf(waterTitle, StringComparison.OrdinalIgnoreCase) >= 0)
+                    return true;
+            }
+
+            return false;
+        }
+
+        private static HashSet<string> ExtractCrossingKeysFromLatLongTable(Table table)
+        {
+            var keys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            if (table == null || table.Columns.Count <= 0 || table.Rows.Count <= 0)
+                return keys;
+
+            var columnCount = table.Columns.Count;
+            var dataStart = FindLatLongDataStartRow(table);
+            if (dataStart < 0) dataStart = 0;
+
+            var hasExtendedLayout = columnCount >= 6;
+            var zoneColumn = hasExtendedLayout ? 2 : -1;
+            var latColumn = hasExtendedLayout ? 3 : 2;
+            var longColumn = hasExtendedLayout ? 4 : 3;
+            var dwgColumn = hasExtendedLayout ? 5 : -1;
+
+            for (var row = dataStart; row < table.Rows.Count; row++)
+            {
+                if (IsLatLongSectionHeaderRow(table, row, zoneColumn, latColumn, longColumn, dwgColumn) ||
+                    IsLatLongColumnHeaderRow(table, row))
+                {
+                    continue;
+                }
+
+                var raw = ResolveCrossingKey(table, row, 0);
+                var normalized = NormalizeCrossingForMap(raw);
+                if (string.IsNullOrWhiteSpace(normalized))
+                    continue;
+
+                if (!Regex.IsMatch(normalized, @"^X0*\d+$"))
+                    continue;
+
+                keys.Add(normalized);
+            }
+
+            return keys;
+        }
+
+        private static bool TableContainsAnyCrossingKeys(Table table, ISet<string> keys)
+        {
+            if (table == null || keys == null || keys.Count == 0)
+                return false;
+
+            foreach (var key in ExtractCrossingKeysFromLatLongTable(table))
+            {
+                if (!string.IsNullOrWhiteSpace(key) && keys.Contains(key))
+                    return true;
+            }
+
+            return false;
         }
 
         private static bool IsLatLongSectionHeaderRow(
@@ -1704,6 +2432,30 @@ namespace XingManager.Services
                 .ToList();
         }
 
+        private static List<CrossingRecord> FilterRecordsForPageTable(
+            IEnumerable<CrossingRecord> records,
+            TableLayoutContext context)
+        {
+            return (records ?? Enumerable.Empty<CrossingRecord>())
+                .Where(r => RecordMatchesLayoutDwgRef(r, context))
+                .Where(r => !IsWaterCoordinateCrossingForPage(r))
+                .OrderBy(r => r, Comparer<CrossingRecord>.Create(CrossingRecord.CompareByCrossing))
+                .ToList();
+        }
+
+        private static List<CrossingRecord> FilterRecordsForLatLongTable(
+            IEnumerable<CrossingRecord> records,
+            TableLayoutContext context)
+        {
+            return (records ?? Enumerable.Empty<CrossingRecord>())
+                .Where(r => RecordMatchesLayoutDwgRef(r, context))
+                .Where(r =>
+                    !string.IsNullOrWhiteSpace(r?.Lat) &&
+                    !string.IsNullOrWhiteSpace(r?.Long))
+                .OrderBy(r => r, Comparer<CrossingRecord>.Create(CrossingRecord.CompareByCrossing))
+                .ToList();
+        }
+
         private static bool RecordMatchesLayoutContext(CrossingRecord record, TableLayoutContext context)
         {
             if (record == null)
@@ -1741,6 +2493,41 @@ namespace XingManager.Services
             }
 
             return true;
+        }
+
+        private static bool HasLayoutDwgRefContext(TableLayoutContext context)
+        {
+            return context != null && !string.IsNullOrWhiteSpace(context.DwgRef);
+        }
+
+        private static bool RecordMatchesLayoutDwgRef(CrossingRecord record, TableLayoutContext context)
+        {
+            if (record == null)
+                return false;
+
+            // "-" / blank DWG_REF means this crossing is intentionally excluded from page tables.
+            if (IsPlaceholderDwgRef(record.DwgRef))
+                return false;
+
+            if (!HasLayoutDwgRefContext(context))
+                return false;
+
+            var recordDwg = NormalizeDwgRefForLookup(record.DwgRef);
+            if (string.IsNullOrWhiteSpace(recordDwg))
+                return false;
+
+            if (string.Equals(recordDwg, context.DwgRef, StringComparison.OrdinalIgnoreCase))
+                return true;
+
+            var suffixMatch = LayoutCloneSuffixRegex.Match(context.DwgRef);
+            if (!suffixMatch.Success)
+                return false;
+
+            var baseRef = NormalizeDwgRefForLookup(suffixMatch.Groups["base"]?.Value);
+            if (string.IsNullOrWhiteSpace(baseRef))
+                return false;
+
+            return string.Equals(recordDwg, baseRef, StringComparison.OrdinalIgnoreCase);
         }
 
         private static IEnumerable<string> ExtractLocationKeys(string text)
@@ -1811,6 +2598,19 @@ namespace XingManager.Services
             }
 
             return builder.ToString();
+        }
+
+        private static bool IsPlaceholderDwgRef(string value)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+                return true;
+
+            var trimmed = value.Trim();
+            trimmed = trimmed.Replace("\u2014", "-").Replace("\u2013", "-");
+            trimmed = trimmed.Replace("Ã¢â‚¬â€", "-").Replace("Ã¢â‚¬â€œ", "-");
+            trimmed = trimmed.Replace("ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â", "-").Replace("ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Å“", "-");
+
+            return string.Equals(trimmed, "-", StringComparison.Ordinal);
         }
 
         private static CrossingRecord TakeNextScopedRecord(
@@ -1935,6 +2735,24 @@ namespace XingManager.Services
             var id = tst.Add(rec);
             tr.AddNewlyCreatedDBObject(rec, true);
             return id;
+        }
+
+        private static ObjectId GetPreferredRegularTextStyle(Database db, Transaction tr, string preferredStyleName)
+        {
+            if (db == null || tr == null)
+                return ObjectId.Null;
+
+            var tst = (TextStyleTable)tr.GetObject(db.TextStyleTableId, OpenMode.ForRead);
+            if (!string.IsNullOrWhiteSpace(preferredStyleName) && tst.Has(preferredStyleName))
+                return tst[preferredStyleName];
+
+            if (!db.Textstyle.IsNull)
+                return db.Textstyle;
+
+            foreach (ObjectId id in tst)
+                return id;
+
+            return ObjectId.Null;
         }
 
         private static bool IsCoordinateValue(string text, double min, double max)
@@ -2294,7 +3112,7 @@ namespace XingManager.Services
 
         // Put a block in a cell and set its attribute value to e.g. "X1" (supports multiple API versions)
         // Put a block in a cell and set its attribute to e.g. "X1".
-        // Ensures autoscale is OFF and final scale == 1.0
+        // Ensures autoscale is OFF and final scale == CrossingBubbleScale.
         private static bool TrySetCellToBlockWithAttribute(
             Table table, int row, int col, Transaction tr, ObjectId btrId, string xValue)
         {
@@ -2318,8 +3136,9 @@ namespace XingManager.Services
 
             if (placed)
             {
-                // Force scale to 1 after placement (tableâ€‘level API if available, else perâ€‘content)
-                TrySetCellBlockScale(table, row, col, 1.0);
+                // Force configured bubble scale after placement (table-level API if available, else per-content)
+                TrySetCellBlockScale(table, row, col, CrossingBubbleScale);
+                TrySetCellMiddleCenter(cell);
             }
 
             return placed;
@@ -2742,6 +3561,10 @@ namespace XingManager.Services
         {
             if (t == null) return;
 
+            Cell cell = null;
+            try { cell = t.Cells[row, col]; } catch { cell = null; }
+            TrySetCellMiddleCenter(cell);
+
             // 1) Try to set the block attribute by any of our known tags
             foreach (var tag in CrossingAttributeTags)
             {
@@ -2750,8 +3573,6 @@ namespace XingManager.Services
             }
 
             // 2) If the cell currently hosts a block, do NOT overwrite it with text.
-            Cell cell = null;
-            try { cell = t.Cells[row, col]; } catch { cell = null; }
             if (CellHasBlockContent(cell))
             {
                 if (TrySetBlockAttributeValueOnContent(t, cell, crossingText)) return;
@@ -2846,6 +3667,7 @@ namespace XingManager.Services
             if (cell == null) return;
 
             var desired = value ?? string.Empty;
+            TrySetCellMiddleCenter(cell);
 
             try
             {
@@ -2861,6 +3683,21 @@ namespace XingManager.Services
                 {
                     // best effort: ignore assignment failures
                 }
+            }
+        }
+
+        private static void TrySetCellMiddleCenter(Cell cell)
+        {
+            if (cell == null)
+                return;
+
+            try
+            {
+                cell.Alignment = CellAlignment.MiddleCenter;
+            }
+            catch
+            {
+                // best effort: some styles/cells may reject alignment writes
             }
         }
 
@@ -2939,7 +3776,7 @@ namespace XingManager.Services
         }
 
         private static string ReadNorm(Table t, int row, int col) => Norm(ReadCellText(t, row, col));
-        // Try to set the scale of a block hosted in a table cell to a specific value (e.g., 1.0)
+        // Try to set the scale of a block hosted in a table cell to a specific value (e.g., 0.980)
         private static bool TrySetCellBlockScale(Table table, int row, int col, double scale)
         {
             if (table == null) return false;

@@ -74,6 +74,34 @@ namespace XingManager
             ActivatePalette();
         }
 
+        internal void CleanupGhostLayouts()
+        {
+            var doc = Application.DocumentManager.MdiActiveDocument;
+            if (doc == null)
+            {
+                return;
+            }
+
+            try
+            {
+                int removed;
+                using (doc.LockDocument())
+                {
+                    removed = _layoutUtils.RemoveOrphanPaperSpaceBlocks(doc);
+                }
+
+                var message = removed > 0
+                    ? $"Removed {removed} orphan layout records. Save and reopen the drawing."
+                    : "No orphan layout records found.";
+
+                doc.Editor?.WriteMessage(Environment.NewLine + message);
+            }
+            catch (System.Exception ex)
+            {
+                doc.Editor?.WriteMessage(Environment.NewLine + "XINGCLEANLAYOUTS failed: " + ex.Message);
+            }
+        }
+
         internal XingForm GetOrCreateForm()
         {
             var doc = Application.DocumentManager.MdiActiveDocument;
@@ -154,4 +182,3 @@ namespace XingManager
         }
     }
 }
-
